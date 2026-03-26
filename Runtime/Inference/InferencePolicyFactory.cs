@@ -38,19 +38,33 @@ public static class InferencePolicyFactory
         if (_customFactories.TryGetValue(checkpoint.Algorithm, out var customFactory))
             return customFactory(checkpoint, graph);
 
-        return string.Equals(checkpoint.Algorithm, RLCheckpoint.SacAlgorithm, StringComparison.OrdinalIgnoreCase)
-            ? new SacInferencePolicy(
-                checkpoint.ObservationSize,
+        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.SacAlgorithm, StringComparison.OrdinalIgnoreCase))
+        {
+            return new SacInferencePolicy(
+                checkpoint.ObsSpec?.TotalSize ?? checkpoint.ObservationSize,
                 checkpoint.ContinuousActionDimensions > 0
                     ? checkpoint.ContinuousActionDimensions
                     : checkpoint.DiscreteActionCount,
                 checkpoint.ContinuousActionDimensions > 0,
-                graph)
-            : new PpoInferencePolicy(
-                checkpoint.ObservationSize,
+                graph);
+        }
+
+        // PPO: use spec-aware constructor when the checkpoint has a multi-stream or image spec.
+        if (checkpoint.ObsSpec is { } spec &&
+            (spec.Streams.Count > 1 || spec.Streams[0].Kind == ObservationStreamKind.Image))
+        {
+            return new PpoInferencePolicyMultiStream(
+                spec,
                 checkpoint.DiscreteActionCount,
                 checkpoint.ContinuousActionDimensions,
                 graph);
+        }
+
+        return new PpoInferencePolicy(
+            checkpoint.ObservationSize,
+            checkpoint.DiscreteActionCount,
+            checkpoint.ContinuousActionDimensions,
+            graph);
     }
 
     /// <summary>

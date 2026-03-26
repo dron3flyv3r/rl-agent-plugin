@@ -12,12 +12,19 @@ internal sealed class PolicyValueNetwork
     private readonly DenseLayer _valueHead;
     private readonly int _continuousActionDims;
 
+    // ── Multi-stream support ──────────────────────────────────────────────────
+    // Non-null when constructed with an ObservationSpec that has >1 streams or
+    // contains Image streams. In that case Infer() routes input through per-stream
+    // encoders first, then concatenates embeddings before the shared trunk.
+    private readonly StreamEncoder[]? _streamEncoders;
+    private readonly ObservationSpec? _observationSpec;
+
     /// <summary>Discrete-action constructor (existing behaviour).</summary>
     public PolicyValueNetwork(int observationSize, int actionCount, RLNetworkGraph graph)
         : this(observationSize, actionCount, 0, graph) { }
 
     /// <summary>
-    /// Unified constructor.
+    /// Unified constructor (flat observation, legacy path).
     /// Pass <paramref name="continuousActionDims"/> &gt; 0 for a continuous Gaussian policy
     /// (policy head outputs [mean_0..D-1, logStd_0..D-1]).
     /// Pass <paramref name="actionCount"/> &gt; 0 for a discrete softmax policy.
@@ -28,8 +35,74 @@ internal sealed class PolicyValueNetwork
         _continuousActionDims = continuousActionDims;
         _trunkLayers = graph.BuildTrunkLayers(observationSize);
         var lastSize = graph.OutputSize(observationSize);
-        // Continuous: [mean_0..D-1, logStd_0..D-1] = 2*D outputs
-        // Discrete:   actionCount logits
+        var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
+        _policyHead = new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
+        _valueHead  = new DenseLayer(lastSize, 1,             null, graph.Optimizer);
+    }
+
+    /// <summary>
+    /// Multi-stream constructor. Builds per-stream encoders based on
+    /// <paramref name="spec"/> and the <see cref="RLStreamEncoderConfig"/> entries
+    /// in <paramref name="graph"/>, then merges all embeddings before the shared trunk.
+    /// Agents that only used legacy <c>buffer.Add()</c> produce a single-stream flat spec
+    /// and fall back to the original single-trunk path transparently.
+    /// </summary>
+    public PolicyValueNetwork(ObservationSpec spec, int actionCount, int continuousActionDims, RLNetworkGraph graph)
+    {
+        _continuousActionDims = continuousActionDims;
+        _observationSpec = spec;
+
+        // Build per-stream encoders and compute merged embedding size.
+        var encoders = new StreamEncoder[spec.Streams.Count];
+        var mergedSize = 0;
+        for (var i = 0; i < spec.Streams.Count; i++)
+        {
+            var stream = spec.Streams[i];
+            var streamCfg = graph.FindStreamEncoder(stream.Name);
+
+            CnnEncoder? cnn = null;
+            NetworkLayer[]? vectorLayers = null;
+            int encoderOutputSize;
+
+            if (stream.Kind == ObservationStreamKind.Image)
+            {
+                var cnnDef = streamCfg?.CnnEncoder ?? new RLCnnEncoderDef();
+                cnn = new CnnEncoder(stream.Width, stream.Height, stream.Channels, cnnDef);
+                var cnnOut = cnn.OutputSize;
+                // Optional per-stream vector encoder after CNN projection.
+                if (streamCfg?.VectorEncoder is { } vecGraph && vecGraph.TrunkLayers.Count > 0)
+                {
+                    vectorLayers = vecGraph.BuildTrunkLayers(cnnOut, graph.Optimizer);
+                    encoderOutputSize = vecGraph.OutputSize(cnnOut);
+                }
+                else
+                {
+                    encoderOutputSize = cnnOut;
+                }
+            }
+            else
+            {
+                // Vector stream: optional per-stream MLP, otherwise pass-through.
+                if (streamCfg?.VectorEncoder is { } vecGraph && vecGraph.TrunkLayers.Count > 0)
+                {
+                    vectorLayers = vecGraph.BuildTrunkLayers(stream.FlatSize, graph.Optimizer);
+                    encoderOutputSize = vecGraph.OutputSize(stream.FlatSize);
+                }
+                else
+                {
+                    encoderOutputSize = stream.FlatSize;
+                }
+            }
+
+            encoders[i]  = new StreamEncoder(i, stream, cnn, vectorLayers, encoderOutputSize);
+            mergedSize  += encoderOutputSize;
+        }
+
+        _streamEncoders = encoders;
+
+        // Shared trunk and heads take the concatenated embedding as input.
+        _trunkLayers = graph.BuildTrunkLayers(mergedSize);
+        var lastSize      = graph.OutputSize(mergedSize);
         var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
         _policyHead = new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
         _valueHead  = new DenseLayer(lastSize, 1,             null, graph.Optimizer);
@@ -37,7 +110,7 @@ internal sealed class PolicyValueNetwork
 
     public NetworkInference Infer(float[] observation)
     {
-        var x = observation;
+        var x = _streamEncoders is not null ? EncodeStreams(observation) : observation;
         foreach (var layer in _trunkLayers)
             x = layer.Forward(x);
 
@@ -45,6 +118,48 @@ internal sealed class PolicyValueNetwork
         var value  = _valueHead.Forward(x);
 
         return new NetworkInference { Logits = logits, Value = value[0] };
+    }
+
+    /// <summary>Routes a flat observation through per-stream encoders and concatenates embeddings.</summary>
+    private float[] EncodeStreams(float[] observation)
+    {
+        var encoders = _streamEncoders!;
+        var spec     = _observationSpec!;
+        var mergedSize = 0;
+        foreach (var enc in encoders) mergedSize += enc.OutputSize;
+
+        var merged  = new float[mergedSize];
+        var offset  = 0; // offset into the flat observation
+        var outIdx  = 0; // offset into merged embedding
+
+        for (var i = 0; i < encoders.Length; i++)
+        {
+            var enc    = encoders[i];
+            var stream = spec.Streams[i];
+            var slice  = observation.AsSpan(offset, stream.FlatSize).ToArray();
+            offset += stream.FlatSize;
+
+            float[] embedding;
+            if (enc.Cnn is not null)
+            {
+                embedding = enc.Cnn.Forward(slice);
+            }
+            else
+            {
+                embedding = slice;
+            }
+
+            if (enc.VectorLayers is not null)
+            {
+                foreach (var layer in enc.VectorLayers)
+                    embedding = layer.Forward(embedding);
+            }
+
+            Array.Copy(embedding, 0, merged, outIdx, embedding.Length);
+            outIdx += enc.OutputSize;
+        }
+
+        return merged;
     }
 
     public BatchNetworkInference InferBatch(VectorBatch observations)
@@ -70,6 +185,21 @@ internal sealed class PolicyValueNetwork
         var trunkGradients = new GradientBuffer[_trunkLayers.Length];
         for (var i = 0; i < _trunkLayers.Length; i++)
             trunkGradients[i] = _trunkLayers[i].CreateGradientBuffer();
+
+        // Create fresh gradient buffers for stream encoders.
+        CnnGradientBuffer[]?    cnnGrads      = null;
+        GradientBuffer[][]?     vecLayerGrads = null;
+        if (_streamEncoders is not null)
+        {
+            cnnGrads      = new CnnGradientBuffer[_streamEncoders.Length];
+            vecLayerGrads = new GradientBuffer[_streamEncoders.Length][];
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                if (_streamEncoders[ei].Cnn is not null)
+                    cnnGrads[ei] = _streamEncoders[ei].Cnn!.CreateGradientBuffer();
+                vecLayerGrads[ei] = _streamEncoders[ei].CreateVectorGradBuffers() ?? System.Array.Empty<GradientBuffer>();
+            }
+        }
 
         var policyGradients = _policyHead.CreateGradientBuffer();
         var valueGradients  = _valueHead.CreateGradientBuffer();
@@ -211,10 +341,39 @@ internal sealed class PolicyValueNetwork
 
             for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
                 trunkGradient = _trunkLayers[layerIndex].AccumulateGradients(trunkGradient, trunkGradients[layerIndex]);
+
+            // Backprop into per-stream encoders if present.
+            if (_streamEncoders is not null)
+            {
+                var outIdx = 0;
+                for (var ei = 0; ei < _streamEncoders.Length; ei++)
+                {
+                    var enc     = _streamEncoders[ei];
+                    var encSize = enc.OutputSize;
+                    var encGrad = trunkGradient.AsSpan(outIdx, encSize).ToArray();
+                    outIdx += encSize;
+
+                    // Backprop through per-stream vector layers (in reverse).
+                    if (enc.VectorLayers is not null)
+                    {
+                        for (var li = enc.VectorLayers.Length - 1; li >= 0; li--)
+                            encGrad = enc.VectorLayers[li].AccumulateGradients(encGrad, vecLayerGrads![ei][li]);
+                    }
+
+                    if (enc.Cnn is not null)
+                        enc.Cnn.AccumulateGradients(encGrad, cnnGrads![ei]);
+                }
+            }
         }
 
         var globalNormSquared = policyGradients.SumSquares() + valueGradients.SumSquares();
         foreach (var g in trunkGradients) globalNormSquared += g.SumSquares();
+
+        // Include CNN/stream grad norms for global clip.
+        if (cnnGrads is not null && _streamEncoders is not null)
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+                if (_streamEncoders[ei].Cnn is not null)
+                    globalNormSquared += _streamEncoders[ei].Cnn!.GradNormSquared(cnnGrads[ei]);
 
         var gradientScale = 1f / samples.Count;
         if (config.MaxGradientNorm > 0f)
@@ -229,6 +388,20 @@ internal sealed class PolicyValueNetwork
         for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
             _trunkLayers[layerIndex].ApplyGradients(trunkGradients[layerIndex], config.LearningRate, gradientScale);
 
+        // Apply stream encoder gradients.
+        if (cnnGrads is not null && _streamEncoders is not null)
+        {
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                var enc = _streamEncoders[ei];
+                if (enc.Cnn is not null)
+                    enc.Cnn.ApplyGradients(cnnGrads[ei], config.LearningRate, gradientScale);
+                if (enc.VectorLayers is not null)
+                    for (var li = 0; li < enc.VectorLayers.Length; li++)
+                        enc.VectorLayers[li].ApplyGradients(vecLayerGrads![ei][li], config.LearningRate, gradientScale);
+            }
+        }
+
         return new PpoBatchUpdateStats
         {
             PolicyLoss    = totalPolicyLoss / samples.Count,
@@ -242,6 +415,23 @@ internal sealed class PolicyValueNetwork
     {
         var weights = new List<float>();
         var shapes  = new List<int>();
+
+        if (_streamEncoders is not null)
+        {
+            shapes.Add(1); // marker: multi-stream checkpoint
+            foreach (var enc in _streamEncoders)
+            {
+                enc.Cnn?.AppendSerialized(weights, shapes);
+                if (enc.VectorLayers is not null)
+                    foreach (var layer in enc.VectorLayers)
+                        layer.AppendSerialized(weights, shapes);
+            }
+        }
+        else
+        {
+            shapes.Add(0); // marker: flat checkpoint
+        }
+
         foreach (var layer in _trunkLayers) layer.AppendSerialized(weights, shapes);
         _policyHead.AppendSerialized(weights, shapes);
         _valueHead.AppendSerialized(weights, shapes);
@@ -260,6 +450,10 @@ internal sealed class PolicyValueNetwork
     /// <summary>Copies weights from this network into <paramref name="other"/> (same architecture required).</summary>
     internal void CopyWeightsTo(PolicyValueNetwork other)
     {
+        if (_streamEncoders is not null && other._streamEncoders is not null)
+            for (var i = 0; i < _streamEncoders.Length; i++)
+                _streamEncoders[i].CopyWeightsTo(other._streamEncoders[i]);
+
         for (var i = 0; i < _trunkLayers.Length; i++)
             other._trunkLayers[i].CopyFrom(_trunkLayers[i]);
         other._policyHead.CopyFrom(_policyHead);
@@ -269,6 +463,10 @@ internal sealed class PolicyValueNetwork
     /// <summary>Overwrites this network's weights from <paramref name="other"/> (same architecture required).</summary>
     internal void LoadWeightsFrom(PolicyValueNetwork other)
     {
+        if (other._streamEncoders is not null && _streamEncoders is not null)
+            for (var i = 0; i < _streamEncoders.Length; i++)
+                other._streamEncoders[i].CopyWeightsTo(_streamEncoders[i]);
+
         for (var i = 0; i < _trunkLayers.Length; i++)
             _trunkLayers[i].CopyFrom(other._trunkLayers[i]);
         _policyHead.CopyFrom(other._policyHead);
@@ -280,6 +478,28 @@ internal sealed class PolicyValueNetwork
         var wi       = 0;
         var si       = 0;
         var isLegacy = checkpoint.FormatVersion < RLCheckpoint.CurrentFormatVersion;
+
+        // Read multi-stream marker (only present in format version 6+).
+        var hasStreamEncoders = false;
+        if (!isLegacy && checkpoint.LayerShapeBuffer.Length > 0)
+        {
+            hasStreamEncoders = checkpoint.LayerShapeBuffer[si++] == 1;
+        }
+
+        if (hasStreamEncoders && _streamEncoders is not null)
+        {
+            foreach (var enc in _streamEncoders)
+            {
+                enc.Cnn?.LoadSerialized(checkpoint.WeightBuffer, ref wi, checkpoint.LayerShapeBuffer, ref si);
+                if (enc.VectorLayers is not null)
+                    foreach (var layer in enc.VectorLayers)
+                        layer.LoadSerialized(checkpoint.WeightBuffer, ref wi, checkpoint.LayerShapeBuffer, ref si, isLegacy);
+            }
+        }
+        else if (!isLegacy)
+        {
+            // flat checkpoint — skip the marker we already read
+        }
 
         foreach (var layer in _trunkLayers)
             layer.LoadSerialized(checkpoint.WeightBuffer, ref wi, checkpoint.LayerShapeBuffer, ref si, isLegacy);
@@ -361,6 +581,44 @@ internal sealed class PolicyValueNetwork
             expValues[index] /= total;
 
         return expValues;
+    }
+
+    // ── StreamEncoder helper ─────────────────────────────────────────────────
+
+    private sealed class StreamEncoder
+    {
+        public readonly int                StreamIndex;
+        public readonly ObservationStreamSpec Stream;
+        public readonly CnnEncoder?        Cnn;
+        public readonly NetworkLayer[]?    VectorLayers;
+        public readonly int                OutputSize;
+
+        public StreamEncoder(
+            int index,
+            ObservationStreamSpec stream,
+            CnnEncoder? cnn,
+            NetworkLayer[]? vectorLayers,
+            int outputSize)
+        {
+            StreamIndex  = index;
+            Stream       = stream;
+            Cnn          = cnn;
+            VectorLayers = vectorLayers;
+            OutputSize   = outputSize;
+        }
+
+        public GradientBuffer[]? CreateVectorGradBuffers() =>
+            VectorLayers is not null
+                ? System.Array.ConvertAll(VectorLayers, l => l.CreateGradientBuffer())
+                : null;
+
+        public void CopyWeightsTo(StreamEncoder other)
+        {
+            Cnn?.CopyWeightsTo(other.Cnn!);
+            if (VectorLayers is not null && other.VectorLayers is not null)
+                for (var i = 0; i < VectorLayers.Length; i++)
+                    other.VectorLayers[i].CopyFrom(VectorLayers[i]);
+        }
     }
 
     internal sealed class NetworkInference

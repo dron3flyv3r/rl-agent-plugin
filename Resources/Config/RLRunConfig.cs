@@ -91,4 +91,13 @@ public partial class RLRunConfig : Resource
     /// </summary>
     [Export(PropertyHint.ResourceType, nameof(RLStoppingConfig))]
     public RLStoppingConfig? StoppingConditions { get; set; }
+
+    /// <summary>
+    /// Optional periodic evaluation config. When set, the training loop runs greedy
+    /// evaluation episodes every <see cref="RLEvaluationConfig.EvaluationFrequencySteps"/>
+    /// steps and logs <c>eval_mean_reward</c> separately from training reward.
+    /// When null, no evaluation runs are performed.
+    /// </summary>
+    [Export(PropertyHint.ResourceType, nameof(RLEvaluationConfig))]
+    public RLEvaluationConfig? Evaluation { get; set; }
 }

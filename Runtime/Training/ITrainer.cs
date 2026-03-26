@@ -65,6 +65,12 @@ public sealed class PolicyGroupConfig
     public int ObservationSize { get; init; }
     public int DiscreteActionCount { get; init; }
     public int ContinuousActionDimensions { get; init; }
+    /// <summary>
+    /// Multi-stream observation spec. When non-null, trainers use the spec-aware
+    /// <see cref="PolicyValueNetwork"/> constructor instead of the flat int path.
+    /// Null means legacy flat observations.
+    /// </summary>
+    public ObservationSpec? ObsSpec { get; init; }
     public string CheckpointPath { get; init; } = string.Empty;
     public string MetricsPath { get; init; } = string.Empty;
 }
@@ -121,4 +127,12 @@ public interface ITrainer
     void RecordTransition(Transition transition);
     TrainerUpdateStats? TryUpdate(string groupId, long totalSteps, long episodeCount);
     RLCheckpoint CreateCheckpoint(string groupId, long totalSteps, long episodeCount, long updateCount);
+
+    /// <summary>
+    /// Returns a greedy/deterministic inference policy backed by a weight snapshot of the
+    /// current network. The returned policy is fully independent of the trainer — safe to
+    /// use from the main thread while training continues.
+    /// No optimizer state, replay buffer, or rollout buffer is touched.
+    /// </summary>
+    IInferencePolicy SnapshotPolicyForEval();
 }

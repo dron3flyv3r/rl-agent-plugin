@@ -148,6 +148,51 @@ public sealed class RunMetricsWriter
         file.StoreLine(Json.Stringify(payload));
     }
 
+    /// <summary>
+    /// Appends a greedy-evaluation result line to the metrics file.
+    /// The line is tagged with <c>"is_eval": true</c> so the dashboard can separate it
+    /// from training metrics. The <c>"episode_reward"</c> field is also set to
+    /// <paramref name="meanReward"/> for compatibility with existing reward chart rendering.
+    /// </summary>
+    public void AppendEvalMetric(
+        float meanReward,
+        float meanEpisodeLength,
+        long totalSteps,
+        long episodeCount,
+        int evalEpisodes,
+        string policyGroup = "")
+    {
+        EnsureFileDirectory(_metricsPath);
+        var mode = FileAccess.FileExists(_metricsPath)
+            ? FileAccess.ModeFlags.ReadWrite
+            : FileAccess.ModeFlags.Write;
+        using var file = FileAccess.Open(_metricsPath, mode);
+        if (file is null)
+        {
+            GD.PushError($"[RL] Failed to open metrics file '{_metricsPath}' for eval metric: {FileAccess.GetOpenError()}");
+            return;
+        }
+
+        if (mode == FileAccess.ModeFlags.ReadWrite)
+            file.SeekEnd();
+
+        var payload = new Godot.Collections.Dictionary
+        {
+            { "is_eval",           true             },
+            { "episode_reward",    meanReward       },
+            { "eval_mean_reward",  meanReward       },
+            { "eval_mean_length",  meanEpisodeLength },
+            { "eval_episodes",     evalEpisodes     },
+            { "total_steps",       totalSteps       },
+            { "episode_count",     episodeCount     },
+        };
+
+        if (!string.IsNullOrWhiteSpace(policyGroup))
+            payload["policy_group"] = policyGroup;
+
+        file.StoreLine(Json.Stringify(payload));
+    }
+
     private static void EnsureFileDirectory(string filePath)
     {
         var dir = filePath.GetBaseDir();

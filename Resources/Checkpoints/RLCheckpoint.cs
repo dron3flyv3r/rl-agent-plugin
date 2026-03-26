@@ -10,7 +10,7 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLCheckpoint : Resource
 {
-    public const int CurrentFormatVersion = 5;
+    public const int CurrentFormatVersion = 6;
     public const string ZipExtension      = ".rlcheckpoint";
     public const string PpoAlgorithm = "PPO";
     public const string SacAlgorithm = "SAC";
@@ -29,6 +29,11 @@ public partial class RLCheckpoint : Resource
     [Export] public int[] LayerShapeBuffer { get; set; } = Array.Empty<int>();
 
     public List<RLCheckpointLayer> NetworkLayers { get; set; } = new();
+    /// <summary>
+    /// Multi-stream observation spec. Null for legacy flat-vector checkpoints.
+    /// Reconstructed from the "obs_spec" field in the checkpoint metadata (format v6+).
+    /// </summary>
+    public ObservationSpec? ObsSpec { get; set; }
     public string NetworkOptimizer { get; set; } = "adam";
     public Dictionary<string, string[]> DiscreteActionLabels { get; set; } = new(StringComparer.Ordinal);
     public Dictionary<string, RLContinuousActionRange> ContinuousActionRanges { get; set; } = new(StringComparer.Ordinal);
@@ -502,7 +507,7 @@ public partial class RLCheckpoint : Resource
         var hyperparams = new Godot.Collections.Dictionary();
         foreach (var (key, value) in Hyperparams) hyperparams[key] = value;
 
-        return new Godot.Collections.Dictionary
+        var meta = new Godot.Collections.Dictionary
         {
             { "algorithm",       Algorithm       },
             { "obs_size",        ObservationSize },
@@ -511,6 +516,27 @@ public partial class RLCheckpoint : Resource
             { "action_space",    actionSpaceDict },
             { "hyperparams",     hyperparams     },
         };
+
+        // Serialize multi-stream obs spec (format v6+).
+        if (ObsSpec is not null)
+        {
+            var specArray = new Godot.Collections.Array();
+            foreach (var stream in ObsSpec.Streams)
+            {
+                specArray.Add(new Godot.Collections.Dictionary
+                {
+                    { "name",      stream.Name                   },
+                    { "kind",      (int)stream.Kind              },
+                    { "flat_size", stream.FlatSize               },
+                    { "width",     stream.Width                  },
+                    { "height",    stream.Height                 },
+                    { "channels",  stream.Channels               },
+                });
+            }
+            meta["obs_spec"] = specArray;
+        }
+
+        return meta;
     }
 
     internal void ApplyMetadataDictionary(Godot.Collections.Dictionary metadata)
@@ -629,6 +655,29 @@ public partial class RLCheckpoint : Resource
         {
             foreach (var key in metadata["hyperparams"].AsGodotDictionary().Keys)
                 Hyperparams[key.AsString()] = metadata["hyperparams"].AsGodotDictionary()[key].AsSingle();
+        }
+
+        // ── Observation spec (v6+) ────────────────────────────────────────────
+        ObsSpec = null;
+        if (metadata.ContainsKey("obs_spec") && metadata["obs_spec"].VariantType == Variant.Type.Array)
+        {
+            var specArr = metadata["obs_spec"].AsGodotArray();
+            var streams = new ObservationStreamSpec[specArr.Count];
+            var valid = true;
+            for (var i = 0; i < specArr.Count; i++)
+            {
+                if (specArr[i].VariantType != Variant.Type.Dictionary) { valid = false; break; }
+                var d = specArr[i].AsGodotDictionary();
+                streams[i] = new ObservationStreamSpec(
+                    d.ContainsKey("name")      ? d["name"].AsString()             : $"stream_{i}",
+                    d.ContainsKey("kind")      ? (ObservationStreamKind)(int)d["kind"].AsInt64() : ObservationStreamKind.Vector,
+                    d.ContainsKey("flat_size") ? (int)d["flat_size"].AsInt64()    : ObservationSize,
+                    d.ContainsKey("width")     ? (int)d["width"].AsInt64()        : 0,
+                    d.ContainsKey("height")    ? (int)d["height"].AsInt64()       : 0,
+                    d.ContainsKey("channels")  ? (int)d["channels"].AsInt64()     : 0);
+            }
+            if (valid && streams.Length > 0)
+                ObsSpec = new ObservationSpec(streams);
         }
     }
 

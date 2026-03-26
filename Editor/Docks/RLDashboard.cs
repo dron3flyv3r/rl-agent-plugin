@@ -33,6 +33,10 @@ public partial class RLDashboard : Control
         public float? LearnerElo;
         public float? PoolWinRate;
         public float? CurriculumProgress;
+        // Evaluation rollout fields
+        public bool   IsEval;
+        public float  EvalMeanReward;
+        public int    EvalEpisodes;
     }
 
     private sealed class RunStatus
@@ -70,6 +74,7 @@ public partial class RLDashboard : Control
     private Label?          _statusLabel;
     private Label?          _statAvgReward;
     private Label?          _statBestReward;
+    private Label?          _statEvalReward;
     private Label?          _statTotalSteps;
     private Label?          _statEpisodes;
     private LineChartPanel? _rewardChart;
@@ -382,6 +387,8 @@ public partial class RLDashboard : Control
         _statAvgReward  = AddStatCard(hbox, "Avg Reward (50 ep)", "—", first: true);
         hbox.AddChild(MakeVSep());
         _statBestReward = AddStatCard(hbox, "Best Reward",        "—", first: false);
+        hbox.AddChild(MakeVSep());
+        _statEvalReward = AddStatCard(hbox, "Eval Reward",        "—", first: false);
         hbox.AddChild(MakeVSep());
         _statTotalSteps = AddStatCard(hbox, "Total Steps",        "—", first: false);
         hbox.AddChild(MakeVSep());
@@ -707,6 +714,9 @@ public partial class RLDashboard : Control
                 LearnerElo  = d.ContainsKey("learner_elo")       ? GetFloat(d, "learner_elo")       : null,
                 PoolWinRate = d.ContainsKey("pool_avg_win_rate")  ? GetFloat(d, "pool_avg_win_rate")  : null,
                 CurriculumProgress = d.ContainsKey("curriculum_progress") ? GetFloat(d, "curriculum_progress") : null,
+                IsEval         = d.ContainsKey("is_eval") && (bool)d["is_eval"],
+                EvalMeanReward = d.ContainsKey("eval_mean_reward") ? GetFloat(d, "eval_mean_reward") : 0f,
+                EvalEpisodes   = d.ContainsKey("eval_episodes")    ? (int)GetLong(d, "eval_episodes") : 0,
             };
         }
         catch
@@ -1006,7 +1016,7 @@ public partial class RLDashboard : Control
         {
             var group        = activeGroups[i];
             var color        = CPolicyPalette[i % CPolicyPalette.Length];
-            var groupMetrics = _metrics.Where(m => m.PolicyGroup == group).ToList();
+            var groupMetrics = _metrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
 
             var rewardLabel  = multi ? group : "Reward";
             var entropyLabel = multi ? group : "Entropy";
@@ -1019,6 +1029,16 @@ public partial class RLDashboard : Control
             newRewardLabels.Add(rewardLabel);
             newEntropyLabels.Add(entropyLabel);
             newLengthLabels.Add(lengthLabel);
+
+            // Eval series on the reward chart — lighter tint to visually separate from training.
+            var evalMetrics = _metrics.Where(m => m.PolicyGroup == group && m.IsEval).ToList();
+            if (evalMetrics.Count > 0)
+            {
+                var evalLabel = multi ? $"{group} (eval)" : "Reward (eval)";
+                var evalColor = new Color(color.R, color.G, color.B, 0.55f);
+                _rewardChart?.UpdateSeries(evalLabel, evalColor, evalMetrics.Select(m => m.EvalMeanReward));
+                newRewardLabels.Add(evalLabel);
+            }
 
             // Loss: each group gets a policy-loss and value-loss series.
             var polLabel = multi ? $"{group} Policy" : "Policy";
@@ -1085,15 +1105,26 @@ public partial class RLDashboard : Control
 
         if (filtered.Count == 0) return;
 
-        var window  = filtered.TakeLast(50).ToList();
+        var trainMetrics = filtered.Where(m => !m.IsEval).ToList();
+        var evalMetrics  = filtered.Where(m => m.IsEval).ToList();
+
+        if (trainMetrics.Count == 0 && evalMetrics.Count == 0) return;
+
+        var window  = (trainMetrics.Count > 0 ? trainMetrics : filtered).TakeLast(50).ToList();
         var avg     = window.Average(m => m.EpisodeReward);
-        var best    = filtered.Max(m => m.EpisodeReward);
+        var best    = (trainMetrics.Count > 0 ? trainMetrics : filtered).Max(m => m.EpisodeReward);
         var last    = _metrics[^1];
         var steps   = status.TotalSteps   > 0 ? status.TotalSteps   : last.TotalSteps;
         var eps     = status.EpisodeCount > 0 ? status.EpisodeCount : last.EpisodeCount;
 
         if (_statAvgReward  is not null) _statAvgReward.Text  = avg.ToString("F3");
         if (_statBestReward is not null) _statBestReward.Text = best.ToString("F3");
+        if (_statEvalReward is not null)
+        {
+            _statEvalReward.Text = evalMetrics.Count > 0
+                ? evalMetrics[^1].EvalMeanReward.ToString("F3")
+                : "—";
+        }
         if (_statTotalSteps is not null) _statTotalSteps.Text = FormatSteps(steps);
         if (_statEpisodes is not null)
         {

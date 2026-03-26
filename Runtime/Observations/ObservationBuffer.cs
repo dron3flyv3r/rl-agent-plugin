@@ -8,6 +8,8 @@ public sealed class ObservationBuffer
 {
     private readonly List<float> _values = new();
     private readonly List<ObservationSegment> _segments = new();
+    // Tracks named streams for multi-modal observation support.
+    private readonly List<ObservationStreamSpec> _streamSpecs = new();
 
     public int Count => _values.Count;
     public IReadOnlyList<ObservationSegment> Segments => _segments;
@@ -62,6 +64,49 @@ public sealed class ObservationBuffer
 
     public void AddNormalized(int value, int min, int max) => AddNormalized((float)value, (float)min, (float)max);
 
+    // ── Multi-modal stream API ────────────────────────────────────────────────
+
+    /// <summary>
+    /// Adds a named vector stream. All floats in <paramref name="values"/> are written as-is
+    /// and tagged as a distinct <see cref="ObservationStreamKind.Vector"/> stream in the spec.
+    /// </summary>
+    public void AddVector(string name, ReadOnlySpan<float> values)
+    {
+        var startIndex = Count;
+        foreach (var v in values)
+            _values.Add(v);
+        var length = Count - startIndex;
+        _streamSpecs.Add(new ObservationStreamSpec(name, ObservationStreamKind.Vector, length, 0, 0, 0));
+        if (length > 0)
+            _segments.Add(new ObservationSegment(name, startIndex, length));
+    }
+
+    /// <summary>
+    /// Adds a named image stream. <paramref name="pixels"/> must be row-major bytes of length
+    /// <c>width * height * channels</c>. Each byte is normalized to [0, 1] before storage.
+    /// The stream is tagged as <see cref="ObservationStreamKind.Image"/> in the spec.
+    /// </summary>
+    public void AddImage(string name, byte[] pixels, int width, int height, int channels)
+    {
+        var expectedLength = width * height * channels;
+        if (pixels.Length != expectedLength)
+        {
+            GD.PushError(
+                $"[ObservationBuffer] AddImage '{name}': expected {expectedLength} bytes " +
+                $"({width}×{height}×{channels}), got {pixels.Length}. Writing zeros.");
+            for (var i = 0; i < expectedLength; i++)
+                _values.Add(0f);
+        }
+        else
+        {
+            var startIndex = Count;
+            foreach (var b in pixels)
+                _values.Add(b / 255f);
+            _segments.Add(new ObservationSegment(name, startIndex, expectedLength));
+        }
+        _streamSpecs.Add(new ObservationStreamSpec(name, ObservationStreamKind.Image, expectedLength, width, height, channels));
+    }
+
     public void AddSegment(string name, System.Action<ObservationBuffer> writer, int? expectedSize = null, IReadOnlyList<string>? debugLabels = null)
     {
         var startIndex = Count;
@@ -94,10 +139,26 @@ public sealed class ObservationBuffer
 
     internal ObservationSegment[] GetSegmentsSnapshot() => _segments.ToArray();
 
+    /// <summary>
+    /// Builds an <see cref="ObservationSpec"/> from any <see cref="AddVector"/> /
+    /// <see cref="AddImage"/> calls made since the last <see cref="Clear"/>.
+    /// Falls back to a single unnamed flat-vector stream when only legacy
+    /// <c>Add()</c> / <c>AddNormalized()</c> / <c>AddSensor()</c> calls were made.
+    /// </summary>
+    internal ObservationSpec BuildSpec()
+    {
+        if (_streamSpecs.Count > 0)
+            return new ObservationSpec(_streamSpecs.ToArray());
+
+        // Legacy path: treat all values as one unnamed vector stream.
+        return ObservationSpec.Flat(_values.Count);
+    }
+
     internal void Clear()
     {
         _values.Clear();
         _segments.Clear();
+        _streamSpecs.Clear();
     }
 
     private void FinalizeSegment(string? name, int startIndex, int? expectedSize, IReadOnlyList<string>? debugLabels)

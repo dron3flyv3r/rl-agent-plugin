@@ -14,6 +14,7 @@ public partial class RLAgent2D : Node2D, IRLAgent
     private float[] _lastObservation = Array.Empty<float>();
     private ObservationSegment[] _lastObservationSegments = Array.Empty<ObservationSegment>();
     private int? _validatedObservationSize;
+    private ObservationSpec? _cachedObservationSpec;
     private float _pendingReward;
     private readonly Dictionary<string, float> _pendingRewardComponents = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float> _episodeRewardComponents = new(StringComparer.Ordinal);
@@ -343,6 +344,17 @@ public partial class RLAgent2D : Node2D, IRLAgent
         var done = _donePending;
         _donePending = false;
         return done;
+    }
+
+    ObservationSpec IRLAgent.CollectObservationSpec()
+    {
+        if (_cachedObservationSpec is not null)
+            return _cachedObservationSpec;
+
+        _observationBuffer.Clear();
+        CollectObservations(_observationBuffer);
+        _cachedObservationSpec = _observationBuffer.BuildSpec();
+        return _cachedObservationSpec;
     }
 
     float[] IRLAgent.CollectObservationArray()

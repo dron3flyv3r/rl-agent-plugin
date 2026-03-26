@@ -22,11 +22,17 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     {
         _config = config;
         _trainerConfig = config.TrainerConfig;
-        _network = new PolicyValueNetwork(
-            config.ObservationSize,
-            config.DiscreteActionCount,
-            config.ContinuousActionDimensions,
-            config.NetworkGraph);
+        _network = config.ObsSpec is not null
+            ? new PolicyValueNetwork(
+                config.ObsSpec,
+                config.DiscreteActionCount,
+                config.ContinuousActionDimensions,
+                config.NetworkGraph)
+            : new PolicyValueNetwork(
+                config.ObservationSize,
+                config.DiscreteActionCount,
+                config.ContinuousActionDimensions,
+                config.NetworkGraph);
         _rng.Randomize();
     }
 
@@ -196,6 +202,13 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             _config);
     }
 
+    public IInferencePolicy SnapshotPolicyForEval()
+    {
+        // Create a checkpoint with current weights and reconstruct an inference policy from it.
+        var checkpoint = CreateCheckpoint(_config.GroupId, 0, 0, 0);
+        return InferencePolicyFactory.Create(checkpoint);
+    }
+
     // ── IAsyncTrainer ─────────────────────────────────────────────────────────
 
     public bool TryScheduleBackgroundUpdate(string groupId, long totalSteps, long episodeCount, int maxTransitions = int.MaxValue)
@@ -213,11 +226,17 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         _transitions.Clear();
 
         // Lazy-create shadow network with identical architecture.
-        _shadowNetwork ??= new PolicyValueNetwork(
-            _config.ObservationSize,
-            _config.DiscreteActionCount,
-            _config.ContinuousActionDimensions,
-            _config.NetworkGraph);
+        _shadowNetwork ??= _config.ObsSpec is not null
+            ? new PolicyValueNetwork(
+                _config.ObsSpec,
+                _config.DiscreteActionCount,
+                _config.ContinuousActionDimensions,
+                _config.NetworkGraph)
+            : new PolicyValueNetwork(
+                _config.ObservationSize,
+                _config.DiscreteActionCount,
+                _config.ContinuousActionDimensions,
+                _config.NetworkGraph);
 
         // Copy live weights into shadow so backprop works on an isolated copy.
         _network.CopyWeightsTo(_shadowNetwork);

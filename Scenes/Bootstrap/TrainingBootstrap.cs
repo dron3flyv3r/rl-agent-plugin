@@ -49,6 +49,15 @@ public partial class TrainingBootstrap : Node
 
     private long _totalSteps;
     private RLStoppingConfig? _stoppingConfig;
+
+    // ── Evaluation rollout state ───────────────────────────────────────────────
+    private RLEvaluationConfig? _evaluationConfig;
+    private readonly Dictionary<string, bool>             _evalInProgressByGroup        = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, long>             _lastEvalStepByGroup          = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, int>              _evalEpisodesCompletedByGroup = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, float>            _evalRewardAccumByGroup       = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, float>            _evalLengthAccumByGroup       = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, IInferencePolicy> _evalPoliciesByGroup          = new(StringComparer.Ordinal);
     private double _trainingElapsedSeconds;
     private readonly Dictionary<string, Queue<float>> _rewardWindowByGroup = new(StringComparer.Ordinal);
     private RLTrainingConfig? _trainingConfig;
@@ -214,7 +223,8 @@ public partial class TrainingBootstrap : Node
         _asyncGradientUpdates = firstAcademy.AsyncGradientUpdates;
         _parallelPolicyGroups = firstAcademy.ParallelPolicyGroups;
         _asyncRolloutPolicy   = firstAcademy.AsyncRolloutPolicy;
-        _stoppingConfig = firstAcademy.RunConfig?.StoppingConditions;
+        _stoppingConfig    = firstAcademy.RunConfig?.StoppingConditions;
+        _evaluationConfig  = firstAcademy.RunConfig?.Evaluation;
         var runConfig = firstAcademy.RunConfig;
         _checkpointIntervalSteps = runConfig is not null ? Math.Max(0L, runConfig.CheckpointIntervalSteps) : 0L;
         _historyKeepRecentCount  = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepRecentCount)  : 20;
@@ -387,6 +397,9 @@ public partial class TrainingBootstrap : Node
                 return;
             }
 
+            // Collect multi-stream observation spec from the first agent.
+            var obsSpec = firstAgent.CollectObservationSpec();
+
             var discreteCount = firstAgent.GetDiscreteActionCount();
             var continuousDims = firstAgent.GetContinuousActionDimensions();
             var actionDefinitions = firstAgent.GetActionSpace();
@@ -468,6 +481,7 @@ public partial class TrainingBootstrap : Node
                 ObservationSize = obsSize,
                 DiscreteActionCount = discreteCount,
                 ContinuousActionDimensions = continuousDims,
+                ObsSpec = obsSpec.Streams.Count > 1 || obsSpec.Streams[0].Kind == ObservationStreamKind.Image ? obsSpec : null,
                 CheckpointPath = checkpointPath,
                 MetricsPath = metricsPath,
             };
@@ -482,6 +496,13 @@ public partial class TrainingBootstrap : Node
             _lastValueLossByGroup[groupId] = 0f;
             _lastEntropyByGroup[groupId] = 0f;
             _lastClipFractionByGroup[groupId] = algorithm == RLAlgorithmKind.PPO ? 0f : null;
+
+            // Evaluation state.
+            _evalInProgressByGroup[groupId]        = false;
+            _lastEvalStepByGroup[groupId]          = 0;
+            _evalEpisodesCompletedByGroup[groupId] = 0;
+            _evalRewardAccumByGroup[groupId]       = 0f;
+            _evalLengthAccumByGroup[groupId]       = 0f;
 
             GD.Print($"[RL] Group '{binding.DisplayName}': {groupAgents.Count} agent(s), {algorithm}, obs={obsSize}, discrete={discreteCount}, continuous={continuousDims}");
             GD.Print($"[RL]   Checkpoint: {checkpointPath}");
@@ -790,6 +811,122 @@ public partial class TrainingBootstrap : Node
         {
             TriggerStoppingConditionShutdown();
         }
+
+        // ── Evaluation scheduling ─────────────────────────────────────────────
+        if (!_quickTestMode && !_isWorkerMode && _evaluationConfig is { EvaluationFrequencySteps: > 0 } evalCfg)
+        {
+            foreach (var groupId in _trainersByGroup.Keys)
+            {
+                if (_evalInProgressByGroup[groupId])
+                {
+                    TickEvaluation(groupId);
+                }
+                else if (_totalSteps - _lastEvalStepByGroup[groupId] >= evalCfg.EvaluationFrequencySteps
+                         && _totalSteps > 0)
+                {
+                    BeginEvaluation(groupId);
+                }
+            }
+        }
+    }
+
+    // ── Evaluation helpers ────────────────────────────────────────────────────
+
+    private List<IRLAgent> GetGroupTrainAgents(string groupId)
+    {
+        var agents = new List<IRLAgent>();
+        foreach (var agent in _allTrainAgents)
+        {
+            if (_agentStates.TryGetValue(agent, out var s) && s.GroupId == groupId)
+                agents.Add(agent);
+        }
+        return agents;
+    }
+
+    private void BeginEvaluation(string groupId)
+    {
+        if (!_trainersByGroup.TryGetValue(groupId, out var trainer)) return;
+
+        _evalPoliciesByGroup[groupId]          = trainer.SnapshotPolicyForEval();
+        _evalInProgressByGroup[groupId]        = true;
+        _evalEpisodesCompletedByGroup[groupId] = 0;
+        _evalRewardAccumByGroup[groupId]       = 0f;
+        _evalLengthAccumByGroup[groupId]       = 0f;
+
+        // Reset all agents in this group to start fresh episodes for evaluation.
+        foreach (var agent in GetGroupTrainAgents(groupId))
+            agent.ResetEpisode();
+
+        GD.Print($"[RL] [{groupId}] Starting evaluation ({_evaluationConfig!.EvaluationEpisodes} episodes).");
+    }
+
+    private void TickEvaluation(string groupId)
+    {
+        if (!_evalPoliciesByGroup.TryGetValue(groupId, out var policy)) return;
+        var evalCfg = _evaluationConfig!;
+        var agents  = GetGroupTrainAgents(groupId);
+
+        foreach (var agent in agents)
+        {
+            // One physics tick per agent (no action repeat during eval — one step per decision).
+            agent.TickStep();
+            agent.ConsumePendingReward(); // discard reward accumulation
+            agent.ConsumePendingRewardBreakdown();
+
+            var done = agent.ConsumeDonePending() || agent.HasReachedEpisodeLimit();
+            var obs  = agent.CollectObservationArray();
+            var decision = policy.Predict(obs);
+
+            if (decision.DiscreteAction >= 0)
+                agent.ApplyAction(decision.DiscreteAction);
+            else if (decision.ContinuousActions.Length > 0)
+                agent.ApplyAction(decision.ContinuousActions);
+
+            if (done)
+            {
+                _evalRewardAccumByGroup[groupId]       += agent.EpisodeReward;
+                _evalLengthAccumByGroup[groupId]       += agent.EpisodeSteps;
+                _evalEpisodesCompletedByGroup[groupId] += 1;
+                agent.ResetEpisode();
+
+                if (_evalEpisodesCompletedByGroup[groupId] >= evalCfg.EvaluationEpisodes)
+                {
+                    // All agents in this group count independently — stop after total episodes.
+                    FinalizeEvaluation(groupId);
+                    return;
+                }
+            }
+        }
+    }
+
+    private void FinalizeEvaluation(string groupId)
+    {
+        var episodes   = _evalEpisodesCompletedByGroup[groupId];
+        if (episodes == 0) episodes = 1; // guard
+        var meanReward = _evalRewardAccumByGroup[groupId] / episodes;
+        var meanLength = _evalLengthAccumByGroup[groupId] / episodes;
+
+        var episodeCount = _episodeCountByGroup[groupId];
+        if (_metricsWritersByGroup.TryGetValue(groupId, out var writer))
+        {
+            writer.AppendEvalMetric(
+                meanReward,
+                meanLength,
+                _totalSteps,
+                episodeCount,
+                episodes,
+                policyGroup: GetGroupDisplayName(groupId));
+        }
+
+        GD.Print($"[RL] [{groupId}] Evaluation complete: mean_reward={meanReward:F3} mean_length={meanLength:F1} episodes={episodes}");
+
+        // Reset agents back to training state.
+        foreach (var agent in GetGroupTrainAgents(groupId))
+            agent.ResetEpisode();
+
+        _evalInProgressByGroup[groupId]  = false;
+        _lastEvalStepByGroup[groupId]    = _totalSteps;
+        _evalPoliciesByGroup.Remove(groupId);
     }
 
     public override void _ExitTree()

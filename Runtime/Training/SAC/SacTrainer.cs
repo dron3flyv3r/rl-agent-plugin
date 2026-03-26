@@ -72,8 +72,11 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         _isContinuous = config.ContinuousActionDimensions > 0 && config.DiscreteActionCount == 0;
         _rng = new Random();
 
+        // Note: SacNetwork does not yet support per-stream CNN encoders.
+        // When ObsSpec is provided, we use TotalSize so image pixels are treated as raw floats.
+        var sacObsSize = config.ObsSpec?.TotalSize ?? config.ObservationSize;
         _network = new SacNetwork(
-            config.ObservationSize,
+            sacObsSize,
             _isContinuous ? config.ContinuousActionDimensions : config.DiscreteActionCount,
             _isContinuous,
             config.NetworkGraph,
@@ -236,6 +239,12 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         return CheckpointMetadataBuilder.Apply(
             _network.SaveCheckpoint(groupId, totalSteps, episodeCount, updateCount),
             _config);
+    }
+
+    public IInferencePolicy SnapshotPolicyForEval()
+    {
+        var checkpoint = CreateCheckpoint(_config.GroupId, 0, 0, 0);
+        return InferencePolicyFactory.Create(checkpoint);
     }
 
     // ── IAsyncTrainer ─────────────────────────────────────────────────────────

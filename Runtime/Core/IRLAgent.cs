@@ -39,6 +39,14 @@ public interface IRLAgent
     // ── Observations ──────────────────────────────────────────────────────────
     float[] GetLastObservation();
 
+    // ── Framework-internal ── observation spec ────────────────────────────────
+    /// <summary>
+    /// Probes the agent's observation collection once and returns the resulting
+    /// <see cref="ObservationSpec"/>. The result is cached; subsequent calls return the
+    /// same object. Used by the training bootstrap to build per-group network specs.
+    /// </summary>
+    ObservationSpec CollectObservationSpec();
+
     // ── Reward queries ────────────────────────────────────────────────────────
     IReadOnlyDictionary<string, float> GetPendingRewardBreakdown();
     IReadOnlyDictionary<string, float> GetLastStepRewardBreakdown();

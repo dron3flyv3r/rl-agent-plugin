@@ -20,6 +20,7 @@ internal static class CheckpointMetadataBuilder
         checkpoint.DiscreteActionLabels    = BuildDiscreteActionLabels(config.ActionDefinitions);
         checkpoint.ContinuousActionRanges  = BuildContinuousActionRanges(config.ActionDefinitions);
         checkpoint.Hyperparams             = BuildHyperparams(config);
+        checkpoint.ObsSpec                 = config.ObsSpec;
         return checkpoint;
     }
 
