@@ -185,13 +185,13 @@ public partial class RLSetupDock : VBoxContainer
         _validationDetailLabel.Text = summary;
     }
 
-    public void SetConfigSummary(string trainingPath, string networkPath, string checkpointPath)
+    public void SetConfigSummary(string trainingPath, string networkPath, string inferenceSummary)
     {
         var trainingName = FileName(trainingPath, "(none)");
         var networkName = FileName(networkPath, "(none)");
-        var checkpointName = FileName(checkpointPath, "(none)");
-        _configLabel.Text = $"Training:   {trainingName}\nNetwork:     {networkName}\nCheckpoint: {checkpointName}";
-        _configLabel.TooltipText = $"Training: {trainingPath}\nNetwork: {networkPath}\nCheckpoint: {checkpointPath}";
+        var inferenceName = string.IsNullOrWhiteSpace(inferenceSummary) ? "(none)" : inferenceSummary;
+        _configLabel.Text = $"Training:   {trainingName}\nNetwork:     {networkName}\nInference: {inferenceName}";
+        _configLabel.TooltipText = $"Training: {trainingPath}\nNetwork: {networkPath}\nInference: {inferenceName}";
     }
 
     public void SetLaunchStatus(string text)

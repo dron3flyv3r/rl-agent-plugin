@@ -5,7 +5,7 @@ namespace RlAgentPlugin.Runtime;
 
 public sealed class TrainingLaunchManifest
 {
-    public const string ActiveManifestPath = "user://rl_agent_plugin/active_manifest.json";
+    public const string ActiveManifestPath = "user://rl-agent-plugin/active_manifest.json";
 
     public string ScenePath { get; set; } = string.Empty;
     public string AcademyNodePath { get; set; } = string.Empty;

@@ -56,7 +56,12 @@ public partial class TrainingBootstrap : Node
     private double _previousTimeScale = 1.0;
     private int _previousPhysicsTicksPerSecond = 60;
     private int _previousMaxPhysicsStepsPerFrame = 8;
-    private int _checkpointInterval = 10;
+    private int  _checkpointInterval       = 10;
+    private long _checkpointIntervalSteps  = 0;
+    private long _lastCheckpointSteps      = -1;
+    private int  _historyKeepRecentCount   = 20;
+    private int  _historyKeepEveryNth      = 10;
+    private bool _compressCheckpoints      = true;
     private int _actionRepeat = 1;
     private int _batchSize = 1;
     private bool _showBatchGrid;
@@ -89,6 +94,29 @@ public partial class TrainingBootstrap : Node
     // jarring jumps when a worker rollout arrives (e.g. +2048 steps at once).
     private double _smoothDisplaySteps;
     private double _smoothDisplayRate;
+
+    private long GetCombinedTotalSteps()
+        => _totalSteps + (_distributedMaster?.TotalWorkerSteps ?? 0L);
+
+    private long GetCombinedTotalEpisodes()
+        => _episodeCountByGroup.Values.Sum() + (_distributedMaster?.TotalWorkerEpisodes ?? 0L);
+
+    private void AppendRewardWindowSample(string groupId, float episodeReward)
+    {
+        var windowSize = _stoppingConfig?.RewardThresholdWindow ?? 0;
+        if (windowSize <= 0)
+            return;
+
+        if (!_rewardWindowByGroup.TryGetValue(groupId, out var rewardWindow))
+        {
+            rewardWindow = new Queue<float>(windowSize);
+            _rewardWindowByGroup[groupId] = rewardWindow;
+        }
+
+        rewardWindow.Enqueue(episodeReward);
+        while (rewardWindow.Count > windowSize)
+            rewardWindow.Dequeue();
+    }
 
     private void SetCurriculumProgressForAllAcademies(float progress)
     {
@@ -187,6 +215,11 @@ public partial class TrainingBootstrap : Node
         _parallelPolicyGroups = firstAcademy.ParallelPolicyGroups;
         _asyncRolloutPolicy   = firstAcademy.AsyncRolloutPolicy;
         _stoppingConfig = firstAcademy.RunConfig?.StoppingConditions;
+        var runConfig = firstAcademy.RunConfig;
+        _checkpointIntervalSteps = runConfig is not null ? Math.Max(0L, runConfig.CheckpointIntervalSteps) : 0L;
+        _historyKeepRecentCount  = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepRecentCount)  : 20;
+        _historyKeepEveryNth     = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepEveryNth)     : 10;
+        _compressCheckpoints     = runConfig is null || runConfig.CompressCheckpoints;
         if (_quickTestMode)
         {
             _batchSize = 1;
@@ -580,11 +613,12 @@ public partial class TrainingBootstrap : Node
             {
                 if (!_metricsWritersByGroup.TryGetValue(groupId, out var writer)) continue;
                 _workerEpisodeCountByGroup[groupId] = _workerEpisodeCountByGroup.GetValueOrDefault(groupId) + summaries.Count;
-                var metricSteps     = _totalSteps + _distributedMaster.TotalWorkerSteps;
+                var metricSteps     = GetCombinedTotalSteps();
                 var localEpisodes   = _episodeCountByGroup.GetValueOrDefault(groupId);
                 var workerEpisodes  = _workerEpisodeCountByGroup[groupId];
                 foreach (var s in summaries)
                 {
+                    AppendRewardWindowSample(groupId, s.Reward);
                     writer.AppendMetric(
                         s.Reward,
                         s.Steps,
@@ -669,7 +703,6 @@ public partial class TrainingBootstrap : Node
             ProcessFrozenDecisions(pendingFrozenDecisions);
         }
 
-        RLCheckpoint? lastCheckpoint = null;
         foreach (var (groupId, trainer) in _trainersByGroup)
         {
             var episodeCount = _episodeCountByGroup[groupId];
@@ -723,21 +756,12 @@ public partial class TrainingBootstrap : Node
 
             var currentCheckpoint = trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, _updateCountByGroup[groupId]);
             currentCheckpoint.RewardSnapshot = _lastEpisodeRewardByGroup.GetValueOrDefault(groupId);
-            lastCheckpoint = currentCheckpoint;
 
             PersistCheckpoint(groupId, currentCheckpoint, _updateCountByGroup[groupId]);
 
             // Broadcast curriculum progress alongside each weight update so workers stay in sync.
             if (_distributedMaster is not null && _academies.Count > 0 && _academies[0].Curriculum is not null)
                 _distributedMaster.BroadcastCurriculumProgress(_academies[0].CurriculumProgress);
-        }
-
-        if (lastCheckpoint is not null)
-        {
-            foreach (var academy in _academies)
-            {
-                academy.Checkpoint = lastCheckpoint;
-            }
         }
 
         var trainerConfig = _trainerConfig;
@@ -795,16 +819,12 @@ public partial class TrainingBootstrap : Node
             var finalCheckpoint = trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, updateCount);
             PersistCheckpoint(groupId, finalCheckpoint, updateCount, forceLatestWrite: true, allowFrozenSnapshot: false);
 
-            foreach (var academy in _academies)
-            {
-                academy.Checkpoint = finalCheckpoint;
-            }
         }
 
         if (!_isWorkerMode)
         {
             var totalEpisodes      = _episodeCountByGroup.Values.Sum();
-            var finalReportedSteps = _totalSteps + (_distributedMaster?.TotalWorkerSteps ?? 0L);
+            var finalReportedSteps = GetCombinedTotalSteps();
             var workerEpisodes     = _distributedMaster?.TotalWorkerEpisodes ?? 0L;
             _statusWriter?.WriteStatus(_finalStatus, _manifest.ScenePath, finalReportedSteps, totalEpisodes,
                 _finalStatusMessage, workerEpisodes);
@@ -813,10 +833,11 @@ public partial class TrainingBootstrap : Node
 
     private void TriggerStoppingConditionShutdown()
     {
-        var totalEpisodes = _episodeCountByGroup.Values.Sum();
+        var totalSteps = GetCombinedTotalSteps();
+        var totalEpisodes = GetCombinedTotalEpisodes();
         _finalStatus = "done";
         _finalStatusMessage =
-            $"Training stopped by stopping condition — steps: {_totalSteps}, " +
+            $"Training stopped by stopping condition — steps: {totalSteps}, " +
             $"episodes: {totalEpisodes}, elapsed: {_trainingElapsedSeconds:0.#}s.";
         GD.Print($"[RL] {_finalStatusMessage}");
         GetTree().Quit();
@@ -827,11 +848,12 @@ public partial class TrainingBootstrap : Node
         var cfg = _stoppingConfig;
         if (cfg is null) return false;
 
-        var totalEpisodes = _episodeCountByGroup.Values.Sum();
+        var totalSteps = GetCombinedTotalSteps();
+        var totalEpisodes = GetCombinedTotalEpisodes();
         var results = new System.Collections.Generic.List<bool>();
 
         if (cfg.MaxSteps > 0)
-            results.Add(_totalSteps >= cfg.MaxSteps);
+            results.Add(totalSteps >= cfg.MaxSteps);
         if (cfg.MaxSeconds > 0.0)
             results.Add(_trainingElapsedSeconds >= cfg.MaxSeconds);
         if (cfg.MaxEpisodes > 0)
@@ -845,7 +867,7 @@ public partial class TrainingBootstrap : Node
         if (cfg.CustomCondition is not null)
         {
             var avg = cfg.RewardThresholdWindow > 0 ? ComputeRollingReward(cfg) : float.NaN;
-            results.Add(cfg.CustomCondition.ShouldStop(_totalSteps, totalEpisodes, _trainingElapsedSeconds, avg));
+            results.Add(cfg.CustomCondition.ShouldStop(totalSteps, totalEpisodes, _trainingElapsedSeconds, avg));
         }
 
         if (results.Count == 0) return false;
@@ -1079,7 +1101,7 @@ public partial class TrainingBootstrap : Node
             var pfspAlpha   = _pfspAlphaByGroup.GetValueOrDefault(groupId, 4.0f);
             var pool        = new PolicyPool(maxPool, pfspEnabled, pfspAlpha, _selfPlayRng)
             {
-                LatestCheckpointPath = GetGroupCheckpointPath(groupId) ?? string.Empty,
+                LatestCheckpointPath = RLCheckpoint.ResolveCheckpointExtension(GetGroupCheckpointPath(groupId) ?? string.Empty),
             };
 
             // Re-hydrate historical snapshots from disk (win/loss state starts fresh at Laplace prior).
@@ -1390,17 +1412,7 @@ public partial class TrainingBootstrap : Node
             {
                 _episodeCountByGroup[groupId] += 1;
                 _lastEpisodeRewardByGroup[groupId] = pending.Agent.EpisodeReward;
-                if (_stoppingConfig?.RewardThresholdWindow > 0)
-                {
-                    if (!_rewardWindowByGroup.TryGetValue(groupId, out var rewardWindow))
-                    {
-                        rewardWindow = new Queue<float>(_stoppingConfig.RewardThresholdWindow);
-                        _rewardWindowByGroup[groupId] = rewardWindow;
-                    }
-                    rewardWindow.Enqueue(pending.Agent.EpisodeReward);
-                    while (rewardWindow.Count > _stoppingConfig.RewardThresholdWindow)
-                        rewardWindow.Dequeue();
-                }
+                AppendRewardWindowSample(groupId, pending.Agent.EpisodeReward);
                 _quickTestRewardTotalsByGroup[groupId] = _quickTestRewardTotalsByGroup.GetValueOrDefault(groupId) + pending.Agent.EpisodeReward;
                 _quickTestEpisodeLengthTotalsByGroup[groupId] = _quickTestEpisodeLengthTotalsByGroup.GetValueOrDefault(groupId) + pending.Agent.EpisodeSteps;
                 var episodeCount = _episodeCountByGroup[groupId];
@@ -1420,7 +1432,7 @@ public partial class TrainingBootstrap : Node
 
                 if (!_quickTestMode && !_isWorkerMode)
                 {
-                    var metricSteps = _totalSteps + (_distributedMaster?.TotalWorkerSteps ?? 0L);
+                    var metricSteps = GetCombinedTotalSteps();
                     var totalEpisodeCount = episodeCount + _workerEpisodeCountByGroup.GetValueOrDefault(groupId);
                     _metricsWritersByGroup[groupId].AppendMetric(
                         pending.Agent.EpisodeReward,
@@ -1473,7 +1485,7 @@ public partial class TrainingBootstrap : Node
                         {
                             // Include worker steps so the master's curriculum advances at the true
                             // combined throughput rate rather than only counting local steps.
-                            var combinedSteps = _totalSteps + (_distributedMaster?.TotalWorkerSteps ?? 0L);
+                            var combinedSteps = GetCombinedTotalSteps();
                             var progress = Mathf.Clamp(combinedSteps / (float)curriculumEnvironment.Academy.MaxCurriculumSteps, 0f, 1f);
                             SetCurriculumProgressForAllAcademies(progress);
                         }
@@ -1575,14 +1587,34 @@ public partial class TrainingBootstrap : Node
         if (_quickTestMode) return;
         var checkpointPath = GetGroupCheckpointPath(groupId);
         var participatesInSelfPlay = _selfPlayParticipantGroups.Contains(groupId);
+
+        // Step-based interval takes precedence over update-based when configured.
+        var intervalMet = _checkpointIntervalSteps > 0
+            ? checkpoint.TotalSteps - _lastCheckpointSteps >= _checkpointIntervalSteps
+            : updateCount % _checkpointInterval == 0;
+
         var shouldWriteLatest = forceLatestWrite
             || participatesInSelfPlay
             || updateCount == 0
-            || updateCount % _checkpointInterval == 0;
+            || intervalMet;
 
+        if (shouldWriteLatest && _checkpointIntervalSteps > 0 && intervalMet)
+            _lastCheckpointSteps = checkpoint.TotalSteps;
+
+        // Determine the actual on-disk path used so bank.Pool.LatestCheckpointPath stays in sync.
+        var actualCheckpointPath = checkpointPath;
         if (!string.IsNullOrEmpty(checkpointPath) && shouldWriteLatest)
         {
-            RLCheckpoint.SaveToFile(checkpoint, checkpointPath);
+            if (_compressCheckpoints)
+            {
+                var zipPath = System.IO.Path.ChangeExtension(ProjectSettings.GlobalizePath(checkpointPath), RLCheckpoint.ZipExtension);
+                RLCheckpoint.SaveToZip(checkpoint, zipPath);
+                actualCheckpointPath = zipPath;
+            }
+            else
+            {
+                RLCheckpoint.SaveToFile(checkpoint, checkpointPath);
+            }
         }
 
         // Write a named history snapshot alongside the latest checkpoint (skip update 0).
@@ -1591,9 +1623,24 @@ public partial class TrainingBootstrap : Node
             var safeId = _groupBindingsByGroup.TryGetValue(groupId, out var histBinding)
                 ? histBinding.SafeGroupId
                 : RLPolicyGroupBindingResolver.MakeSafeGroupId(groupId);
-            var historyResPath = $"{_manifest.RunDirectory}/history/checkpoint__{safeId}__u{updateCount:D6}.json";
-            RLCheckpoint.SaveToFile(checkpoint, historyResPath);
-            WriteCheckpointSidecar(checkpoint, historyResPath);
+
+            if (_compressCheckpoints)
+            {
+                var historyAbsPath = System.IO.Path.Combine(
+                    ProjectSettings.GlobalizePath(_manifest.RunDirectory),
+                    "history",
+                    $"checkpoint__{safeId}__u{updateCount:D6}{RLCheckpoint.ZipExtension}");
+                RLCheckpoint.SaveToZip(checkpoint, historyAbsPath);
+                // No separate sidecar needed — meta.json is an uncompressed entry inside the ZIP.
+            }
+            else
+            {
+                var historyResPath = $"{_manifest.RunDirectory}/history/checkpoint__{safeId}__u{updateCount:D6}.json";
+                RLCheckpoint.SaveToFile(checkpoint, historyResPath);
+                WriteCheckpointSidecar(checkpoint, historyResPath);
+            }
+
+            PruneHistoryCheckpoints(safeId, ProjectSettings.GlobalizePath(_manifest.RunDirectory));
         }
 
         if (!_opponentBanksByGroup.TryGetValue(groupId, out var bank) || string.IsNullOrEmpty(checkpointPath))
@@ -1601,7 +1648,7 @@ public partial class TrainingBootstrap : Node
             return;
         }
 
-        bank.Pool.LatestCheckpointPath = checkpointPath;
+        bank.Pool.LatestCheckpointPath = actualCheckpointPath ?? checkpointPath;
 
         if (!allowFrozenSnapshot)
         {
@@ -1621,6 +1668,72 @@ public partial class TrainingBootstrap : Node
             : EloTracker.InitialRating;
         RLCheckpoint.SaveToFile(checkpoint, frozenPath);
         bank.Pool.AddSnapshot(frozenPath, snapshotKey, currentElo);
+    }
+
+    /// <summary>
+    /// Prunes old history checkpoints for a policy group, keeping <see cref="_historyKeepRecentCount"/>
+    /// most-recent files intact and retaining every <see cref="_historyKeepEveryNth"/>-th file
+    /// for older entries. Both .rlcheckpoint and .json files are considered together.
+    /// </summary>
+    private void PruneHistoryCheckpoints(string safeGroupId, string runDirAbsPath)
+    {
+        if (_historyKeepEveryNth <= 0 || _historyKeepRecentCount < 0) return;
+
+        var historyDir = System.IO.Path.Combine(runDirAbsPath, "history");
+        if (!System.IO.Directory.Exists(historyDir)) return;
+
+        // Collect all checkpoint files for this group (both formats).
+        var prefix = $"checkpoint__{safeGroupId}__u";
+        var files  = new List<(long UpdateCount, string Path)>();
+
+        foreach (var f in System.IO.Directory.GetFiles(historyDir))
+        {
+            var name = System.IO.Path.GetFileName(f);
+            if (!name.StartsWith(prefix, StringComparison.Ordinal)) continue;
+
+            // Strip extensions to extract the update number suffix (e.g. "u000100")
+            var stem = name;
+            if (stem.EndsWith(RLCheckpoint.ZipExtension, StringComparison.OrdinalIgnoreCase))
+                stem = stem[..^RLCheckpoint.ZipExtension.Length];
+            else if (stem.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+                stem = stem[..^5];
+
+            var sep = stem.LastIndexOf("__u", StringComparison.Ordinal);
+            if (sep < 0) continue;
+            if (!long.TryParse(stem[(sep + 3)..], out var n)) continue;
+
+            files.Add((n, f));
+        }
+
+        // Sort descending by update count (newest first).
+        files.Sort((a, b) => b.UpdateCount.CompareTo(a.UpdateCount));
+
+        if (files.Count <= _historyKeepRecentCount) return;
+
+        // Files beyond the recent window are subject to thinning.
+        var oldFiles = files.Skip(_historyKeepRecentCount).ToList();
+        for (var i = 0; i < oldFiles.Count; i++)
+        {
+            // Keep every Nth file (0-indexed from oldest end so the thinning is consistent).
+            var indexFromOldest = oldFiles.Count - 1 - i;
+            if (indexFromOldest % _historyKeepEveryNth == 0) continue;
+
+            // Delete checkpoint and its sidecar (if any).
+            var checkpointPath = oldFiles[i].Path;
+            var sidecarPath    = checkpointPath.EndsWith(RLCheckpoint.ZipExtension, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : checkpointPath.Replace(".json", ".meta.json", StringComparison.Ordinal);
+            try
+            {
+                System.IO.File.Delete(checkpointPath);
+                if (sidecarPath is not null && System.IO.File.Exists(sidecarPath))
+                    System.IO.File.Delete(sidecarPath);
+            }
+            catch (Exception ex)
+            {
+                GD.PushWarning($"[RL] History prune failed for '{checkpointPath}': {ex.Message}");
+            }
+        }
     }
 
     private void PrepareEnvironmentForNextEpisode(int environmentIndex)
@@ -2113,7 +2226,7 @@ public partial class TrainingBootstrap : Node
     {
         GD.Print($"[RL Distributed] Executable : {(string.IsNullOrWhiteSpace(config.EngineExecutablePath) ? OS.GetExecutablePath() : config.EngineExecutablePath)}");
         GD.Print($"[RL Distributed] Project    : {ProjectSettings.GlobalizePath("res://")}");
-        GD.Print($"[RL Distributed] Bootstrap  : res://addons/rl_agent_plugin/Scenes/Bootstrap/TrainingBootstrap.tscn");
+        GD.Print($"[RL Distributed] Bootstrap  : res://addons/rl-agent-plugin/Scenes/Bootstrap/TrainingBootstrap.tscn");
 
         for (var i = 0; i < config.WorkerCount; i++)
             LaunchSingleWorker(config, i);
@@ -2125,7 +2238,7 @@ public partial class TrainingBootstrap : Node
             ? config.EngineExecutablePath
             : OS.GetExecutablePath();
         var projectPath    = ProjectSettings.GlobalizePath("res://");
-        var bootstrapScene = "res://addons/rl_agent_plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
+        var bootstrapScene = "res://addons/rl-agent-plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
 
         var args = new[]
         {

@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.IO.Compression;
+using System.Text;
 using Godot;
 
 namespace RlAgentPlugin.Runtime;
@@ -8,7 +10,8 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLCheckpoint : Resource
 {
-    public const int CurrentFormatVersion = 4;
+    public const int CurrentFormatVersion = 5;
+    public const string ZipExtension      = ".rlcheckpoint";
     public const string PpoAlgorithm = "PPO";
     public const string SacAlgorithm = "SAC";
 
@@ -79,11 +82,16 @@ public partial class RLCheckpoint : Resource
     }
 
     /// <summary>
-    /// Loads a checkpoint previously saved with SaveToFile().
+    /// Loads a checkpoint from either a plain-JSON (.json) or ZIP (.rlcheckpoint) file.
+    /// Automatically detects the format by extension.
     /// </summary>
     public static RLCheckpoint? LoadFromFile(string path)
     {
         var resolvedPath = ResolvePath(path);
+
+        if (resolvedPath.EndsWith(ZipExtension, StringComparison.OrdinalIgnoreCase))
+            return LoadFromZip(resolvedPath);
+
         if (!FileAccess.FileExists(resolvedPath))
         {
             GD.PushWarning($"[RLCheckpoint] File not found: {resolvedPath}");
@@ -147,6 +155,10 @@ public partial class RLCheckpoint : Resource
     public static RLCheckpoint? LoadMetadataOnly(string path)
     {
         var resolvedPath = ResolvePath(path);
+
+        if (resolvedPath.EndsWith(ZipExtension, StringComparison.OrdinalIgnoreCase))
+            return LoadMetaFromZip(resolvedPath);
+
         if (!FileAccess.FileExists(resolvedPath)) return null;
 
         try
@@ -185,6 +197,212 @@ public partial class RLCheckpoint : Resource
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Saves the checkpoint as a ZIP archive (.rlcheckpoint) with two entries:
+    /// <list type="bullet">
+    ///   <item><c>meta.json</c> — uncompressed metadata (fast reads without full decompression)</item>
+    ///   <item><c>weights.json</c> — deflate-compressed weight and shape arrays</item>
+    /// </list>
+    /// </summary>
+    public static Error SaveToZip(RLCheckpoint checkpoint, string path)
+    {
+        checkpoint.FormatVersion = CurrentFormatVersion;
+
+        var absPath = ResolvePath(path);
+        System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(absPath)!);
+
+        var training = new Godot.Collections.Dictionary
+        {
+            { "total_steps",   checkpoint.TotalSteps   },
+            { "episode_count", checkpoint.EpisodeCount },
+            { "update_count",  checkpoint.UpdateCount  },
+        };
+        var metaDoc = new Godot.Collections.Dictionary
+        {
+            { "format_version", checkpoint.FormatVersion },
+            { "run_id",         checkpoint.RunId         },
+            { "training",       training                 },
+            { "meta",           checkpoint.CreateMetadataDictionary() },
+        };
+        var metaJson = Json.Stringify(metaDoc);
+
+        var weightArray = new Godot.Collections.Array();
+        foreach (var w in checkpoint.WeightBuffer) weightArray.Add(Variant.From(w));
+        var shapeArray = new Godot.Collections.Array();
+        foreach (var s in checkpoint.LayerShapeBuffer) shapeArray.Add(Variant.From(s));
+        var weightsDoc = new Godot.Collections.Dictionary
+        {
+            { "weights", weightArray },
+            { "shapes",  shapeArray  },
+        };
+        var weightsJson = Json.Stringify(weightsDoc);
+
+        try
+        {
+            using var zipStream = System.IO.File.Open(absPath, System.IO.FileMode.Create, System.IO.FileAccess.Write);
+            using var archive   = new ZipArchive(zipStream, ZipArchiveMode.Create);
+
+            var metaEntry = archive.CreateEntry("meta.json", CompressionLevel.NoCompression);
+            using (var writer = new System.IO.StreamWriter(metaEntry.Open(), Encoding.UTF8))
+                writer.Write(metaJson);
+
+            var weightsEntry = archive.CreateEntry("weights.json", CompressionLevel.Optimal);
+            using (var writer = new System.IO.StreamWriter(weightsEntry.Open(), Encoding.UTF8))
+                writer.Write(weightsJson);
+
+            return Error.Ok;
+        }
+        catch (Exception ex)
+        {
+            GD.PushError($"[RLCheckpoint] Failed to write ZIP checkpoint '{absPath}': {ex.Message}");
+            return Error.Failed;
+        }
+    }
+
+    /// <summary>
+    /// Loads a checkpoint from a .rlcheckpoint ZIP archive (both meta and weights).
+    /// </summary>
+    public static RLCheckpoint? LoadFromZip(string path)
+    {
+        var absPath = ResolvePath(path);
+        try
+        {
+            using var zipStream = System.IO.File.OpenRead(absPath);
+            using var archive   = new ZipArchive(zipStream, ZipArchiveMode.Read);
+
+            var metaEntry    = archive.GetEntry("meta.json");
+            var weightsEntry = archive.GetEntry("weights.json");
+            if (metaEntry is null || weightsEntry is null)
+            {
+                GD.PushError($"[RLCheckpoint] ZIP archive missing required entries: '{absPath}'");
+                return null;
+            }
+
+            string metaJson, weightsJson;
+            using (var reader = new System.IO.StreamReader(metaEntry.Open(), Encoding.UTF8))
+                metaJson = reader.ReadToEnd();
+            using (var reader = new System.IO.StreamReader(weightsEntry.Open(), Encoding.UTF8))
+                weightsJson = reader.ReadToEnd();
+
+            var metaParsed = Json.ParseString(metaJson);
+            if (metaParsed.VariantType != Variant.Type.Dictionary)
+            {
+                GD.PushError($"[RLCheckpoint] Invalid meta.json in '{absPath}'");
+                return null;
+            }
+            var metaData = metaParsed.AsGodotDictionary();
+
+            var weightsParsed = Json.ParseString(weightsJson);
+            if (weightsParsed.VariantType != Variant.Type.Dictionary)
+            {
+                GD.PushError($"[RLCheckpoint] Invalid weights.json in '{absPath}'");
+                return null;
+            }
+            var weightsData = weightsParsed.AsGodotDictionary();
+
+            var weightArr = weightsData.ContainsKey("weights") ? weightsData["weights"].AsGodotArray() : new Godot.Collections.Array();
+            var shapeArr  = weightsData.ContainsKey("shapes")  ? weightsData["shapes"].AsGodotArray()  : new Godot.Collections.Array();
+
+            var weights = new float[weightArr.Count];
+            for (var i = 0; i < weightArr.Count; i++) weights[i] = weightArr[i].AsSingle();
+            var shapes = new int[shapeArr.Count];
+            for (var i = 0; i < shapeArr.Count; i++) shapes[i] = (int)shapeArr[i].AsInt64();
+
+            var checkpoint = new RLCheckpoint
+            {
+                FormatVersion    = metaData.ContainsKey("format_version") ? (int)metaData["format_version"].AsInt64() : CurrentFormatVersion,
+                RunId            = metaData.ContainsKey("run_id")         ? metaData["run_id"].AsString()             : string.Empty,
+                WeightBuffer     = weights,
+                LayerShapeBuffer = shapes,
+            };
+
+            ReadTrainingStats(metaData, checkpoint);
+
+            if (metaData.ContainsKey("meta") && metaData["meta"].VariantType == Variant.Type.Dictionary)
+                checkpoint.ApplyMetadataDictionary(metaData["meta"].AsGodotDictionary());
+            else
+                checkpoint.PopulateLegacyMetadata();
+
+            return checkpoint;
+        }
+        catch (Exception ex)
+        {
+            GD.PushError($"[RLCheckpoint] Failed to read ZIP checkpoint '{absPath}': {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Loads only the metadata from a .rlcheckpoint ZIP archive by reading the uncompressed
+    /// <c>meta.json</c> entry. WeightBuffer and LayerShapeBuffer will be empty.
+    /// </summary>
+    public static RLCheckpoint? LoadMetaFromZip(string path)
+    {
+        var absPath = ResolvePath(path);
+        try
+        {
+            using var zipStream = System.IO.File.OpenRead(absPath);
+            using var archive   = new ZipArchive(zipStream, ZipArchiveMode.Read);
+
+            var metaEntry = archive.GetEntry("meta.json");
+            if (metaEntry is null) return null;
+
+            string metaJson;
+            using (var reader = new System.IO.StreamReader(metaEntry.Open(), Encoding.UTF8))
+                metaJson = reader.ReadToEnd();
+
+            var metaParsed = Json.ParseString(metaJson);
+            if (metaParsed.VariantType != Variant.Type.Dictionary) return null;
+            var metaData = metaParsed.AsGodotDictionary();
+
+            var checkpoint = new RLCheckpoint
+            {
+                FormatVersion    = metaData.ContainsKey("format_version") ? (int)metaData["format_version"].AsInt64() : CurrentFormatVersion,
+                RunId            = metaData.ContainsKey("run_id")         ? metaData["run_id"].AsString()             : string.Empty,
+                WeightBuffer     = Array.Empty<float>(),
+                LayerShapeBuffer = Array.Empty<int>(),
+            };
+
+            ReadTrainingStats(metaData, checkpoint);
+
+            if (metaData.ContainsKey("meta") && metaData["meta"].VariantType == Variant.Type.Dictionary)
+                checkpoint.ApplyMetadataDictionary(metaData["meta"].AsGodotDictionary());
+            else
+                checkpoint.PopulateLegacyMetadata();
+
+            return checkpoint;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Given a path (with or without extension), returns the path to the actual checkpoint file.
+    /// Prefers the ZIP format (.rlcheckpoint) over plain JSON (.json) when both exist.
+    /// </summary>
+    public static string ResolveCheckpointExtension(string path)
+    {
+        var absPath = ResolvePath(path);
+        if (System.IO.File.Exists(absPath)) return absPath;
+
+        // Strip known extensions then probe both formats
+        string stem;
+        if (absPath.EndsWith(ZipExtension, StringComparison.OrdinalIgnoreCase))
+            stem = absPath[..^ZipExtension.Length];
+        else if (absPath.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            stem = absPath[..^5];
+        else
+            stem = absPath;
+
+        var zipPath  = stem + ZipExtension;
+        var jsonPath = stem + ".json";
+        if (System.IO.File.Exists(zipPath))  return zipPath;
+        if (System.IO.File.Exists(jsonPath)) return jsonPath;
+        return path;
     }
 
     public void PopulateLegacyMetadata()

@@ -53,7 +53,7 @@ public partial class RLAgent3D : Node3D, IRLAgent
 
     public override void _Ready()
     {
-        AddToGroup("rl_agent_plugin_agent");
+        AddToGroup("rl-agent-plugin_agent");
     }
 
     // ── New API ───────────────────────────────────────────────────────────────
@@ -294,7 +294,7 @@ public partial class RLAgent3D : Node3D, IRLAgent
         {
             warnings.Add("ControlMode is Auto with no inference model path set. " +
                          "The agent will train normally, but will be skipped during normal play (Run Project / Run Inference) " +
-                         "unless a checkpoint already exists in the default run directory.");
+                         "until an .rlmodel is assigned on PolicyGroupConfig.");
         }
         return warnings.ToArray();
     }
@@ -433,7 +433,7 @@ public partial class RLAgent3D : Node3D, IRLAgent
         // both being direct children of the scene root rather than Academy being a parent).
         if (IsInsideTree())
         {
-            foreach (var node in GetTree().GetNodesInGroup("rl_agent_plugin_academy"))
+            foreach (var node in GetTree().GetNodesInGroup("rl-agent-plugin_academy"))
                 if (node is RLAcademy a) { _cachedAcademy = a; return a; }
         }
 

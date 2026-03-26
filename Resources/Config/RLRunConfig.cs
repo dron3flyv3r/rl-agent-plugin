@@ -29,8 +29,32 @@ public partial class RLRunConfig : Resource
     [Export] public int ActionRepeat { get; set; } = 4;
     /// <summary>
     /// Save policy checkpoints every N trainer updates.
+    /// Ignored when <see cref="CheckpointIntervalSteps"/> is greater than zero.
     /// </summary>
     [Export] public int CheckpointInterval { get; set; } = 10;
+    /// <summary>
+    /// If greater than zero, save history checkpoints every N total environment steps instead of
+    /// every N trainer updates. Takes precedence over <see cref="CheckpointInterval"/>.
+    /// </summary>
+    [Export] public long CheckpointIntervalSteps { get; set; } = 0;
+    /// <summary>
+    /// Number of most-recent history checkpoints to always keep intact.
+    /// Older checkpoints beyond this count are thinned by <see cref="HistoryKeepEveryNth"/>.
+    /// Set to 0 to disable thinning entirely.
+    /// </summary>
+    [Export] public int HistoryKeepRecentCount { get; set; } = 20;
+    /// <summary>
+    /// For history checkpoints older than <see cref="HistoryKeepRecentCount"/>, keep every Nth
+    /// and delete the rest. Set to 0 to disable thinning.
+    /// </summary>
+    [Export] public int HistoryKeepEveryNth { get; set; } = 10;
+    /// <summary>
+    /// Compress history checkpoint files into a ZIP archive (.rlcheckpoint).
+    /// The archive contains an uncompressed <c>meta.json</c> for fast metadata reads
+    /// and a deflate-compressed <c>weights.json</c> for bulk weight data.
+    /// Old plain-JSON checkpoints are still loaded correctly when this is disabled.
+    /// </summary>
+    [Export] public bool CompressCheckpoints { get; set; } = true;
     /// <summary>
     /// Show a tiled debug grid for batched environments in training scenes.
     /// </summary>

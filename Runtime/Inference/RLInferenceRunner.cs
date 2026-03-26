@@ -7,7 +7,7 @@ namespace RlAgentPlugin.Runtime;
 ///
 /// Usage:
 /// <code>
-///   var runner = new RLInferenceRunner("res://runs/my_run/checkpoint_1000.json");
+///   var runner = new RLInferenceRunner("res://runs/my_run/policy_1000.rlmodel");
 ///   float[] obs = GetMyObservations();
 ///   PolicyDecision action = runner.Predict(obs);
 ///   int move  = action.DiscreteAction;       // -1 if continuous-only
@@ -27,30 +27,27 @@ public sealed class RLInferenceRunner
     /// <summary>Number of continuous action dimensions (0 if discrete-only).</summary>
     public int ContinuousActionDimensions { get; }
 
-    /// <summary>Algorithm string from the checkpoint — "PPO" or "SAC".</summary>
+    /// <summary>Algorithm string stored in the loaded model metadata — "PPO" or "SAC".</summary>
     public string Algorithm { get; }
 
     /// <summary>
-    /// Loads a checkpoint from <paramref name="checkpointPath"/> and builds the correct
+    /// Loads a model from <paramref name="modelPath"/> and builds the correct
     /// inference policy for its algorithm.
     /// </summary>
-    /// <param name="checkpointPath">
-    /// Absolute path, <c>res://</c>, or <c>user://</c> path to a checkpoint JSON file.
+    /// <param name="modelPath">
+    /// Absolute path, <c>res://</c>, or <c>user://</c> path to a <c>.rlmodel</c> file.
     /// </param>
     /// <param name="fallbackGraph">
-    /// Optional network graph used when the checkpoint has no embedded graph metadata
-    /// (e.g. very old checkpoints). Pass <c>null</c> to use the built-in default.
+    /// Optional network graph used when the model has no embedded graph metadata
+    /// (e.g. imported from a legacy format). Pass <c>null</c> to use the built-in default.
     /// </param>
     /// <exception cref="InvalidOperationException">
     /// Thrown when the file cannot be read or parsed.
     /// </exception>
-    public RLInferenceRunner(string checkpointPath, RLNetworkGraph? fallbackGraph = null)
-        : this(LoadOrThrow(checkpointPath), fallbackGraph) { }
+    public RLInferenceRunner(string modelPath, RLNetworkGraph? fallbackGraph = null)
+        : this(LoadModelOrThrow(modelPath), fallbackGraph) { }
 
-    /// <summary>
-    /// Builds an inference runner from an already-loaded <see cref="RLCheckpoint"/>.
-    /// </summary>
-    public RLInferenceRunner(RLCheckpoint checkpoint, RLNetworkGraph? fallbackGraph = null)
+    private RLInferenceRunner(RLCheckpoint checkpoint, RLNetworkGraph? fallbackGraph = null)
     {
         if (checkpoint is null) throw new ArgumentNullException(nameof(checkpoint));
 
@@ -61,8 +58,8 @@ public sealed class RLInferenceRunner
 
         if (ObservationSize <= 0)
             throw new InvalidOperationException(
-                $"Checkpoint has invalid ObservationSize ({ObservationSize}). " +
-                "The checkpoint may be corrupt or from an incompatible format version.");
+                $"Inference model has invalid ObservationSize ({ObservationSize}). " +
+                "The model may be corrupt or from an incompatible format version.");
 
         _policy = InferencePolicyFactory.Create(checkpoint, fallbackGraph);
         _policy.LoadCheckpoint(checkpoint);
@@ -91,12 +88,15 @@ public sealed class RLInferenceRunner
 
     // ── Helpers ──────────────────────────────────────────────────────────────
 
-    private static RLCheckpoint LoadOrThrow(string path)
+    private static RLCheckpoint LoadModelOrThrow(string path)
     {
         if (string.IsNullOrEmpty(path))
-            throw new ArgumentException("Checkpoint path must not be null or empty.", nameof(path));
+            throw new ArgumentException("Model path must not be null or empty.", nameof(path));
 
-        return RLCheckpoint.LoadFromFile(path)
-               ?? throw new InvalidOperationException($"Failed to load checkpoint from '{path}'.");
+        if (!path.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("Inference model path must point to a .rlmodel file.", nameof(path));
+
+        return RLModelLoader.LoadFromFile(path)
+               ?? throw new InvalidOperationException($"Failed to load inference model from '{path}'.");
     }
 }

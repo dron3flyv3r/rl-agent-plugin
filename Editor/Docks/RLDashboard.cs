@@ -1435,15 +1435,6 @@ public partial class RLDashboard : Control
         exportBtn.Pressed += () => OnExportCheckpointPressed(entry);
         row.AddChild(exportBtn);
 
-        var inferBtn = new Button
-        {
-            Text        = "Set Inference",
-            TooltipText = "Copy res:// path to clipboard for use in InferenceCheckpointPath",
-            CustomMinimumSize = new Vector2(98, 0),
-        };
-        inferBtn.Pressed += () => OnSetInferencePressed(entry.AbsolutePath);
-        row.AddChild(inferBtn);
-
         return row;
     }
 
@@ -1549,12 +1540,5 @@ public partial class RLDashboard : Control
 
         var suffix = entry.IsSelfPlayFrozen ? $"selfplay_u{entry.UpdateCount:D6}" : $"u{entry.UpdateCount:D6}";
         return $"{policyName}_{suffix}";
-    }
-
-    private void OnSetInferencePressed(string checkpointAbsPath)
-    {
-        var resPath = ProjectSettings.LocalizePath(checkpointAbsPath);
-        DisplayServer.ClipboardSet(resPath);
-        SetHeaderStatus($"Copied to clipboard: {resPath}");
     }
 }

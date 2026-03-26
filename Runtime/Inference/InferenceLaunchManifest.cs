@@ -8,7 +8,7 @@ namespace RlAgentPlugin.Runtime;
 /// </summary>
 public sealed class InferenceLaunchManifest
 {
-    public const string ActiveManifestPath = "user://rl_agent_plugin/inference_manifest.json";
+    public const string ActiveManifestPath = "user://rl-agent-plugin/inference_manifest.json";
 
     /// <summary>res:// path to the training scene to load.</summary>
     public string ScenePath { get; set; } = string.Empty;

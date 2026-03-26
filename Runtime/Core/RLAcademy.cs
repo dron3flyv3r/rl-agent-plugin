@@ -49,13 +49,6 @@ public partial class RLAcademy : Node
     /// </summary>
     [Export] public RLSelfPlayConfig? SelfPlay { get; set; }
 
-    [ExportGroup("Inference")]
-    /// <summary>
-    /// Inference-only checkpoint used to run trained policies outside training bootstrap.
-    /// </summary>
-    [Export] public RLCheckpoint? Checkpoint { get; set; }
-
-
     [ExportGroup("Debug")]
     /// <summary>Show the observation/reward/action spy overlay when running outside of training. Press Tab to cycle agents.</summary>
     [Export] public bool EnableSpyOverlay { get; set; } = false;
@@ -129,7 +122,7 @@ public partial class RLAcademy : Node
 
     public override void _Ready()
     {
-        AddToGroup("rl_agent_plugin_academy");
+        AddToGroup("rl-agent-plugin_academy");
         TryInitializeInference();
         TryInitializeHumanMode();
 
@@ -358,7 +351,6 @@ public partial class RLAcademy : Node
             }
         }
 
-        RLCheckpoint? firstLoadedCheckpoint = null;
         // GetAgents(Inference) includes Auto-mode agents so their observation sizes are inferred too.
         var observationInference = InferObservationSizes(RLAgentControlMode.Inference);
         foreach (var error in observationInference.Errors)
@@ -375,34 +367,35 @@ public partial class RLAcademy : Node
             }
 
             observationInference.AgentBindings.TryGetValue(agent, out var binding);
-            var checkpointPath = agent.GetInferenceModelPath();
-
-            // For .rlmodel files resolve path directly; for .json fall back to registry.
-            RLCheckpoint? checkpoint;
-            if (checkpointPath.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
+            var modelPath = agent.GetInferenceModelPath();
+            if (string.IsNullOrWhiteSpace(modelPath))
             {
-                if (!FileAccess.FileExists(checkpointPath))
+                if (agent.ControlMode == RLAgentControlMode.Inference)
                 {
-                    GD.PushWarning($"[RLAcademy] .rlmodel not found for agent '{agent.AsNode().Name}': {checkpointPath}");
-                    continue;
+                    GD.PushWarning($"[RLAcademy] Agent '{agent.AsNode().Name}' is in Inference mode but has no .rlmodel assigned.");
                 }
 
-                checkpoint = RLModelLoader.LoadFromFile(checkpointPath);
+                continue;
             }
-            else
+
+            if (!modelPath.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
             {
-                var resolvedPath = CheckpointRegistry.ResolveCheckpointPath(checkpointPath, binding?.BindingKey);
-                if (string.IsNullOrWhiteSpace(resolvedPath))
-                {
-                    continue;
-                }
-
-                checkpoint = RLCheckpoint.LoadFromFile(resolvedPath);
+                GD.PushWarning(
+                    $"[RLAcademy] Agent '{agent.AsNode().Name}' has an unsupported inference model path '{modelPath}'. " +
+                    "Inference requires a .rlmodel file.");
+                continue;
             }
 
+            if (!FileAccess.FileExists(modelPath))
+            {
+                GD.PushWarning($"[RLAcademy] .rlmodel not found for agent '{agent.AsNode().Name}': {modelPath}");
+                continue;
+            }
+
+            var checkpoint = RLModelLoader.LoadFromFile(modelPath);
             if (checkpoint is null)
             {
-                GD.PushWarning($"[RLAcademy] Could not load checkpoint for agent '{agent.AsNode().Name}'.");
+                GD.PushWarning($"[RLAcademy] Could not load inference model for agent '{agent.AsNode().Name}'.");
                 continue;
             }
 
@@ -435,7 +428,7 @@ public partial class RLAcademy : Node
             if (obsSize != agentObsSize)
             {
                 GD.PushError(
-                    $"[RLAcademy] Checkpoint observation size {obsSize} does not match agent '{agent.AsNode().Name}' " +
+                    $"[RLAcademy] Model observation size {obsSize} does not match agent '{agent.AsNode().Name}' " +
                     $"observation size {agentObsSize}.");
                 continue;
             }
@@ -444,7 +437,7 @@ public partial class RLAcademy : Node
             {
                 GD.PushError(
                     $"[RLAcademy] Continuous action mismatch for '{agent.AsNode().Name}': " +
-                    $"checkpoint={checkpoint.ContinuousActionDimensions}, agent={agentContinuousDims}.");
+                    $"model={checkpoint.ContinuousActionDimensions}, agent={agentContinuousDims}.");
                 continue;
             }
 
@@ -452,13 +445,13 @@ public partial class RLAcademy : Node
             {
                 GD.PushError(
                     $"[RLAcademy] Discrete action mismatch for '{agent.AsNode().Name}': " +
-                    $"checkpoint={checkpoint.DiscreteActionCount}, agent={agentDiscreteCount}.");
+                    $"model={checkpoint.DiscreteActionCount}, agent={agentDiscreteCount}.");
                 continue;
             }
 
             if (obsSize <= 0 || actionCount <= 0)
             {
-                GD.PushWarning($"[RLAcademy] Checkpoint for agent '{agent.AsNode().Name}' has invalid dimensions (obs={obsSize}, actions={actionCount}).");
+                GD.PushWarning($"[RLAcademy] Inference model for agent '{agent.AsNode().Name}' has invalid dimensions (obs={obsSize}, actions={actionCount}).");
                 continue;
             }
 
@@ -468,23 +461,18 @@ public partial class RLAcademy : Node
                 policy.LoadCheckpoint(checkpoint);
                 _agentInferencePolicies[agent] = policy;
                 _inferenceStepCounters[agent] = 0;
-                firstLoadedCheckpoint ??= checkpoint;
                 GD.Print(
                     $"[RLAcademy] Loaded {checkpoint.Algorithm} inference model for '{agent.AsNode().Name}' " +
                     $"(obs={obsSize}, actions={actionCount}).");
             }
             catch (Exception ex)
             {
-                GD.PushError($"[RLAcademy] Failed to load checkpoint for agent '{agent.AsNode().Name}': {ex.Message} — " +
-                             "Verify that the checkpoint metadata matches the active agent.");
+                GD.PushError($"[RLAcademy] Failed to load inference model for agent '{agent.AsNode().Name}': {ex.Message} — " +
+                             "Verify that the model metadata matches the active agent.");
             }
         }
 
         InferenceActive = _agentInferencePolicies.Count > 0;
-        if (InferenceActive && firstLoadedCheckpoint is not null)
-        {
-            Checkpoint = firstLoadedCheckpoint;
-        }
     }
 
     public RLTrainerConfig? ResolveTrainerConfig()

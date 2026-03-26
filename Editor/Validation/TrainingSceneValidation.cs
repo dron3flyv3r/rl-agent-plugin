@@ -26,7 +26,6 @@ public sealed class TrainingSceneValidation
     public string AcademyPath { get; set; } = string.Empty;
     public string TrainingConfigPath { get; set; } = string.Empty;
     public string NetworkConfigPath { get; set; } = string.Empty;
-    public string CheckpointPath { get; set; } = string.Empty;
     public string RunPrefix { get; set; } = string.Empty;
     public int CheckpointInterval { get; set; } = 10;
     public float SimulationSpeed { get; set; } = 1.0f;
@@ -37,6 +36,7 @@ public sealed class TrainingSceneValidation
     public bool HasSelfPlayPairings { get; set; }
     public int ExpectedActionCount { get; set; }
     public int TrainAgentCount { get; set; }
+    public int InferenceAgentCount { get; set; }
     public bool IsValid { get; set; }
     public List<string> AgentNames  { get; } = new();
     /// <summary>Safe group ID for each entry in AgentNames (same index). Used to locate per-agent checkpoint files.</summary>
@@ -58,6 +58,7 @@ public sealed class TrainingSceneValidation
 
         builder.AppendLine($"Agents: {AgentNames.Count}");
         builder.AppendLine($"Train Agents: {TrainAgentCount}");
+        builder.AppendLine($"Inference Agents: {InferenceAgentCount}");
 
         if (PolicyGroups.Count > 1)
         {

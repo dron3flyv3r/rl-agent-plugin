@@ -76,12 +76,16 @@ public static class CheckpointRegistry
                 break;
             }
 
-            if (runDir.CurrentIsDir() || entryName.StartsWith(".") || !entryName.EndsWith(".json"))
+            if (runDir.CurrentIsDir() || entryName.StartsWith("."))
             {
                 continue;
             }
 
-            yield return $"{runDirectory}/{entryName}";
+            if (entryName.EndsWith(".json", StringComparison.OrdinalIgnoreCase)
+                || entryName.EndsWith(RLCheckpoint.ZipExtension, StringComparison.OrdinalIgnoreCase))
+            {
+                yield return $"{runDirectory}/{entryName}";
+            }
         }
 
         runDir.ListDirEnd();
@@ -101,16 +105,18 @@ public static class CheckpointRegistry
         }
 
         var safeGroupId = RLPolicyGroupBindingResolver.MakeSafeGroupId(groupId);
-        var fileName = $"checkpoint__{safeGroupId}.json";
+        // Prefer the compressed format when both exist; check ZIP first, then JSON.
+        var fileNameZip  = $"checkpoint__{safeGroupId}{RLCheckpoint.ZipExtension}";
+        var fileNameJson = $"checkpoint__{safeGroupId}.json";
+        string? jsonMatch = null;
         foreach (var checkpointPath in checkpoints)
         {
-            if (string.Equals(System.IO.Path.GetFileName(checkpointPath), fileName, StringComparison.OrdinalIgnoreCase))
-            {
-                return checkpointPath;
-            }
+            var name = System.IO.Path.GetFileName(checkpointPath);
+            if (string.Equals(name, fileNameZip,  StringComparison.OrdinalIgnoreCase)) return checkpointPath;
+            if (string.Equals(name, fileNameJson, StringComparison.OrdinalIgnoreCase)) jsonMatch = checkpointPath;
         }
 
-        return string.Empty;
+        return jsonMatch ?? string.Empty;
     }
 
     public static string ResolveCheckpointPath(string preferredPath, string? groupId = null)
@@ -138,6 +144,14 @@ public static class CheckpointRegistry
         var historyDir = System.IO.Path.Combine(runDirAbsPath, "history");
         if (System.IO.Directory.Exists(historyDir))
         {
+            // ZIP checkpoints (.rlcheckpoint) — metadata read from uncompressed entry, no sidecar needed.
+            foreach (var file in System.IO.Directory.GetFiles(historyDir, $"*{RLCheckpoint.ZipExtension}"))
+            {
+                var entry = ParseZipMetaEntry(file, isSelfPlayFrozen: false);
+                if (entry is not null) results.Add(entry);
+            }
+
+            // Legacy plain-JSON checkpoints — prefer sidecar for fast metadata reads.
             foreach (var file in System.IO.Directory.GetFiles(historyDir, "*.meta.json"))
             {
                 var entry = ParseMetaFile(file, isSelfPlayFrozen: false);
@@ -177,6 +191,35 @@ public static class CheckpointRegistry
         return results;
     }
 
+    /// <summary>
+    /// Reads the uncompressed <c>meta.json</c> entry from a .rlcheckpoint ZIP archive
+    /// without loading the weight data. Returns null on any failure.
+    /// </summary>
+    private static CheckpointHistoryEntry? ParseZipMetaEntry(string absPath, bool isSelfPlayFrozen)
+    {
+        try
+        {
+            var cp = RLCheckpoint.LoadMetaFromZip(absPath);
+            if (cp is null) return null;
+
+            return new CheckpointHistoryEntry
+            {
+                AbsolutePath     = absPath,
+                PolicyGroupId    = ExtractGroupIdFromPath(absPath),
+                UpdateCount      = cp.UpdateCount,
+                TotalSteps       = cp.TotalSteps,
+                EpisodeCount     = cp.EpisodeCount,
+                Algorithm        = cp.Algorithm,
+                RewardSnapshot   = cp.RewardSnapshot,
+                IsSelfPlayFrozen = isSelfPlayFrozen,
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     private static CheckpointHistoryEntry? ParseMetaFile(string absPath, bool isSelfPlayFrozen)
     {
         try
@@ -213,9 +256,10 @@ public static class CheckpointRegistry
                 reward    = meta.ContainsKey("reward_snapshot") ? meta["reward_snapshot"].AsSingle() : 0f;
             }
 
+            var checkpointPath = absPath.Replace(".meta.json", ".json", StringComparison.Ordinal);
             return new CheckpointHistoryEntry
             {
-                AbsolutePath     = absPath.Replace(".meta.json", ".json", StringComparison.Ordinal),
+                AbsolutePath     = RLCheckpoint.ResolveCheckpointExtension(checkpointPath),
                 PolicyGroupId    = groupId,
                 UpdateCount      = updateCount,
                 TotalSteps       = totalSteps,

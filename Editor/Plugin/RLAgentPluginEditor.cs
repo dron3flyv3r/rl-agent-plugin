@@ -11,14 +11,13 @@ namespace RlAgentPlugin;
 [Tool]
 public partial class RLAgentPluginEditor : EditorPlugin
 {
-    private const string AgentScriptPath = "res://addons/rl_agent_plugin/Runtime/Agents/RLAgent2D.cs";
-    private const string Agent3DScriptPath = "res://addons/rl_agent_plugin/Runtime/Agents/RLAgent3D.cs";
-    private const string AcademyScriptPath = "res://addons/rl_agent_plugin/Runtime/Core/RLAcademy.cs";
-    private const string DenseLayerDefScriptPath = "res://addons/rl_agent_plugin/Resources/Models/RLDenseLayerDef.cs";
-    private const string DropoutLayerDefScriptPath = "res://addons/rl_agent_plugin/Resources/Models/RLDropoutLayerDef.cs";
-    private const string FlattenLayerDefScriptPath = "res://addons/rl_agent_plugin/Resources/Models/RLFlattenLayerDef.cs";
-    private const string LayerNormDefScriptPath = "res://addons/rl_agent_plugin/Resources/Models/RLLayerNormDef.cs";
-    private const string PluginIconPath = "res://icon.svg";
+    private const string AgentScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent2D.cs";
+    private const string Agent3DScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent3D.cs";
+    private const string AcademyScriptPath = "res://addons/rl-agent-plugin/Runtime/Core/RLAcademy.cs";
+    private const string DenseLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDenseLayerDef.cs";
+    private const string DropoutLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDropoutLayerDef.cs";
+    private const string FlattenLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLFlattenLayerDef.cs";
+    private const string LayerNormDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLLayerNormDef.cs";
     private const int QuickTestEpisodeLimit = 5;
     private static readonly string[] RequiredGlobalScriptClasses =
     {
@@ -35,7 +34,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
     };
     private static readonly Lazy<Dictionary<string, Type>> ScriptTypeIndex = new(BuildScriptTypeIndex);
 
-    private Texture2D? _pluginIcon;
     private RLModelFormatLoader? _rlModelFormatLoader;
     private EditorDock? _setupEditorDock;
     private RLSetupDock? _setupDock;
@@ -52,7 +50,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     public override void _EnterTree()
     {
-        _pluginIcon = GD.Load<Texture2D>(PluginIconPath);
         _rlModelFormatLoader = new RLModelFormatLoader();
         ResourceLoader.AddResourceFormatLoader(_rlModelFormatLoader, true);
 
@@ -144,8 +141,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     public override string _GetPluginName() => "RLDash";
 
-    public override Texture2D? _GetPluginIcon() => _pluginIcon;
-
     public override void _MakeVisible(bool visible)
     {
         if (_dashboard is not null)
@@ -217,12 +212,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         if (_runInferenceButton is not null)
         {
-            var hasCheckpoint = !string.IsNullOrEmpty(CheckpointRegistry.GetLatestCheckpointPath());
-            var hasTrainOrAutoAgents = _lastValidation is { TrainAgentCount: > 0 };
-            _runInferenceButton.Disabled = isPlaying || (!hasCheckpoint && !hasTrainOrAutoAgents);
-            _runInferenceButton.TooltipText = !hasCheckpoint
-                ? "Run Inference — train at least one checkpoint first, or set InferenceModelPath on agents."
-                : "Launch the scene with trained agents running in inference mode.";
+            var hasInferenceAgents = _lastValidation is { InferenceAgentCount: > 0 };
+            _runInferenceButton.Disabled = isPlaying || !hasInferenceAgents;
+            _runInferenceButton.TooltipText = hasInferenceAgents
+                ? "Launch the scene with trained agents running in inference mode."
+                : "Run Inference — assign a valid .rlmodel to at least one Inference or Auto agent.";
         }
 
         _setupDock.SetActionStates(
@@ -290,37 +284,37 @@ public partial class RLAgentPluginEditor : EditorPlugin
         var layerNormDefScript = GD.Load<Script>(LayerNormDefScriptPath);
         if (agentScript is not null)
         {
-            AddCustomType(nameof(RLAgent2D), nameof(Node2D), agentScript, _pluginIcon);
+            AddCustomType(nameof(RLAgent2D), nameof(Node2D), agentScript, null);
         }
 
         if (agent3DScript is not null)
         {
-            AddCustomType(nameof(RLAgent3D), nameof(Node3D), agent3DScript, _pluginIcon);
+            AddCustomType(nameof(RLAgent3D), nameof(Node3D), agent3DScript, null);
         }
 
         if (academyScript is not null)
         {
-            AddCustomType(nameof(RLAcademy), nameof(Node), academyScript, _pluginIcon);
+            AddCustomType(nameof(RLAcademy), nameof(Node), academyScript, null);
         }
 
         if (denseLayerDefScript is not null)
         {
-            AddCustomType(nameof(RLDenseLayerDef), nameof(Resource), denseLayerDefScript, _pluginIcon);
+            AddCustomType(nameof(RLDenseLayerDef), nameof(Resource), denseLayerDefScript, null);
         }
 
         if (dropoutLayerDefScript is not null)
         {
-            AddCustomType(nameof(RLDropoutLayerDef), nameof(Resource), dropoutLayerDefScript, _pluginIcon);
+            AddCustomType(nameof(RLDropoutLayerDef), nameof(Resource), dropoutLayerDefScript, null);
         }
 
         if (flattenLayerDefScript is not null)
         {
-            AddCustomType(nameof(RLFlattenLayerDef), nameof(Resource), flattenLayerDefScript, _pluginIcon);
+            AddCustomType(nameof(RLFlattenLayerDef), nameof(Resource), flattenLayerDefScript, null);
         }
 
         if (layerNormDefScript is not null)
         {
-            AddCustomType(nameof(RLLayerNormDef), nameof(Resource), layerNormDefScript, _pluginIcon);
+            AddCustomType(nameof(RLLayerNormDef), nameof(Resource), layerNormDefScript, null);
         }
     }
 
@@ -411,7 +405,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         // Write initial meta.json so the dashboard can show policy-group names on export.
         WriteRunMeta(manifest.RunId, validation.ExportNames, validation.ExportGroups, validation.HasCurriculum);
 
-        var bootstrapScene = "res://addons/rl_agent_plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
+        var bootstrapScene = "res://addons/rl-agent-plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
         EditorInterface.Singleton.PlayCustomScene(bootstrapScene);
         _launchedTrainingRun = true;
         _launchedQuickTestRun = false;
@@ -459,7 +453,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         manifest.ScenePath = scenePath;
         manifest.AcademyNodePath = validation.AcademyPath;
         manifest.RunId = $"{runPrefix}_{BuildRunTimestampSuffix()}";
-        manifest.RunDirectory = "user://rl_agent_plugin/quick_test";
+        manifest.RunDirectory = "user://rl-agent-plugin/quick_test";
         manifest.CheckpointPath = string.Empty;
         manifest.TrainingConfigPath = validation.TrainingConfigPath;
         manifest.NetworkConfigPath = validation.NetworkConfigPath;
@@ -484,7 +478,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         _setupDock.SetLaunchStatus(
             $"Launching quick test: {QuickTestEpisodeLimit} episodes, batch=1, speed=1.0. Spy overlay enabled.");
 
-        var bootstrapScene = "res://addons/rl_agent_plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
+        var bootstrapScene = "res://addons/rl-agent-plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
         EditorInterface.Singleton.PlayCustomScene(bootstrapScene);
         _launchedQuickTestRun = true;
         _launchedTrainingRun = false;
@@ -503,16 +497,16 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         var validation = ValidateSceneSafely(scenePath, "inference launch");
 
-        // We only need an academy and at least one trainable agent; full training validation is not required.
+        // We only need an academy and at least one inference-capable agent; full training validation is not required.
         if (string.IsNullOrWhiteSpace(validation.AcademyPath))
         {
             _setupDock.SetLaunchStatus("Inference launch failed: no RLAcademy found in the scene.");
             return;
         }
 
-        if (validation.TrainAgentCount == 0)
+        if (validation.InferenceAgentCount == 0)
         {
-            _setupDock.SetLaunchStatus("Inference launch failed: no Train or Auto mode agents found.");
+            _setupDock.SetLaunchStatus("Inference launch failed: no Inference or Auto agents with a valid .rlmodel were found.");
             return;
         }
 
@@ -531,13 +525,9 @@ public partial class RLAgentPluginEditor : EditorPlugin
             return;
         }
 
-        var latestCheckpoint = CheckpointRegistry.GetLatestCheckpointPath();
-        var checkpointNote = string.IsNullOrEmpty(latestCheckpoint)
-            ? " (no checkpoint found — agents with an InferenceModelPath will use that instead)"
-            : $" using latest checkpoint";
-        _setupDock.SetLaunchStatus($"Launching inference mode{checkpointNote}.");
+        _setupDock.SetLaunchStatus($"Launching inference mode for {validation.InferenceAgentCount} configured agent(s).");
 
-        var inferenceBootstrapScene = "res://addons/rl_agent_plugin/Scenes/Bootstrap/InferenceBootstrap.tscn";
+        var inferenceBootstrapScene = "res://addons/rl-agent-plugin/Scenes/Bootstrap/InferenceBootstrap.tscn";
         EditorInterface.Singleton.PlayCustomScene(inferenceBootstrapScene);
     }
 
@@ -653,7 +643,10 @@ public partial class RLAgentPluginEditor : EditorPlugin
     {
         _lastValidation = validation;
         _setupDock?.SetValidationSummary(validation.BuildSummary(), validation.IsValid);
-        _setupDock?.SetConfigSummary(validation.TrainingConfigPath, validation.NetworkConfigPath, validation.CheckpointPath);
+        _setupDock?.SetConfigSummary(
+            validation.TrainingConfigPath,
+            validation.NetworkConfigPath,
+            validation.InferenceAgentCount > 0 ? $"{validation.InferenceAgentCount} agent(s) configured" : string.Empty);
     }
 
     private static string ResolveTrainingScenePath()
@@ -748,11 +741,21 @@ public partial class RLAgentPluginEditor : EditorPlugin
                             agentsByGroup[binding.BindingKey].Add(node);
                         }
                     }
-                    else if (controlMode == RLAgentControlMode.Inference)
+
+                    if (controlMode == RLAgentControlMode.Inference)
                     {
-                        ValidateInferenceCheckpoint(node, root, validation);
+                        if (ValidateInferenceModel(node, root, validation, requireConfiguredModel: true))
+                        {
+                            validation.InferenceAgentCount += 1;
+                        }
                     }
-                    // Auto mode: no inference checkpoint required — checkpoint is resolved at runtime.
+                    else if (controlMode == RLAgentControlMode.Auto)
+                    {
+                        if (ValidateInferenceModel(node, root, validation, requireConfiguredModel: false))
+                        {
+                            validation.InferenceAgentCount += 1;
+                        }
+                    }
                 }
             });
 
@@ -764,12 +767,10 @@ public partial class RLAgentPluginEditor : EditorPlugin
             {
                 validation.AcademyPath = root.GetPathTo(academy).ToString();
                 var trainingConfigRes = ReadResourceProperty(academy, "TrainingConfig") as RLTrainingConfig;
-                var checkpoint = ReadResourceProperty(academy, "Checkpoint");
                 var runConfig = ReadResourceProperty(academy, "RunConfig");
 
                 validation.TrainingConfigPath = trainingConfigRes?.ResourcePath ?? string.Empty;
                 validation.NetworkConfigPath = validation.TrainingConfigPath;
-                validation.CheckpointPath = checkpoint?.ResourcePath ?? string.Empty;
                 validation.RunPrefix = ReadStringProperty(runConfig, "RunPrefix");
                 validation.CheckpointInterval = ReadIntProperty(runConfig, "CheckpointInterval", 10);
                 validation.SimulationSpeed = ReadFloatProperty(runConfig, "SimulationSpeed", 1.0f);
@@ -1033,38 +1034,38 @@ public partial class RLAgentPluginEditor : EditorPlugin
         return IsAgentNode(node);
     }
 
-    private static void ValidateInferenceCheckpoint(Node node, Node root, TrainingSceneValidation validation)
+    private static bool ValidateInferenceModel(Node node, Node root, TrainingSceneValidation validation, bool requireConfiguredModel)
     {
         if (node is not IRLAgent agent)
         {
-            return;
+            return false;
         }
 
-        var checkpointPath = agent.GetInferenceModelPath();
+        var errorCount = validation.Errors.Count;
+        var modelPath = agent.GetInferenceModelPath();
         var nodePath = root.GetPathTo(node).ToString();
-        if (string.IsNullOrWhiteSpace(checkpointPath))
+        if (string.IsNullOrWhiteSpace(modelPath))
         {
-            validation.Errors.Add($"Agent '{nodePath}' is in Inference mode but has no checkpoint path.");
-            return;
+            if (requireConfiguredModel)
+            {
+                validation.Errors.Add($"Agent '{nodePath}' is in Inference mode but has no .rlmodel path.");
+            }
+
+            return false;
         }
 
-        RLCheckpoint? checkpoint;
-        if (checkpointPath.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
+        if (!modelPath.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
         {
-            checkpoint = RLModelLoader.LoadFromFile(checkpointPath);
+            validation.Errors.Add($"Agent '{nodePath}': inference model path must point to a .rlmodel file.");
+            return false;
         }
-        else
-        {
-            var resolvedPath = CheckpointRegistry.ResolveCheckpointPath(checkpointPath);
-            checkpoint = string.IsNullOrWhiteSpace(resolvedPath)
-                ? null
-                : RLCheckpoint.LoadFromFile(resolvedPath);
-        }
+
+        var checkpoint = RLModelLoader.LoadFromFile(modelPath);
 
         if (checkpoint is null)
         {
-            validation.Errors.Add($"Agent '{nodePath}': failed to load inference checkpoint '{checkpointPath}'.");
-            return;
+            validation.Errors.Add($"Agent '{nodePath}': failed to load inference model '{modelPath}'.");
+            return false;
         }
 
         var observationSize = ReadAgentObservationSize(node, root, validation);
@@ -1074,29 +1075,31 @@ public partial class RLAgentPluginEditor : EditorPlugin
         if (checkpoint.ObservationSize != observationSize)
         {
             validation.Errors.Add(
-                $"Agent '{nodePath}': checkpoint observation size {checkpoint.ObservationSize} " +
+                $"Agent '{nodePath}': model observation size {checkpoint.ObservationSize} " +
                 $"does not match agent observation size {observationSize}.");
         }
 
         if (string.Equals(checkpoint.Algorithm, RLCheckpoint.PpoAlgorithm, StringComparison.OrdinalIgnoreCase)
             && continuousDims > 0)
         {
-            validation.Errors.Add($"Agent '{nodePath}': PPO checkpoints cannot drive continuous actions.");
+            validation.Errors.Add($"Agent '{nodePath}': PPO models cannot drive continuous actions.");
         }
 
         if (checkpoint.DiscreteActionCount > 0 && checkpoint.DiscreteActionCount != discreteCount)
         {
             validation.Errors.Add(
-                $"Agent '{nodePath}': checkpoint discrete action count {checkpoint.DiscreteActionCount} " +
+                $"Agent '{nodePath}': model discrete action count {checkpoint.DiscreteActionCount} " +
                 $"does not match agent count {discreteCount}.");
         }
 
         if (checkpoint.ContinuousActionDimensions > 0 && checkpoint.ContinuousActionDimensions != continuousDims)
         {
             validation.Errors.Add(
-                $"Agent '{nodePath}': checkpoint continuous action dims {checkpoint.ContinuousActionDimensions} " +
+                $"Agent '{nodePath}': model continuous action dims {checkpoint.ContinuousActionDimensions} " +
                 $"does not match agent dims {continuousDims}.");
         }
+
+        return validation.Errors.Count == errorCount;
     }
 
     private static RLAgentControlMode ReadAgentControlMode(Node node)
@@ -1366,8 +1369,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
                 builder.Append(ReadBoolProperty(node, "EnableSpyOverlay"));
                 builder.Append('|');
                 builder.Append(ReadResourceProperty(node, "TrainingConfig")?.ResourcePath ?? string.Empty);
-                builder.Append('|');
-                builder.Append(ReadResourceProperty(node, "Checkpoint")?.ResourcePath ?? string.Empty);
                 if (typedAcademy is not null)
                 {
                     foreach (var pairing in typedAcademy.GetResolvedSelfPlayPairings())
@@ -1407,6 +1408,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
                 builder.Append(policyGroupConfig?.AgentId ?? string.Empty);
                 builder.Append('|');
                 builder.Append(policyGroupConfig?.MaxEpisodeSteps ?? 0);
+                builder.Append('|');
+                builder.Append(policyGroupConfig?.InferenceModelPath ?? string.Empty);
                 builder.Append('|');
                 builder.Append(ReadAgentActionCount(node));
                 builder.Append('|');
