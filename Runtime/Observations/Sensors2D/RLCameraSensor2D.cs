@@ -1,4 +1,5 @@
 using Godot;
+using Godot.Collections;
 
 namespace RlAgentPlugin.Runtime;
 
@@ -8,11 +9,22 @@ namespace RlAgentPlugin.Runtime;
 /// <c>CollectObservations</c> override to feed the captured pixels into the observation.
 ///
 /// Internally the sensor owns a <see cref="SubViewport"/> that renders the world from a
-/// mirrored <see cref="Camera2D"/>. Each <see cref="Capture"/> call reads back the rendered
-/// texture, optionally crops it, and optionally converts it to grayscale.
+/// mirrored <see cref="Camera2D"/>. Each <see cref="Capture"/> call returns the most recent
+/// frame after applying the <see cref="Transforms"/> pipeline in order.
 ///
-/// Editor overlay: the white rectangle shows the full render area; the yellow rectangle
-/// shows the crop region that is actually fed to the network.
+/// <b>Transform pipeline</b><br/>
+/// Add <see cref="RLCameraTransform"/> resources to <see cref="Transforms"/> to pre-process
+/// the image. Transforms are applied left-to-right. Built-in transforms:
+/// <list type="bullet">
+///   <item><see cref="RLGrayscaleTransform"/> — convert to single-channel luminance.</item>
+///   <item><see cref="RLCropTransform"/> — crop a rectangular region.</item>
+///   <item><see cref="RLResizeTransform"/> — scale to a target resolution.</item>
+///   <item><see cref="RLFlipTransform"/> — mirror horizontally or vertically.</item>
+/// </list>
+/// Subclass <see cref="RLCameraTransform"/> and mark it <c>[GlobalClass]</c> to add your own.
+///
+/// Editor overlay: the white rectangle shows the full render area. If a
+/// <see cref="RLCropTransform"/> is present in the pipeline, its crop region is drawn in yellow.
 /// </summary>
 [Tool]
 [GlobalClass]
@@ -22,7 +34,6 @@ public partial class RLCameraSensor2D : Node2D
 
     /// <summary>
     /// Optional CNN/MLP encoder config for this sensor's image stream.
-    /// Assign this to configure how this sensor's image stream is encoded by the network.
     /// When set, it is bound to the stream automatically when the agent calls
     /// <c>buffer.AddImage(this)</c>.
     /// </summary>
@@ -36,32 +47,6 @@ public partial class RLCameraSensor2D : Node2D
         set { _renderSize = value; _dirty = true; if (_viewport != null) _viewport.Size = value; QueueRedraw(); }
     }
 
-    [Export]
-    public Vector2I CropSize
-    {
-        get => _cropSize;
-        set { _cropSize = value; _dirty = true; QueueRedraw(); }
-    }
-
-    /// <summary>
-    /// Pixel offset of the crop window from the top-left of the rendered image.
-    /// (0,0) = top-left. To centre: (RenderSize - CropSize) / 2.
-    /// </summary>
-    [Export]
-    public Vector2I CropOffset
-    {
-        get => _cropOffset;
-        set { _cropOffset = value; _dirty = true; QueueRedraw(); }
-    }
-
-    /// <summary>When true the output has 1 channel (luminance). When false: 3 channels (RGB).</summary>
-    [Export]
-    public bool Grayscale
-    {
-        get => _grayscale;
-        set { _grayscale = value; _dirty = true; }
-    }
-
     /// <summary>Zoom of the internal camera. 1 = world units match viewport pixels.</summary>
     [Export]
     public float Zoom
@@ -70,39 +55,81 @@ public partial class RLCameraSensor2D : Node2D
         set { _zoom = Mathf.Max(0.001f, value); _dirty = true; QueueRedraw(); }
     }
 
+    /// <summary>
+    /// Image transforms applied in order after the viewport is captured.
+    /// Each transform receives the output of the previous one.
+    /// Use <see cref="RLGrayscaleTransform"/>, <see cref="RLCropTransform"/>,
+    /// <see cref="RLResizeTransform"/>, <see cref="RLFlipTransform"/>, or a custom subclass.
+    /// </summary>
+    [Export(PropertyHint.ResourceType, nameof(RLCameraTransform))]
+    public Array<Resource> Transforms
+    {
+        get => _transforms;
+        set { _transforms = value; QueueRedraw(); }
+    }
+
     // ── Private state ────────────────────────────────────────────────────────
 
-    private Vector2I _renderSize = new(128, 128);
-    private Vector2I _cropSize   = new(64, 64);
-    private Vector2I _cropOffset = new(0, 0);
-    private bool     _grayscale  = true;
-    private float    _zoom       = 1.0f;
+    private Vector2I         _renderSize = new(128, 128);
+    private float            _zoom       = 1.0f;
+    private Array<Resource>  _transforms = new();
 
     private SubViewport? _viewport;
     private Camera2D?    _camera;
 
     // Pixel cache — refreshed once per rendered frame in _Process, not per physics step.
     private byte[]? _cachedPixels;
+    private ImageTexture? _finalDebugTexture;
+    private bool          _debugTextureRequested;
 
-    private bool _dirty    = true;
-    private int  _cropW;
-    private int  _cropH;
-    private int  _channels;
+    private bool _dirty = true;
 
     // Overlay colours.
     private static readonly Color CRenderFill   = new(0.5f, 0.8f, 1f,   0.06f);
     private static readonly Color CRenderBorder = new(1f,   1f,   1f,   0.35f);
     private static readonly Color CCropBorder   = new(1f,   0.9f, 0.2f, 0.85f);
 
-    /// <summary>Width of the pixel array returned by <see cref="Capture"/>.</summary>
-    public int OutputWidth    => _cropSize.X;
-    /// <summary>Height of the pixel array returned by <see cref="Capture"/>.</summary>
-    public int OutputHeight   => _cropSize.Y;
-    /// <summary>Channel count (1 = grayscale, 3 = RGB).</summary>
-    public int OutputChannels => _grayscale ? 1 : 3;
+    // ── Output dimensions (computed by chaining transforms) ───────────────────
 
-    /// <summary>The raw SubViewport texture — used by the camera debug overlay.</summary>
-    internal ViewportTexture? ViewportTexture => _viewport?.GetTexture();
+    /// <summary>Width of the pixel array returned by <see cref="Capture"/>.</summary>
+    public int OutputWidth  => ChainSize().X;
+    /// <summary>Height of the pixel array returned by <see cref="Capture"/>.</summary>
+    public int OutputHeight => ChainSize().Y;
+    /// <summary>Channel count (1 = grayscale, 3 = RGB).</summary>
+    public int OutputChannels
+    {
+        get
+        {
+            var ch = 3; // viewport always starts as RGB
+            foreach (var r in _transforms)
+                if (r is RLCameraTransform t) ch = t.ComputeOutputChannels(ch);
+            return ch;
+        }
+    }
+
+    private Vector2I ChainSize()
+    {
+        var size = _renderSize;
+        foreach (var r in _transforms)
+            if (r is RLCameraTransform t) size = t.ComputeOutputSize(size);
+        return size;
+    }
+
+    /// <summary>
+    /// Final post-transform texture used by camera debug overlay.
+    /// Falls back to raw viewport texture until the first transformed frame is available.
+    /// </summary>
+    internal Texture2D? DebugTexture
+    {
+        get
+        {
+            _debugTextureRequested = true;
+            if (_finalDebugTexture is not null)
+                return _finalDebugTexture;
+
+            return _viewport?.GetTexture();
+        }
+    }
 
     // ── Godot lifecycle ──────────────────────────────────────────────────────
 
@@ -146,14 +173,6 @@ public partial class RLCameraSensor2D : Node2D
         DrawRect(renderRect, CRenderFill);
         DrawRect(renderRect, CRenderBorder, false, 1.5f);
 
-        // Crop region.
-        var cropRect = new Rect2(
-            renderRect.Position.X + _cropOffset.X / _zoom,
-            renderRect.Position.Y + _cropOffset.Y / _zoom,
-            _cropSize.X / _zoom,
-            _cropSize.Y / _zoom);
-        DrawRect(cropRect, CCropBorder, false, 1.5f);
-
         // Corner tick marks.
         var tick = Mathf.Min(renderW, renderH) * 0.08f;
         DrawLine(renderRect.Position,                           renderRect.Position + new Vector2(tick, 0),          CRenderBorder, 1.5f);
@@ -169,69 +188,65 @@ public partial class RLCameraSensor2D : Node2D
         var cross = Mathf.Min(renderW, renderH) * 0.04f;
         DrawLine(new Vector2(-cross, 0), new Vector2(cross, 0), CRenderBorder, 1f);
         DrawLine(new Vector2(0, -cross), new Vector2(0, cross), CRenderBorder, 1f);
+
+        // Yellow crop rect — drawn if an RLCropTransform is anywhere in the chain.
+        foreach (var r in _transforms)
+        {
+            if (r is RLCropTransform crop)
+            {
+                var cropRect = new Rect2(
+                    renderRect.Position.X + crop.Offset.X / _zoom,
+                    renderRect.Position.Y + crop.Offset.Y / _zoom,
+                    crop.Size.X / _zoom,
+                    crop.Size.Y / _zoom);
+                DrawRect(cropRect, CCropBorder, false, 1.5f);
+                break; // only draw the first crop found
+            }
+        }
     }
 
     // ── Public API ───────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Returns the most recently captured pixel bytes. The GPU readback happens once per
-    /// rendered frame in <c>_Process</c> and is cached — calling this multiple times per
-    /// physics step is free. Length = OutputWidth × OutputHeight × OutputChannels.
+    /// Returns the most recently captured and transformed pixel bytes. The GPU readback
+    /// and transform pipeline runs once per rendered frame in <c>_Process</c> and is cached —
+    /// calling this multiple times per physics step is free.
+    /// Length = OutputWidth × OutputHeight × OutputChannels.
     /// </summary>
     public byte[] Capture()
     {
-        if (_dirty) RebuildCache();
-
         // Headless: no viewport — return correctly-sized zeros.
         if (_viewport is null)
-            return new byte[_cropW * _cropH * _channels];
+            return new byte[OutputWidth * OutputHeight * OutputChannels];
 
         // Return frame cache. If _Process hasn't run yet, do a one-time readback.
-        return _cachedPixels ?? ReadPixelsFromViewport() ?? new byte[_cropW * _cropH * _channels];
+        return _cachedPixels ?? ReadPixelsFromViewport() ?? new byte[OutputWidth * OutputHeight * OutputChannels];
     }
 
-    /// <summary>Does the actual GPU readback + crop + channel conversion.</summary>
+    // ── Private helpers ──────────────────────────────────────────────────────
+
+    /// <summary>Runs the GPU readback and applies the transform pipeline.</summary>
     private byte[]? ReadPixelsFromViewport()
     {
         if (_viewport is null) return null;
         if (_dirty) RebuildCache();
 
-        var tex   = _viewport.GetTexture();
-        var image = tex.GetImage();
+        var image = _viewport.GetTexture().GetImage();
         if (image is null) return null;
 
-        image.Convert(Image.Format.Rgb8);
+        image.Convert(Image.Format.Rgb8); // normalise to RGB before transforms
 
-        var imgW    = image.GetWidth();
-        var imgH    = image.GetHeight();
-        var offX    = Mathf.Clamp(_cropOffset.X, 0, Mathf.Max(0, imgW - _cropW));
-        var offY    = Mathf.Clamp(_cropOffset.Y, 0, Mathf.Max(0, imgH - _cropH));
-        var actualW = Mathf.Min(_cropW, imgW - offX);
-        var actualH = Mathf.Min(_cropH, imgH - offY);
+        foreach (var r in _transforms)
+            if (r is RLCameraTransform t) image = t.Apply(image);
 
-        var output = new byte[actualW * actualH * _channels];
-        var idx    = 0;
-
-        for (var row = 0; row < actualH; row++)
+        if (_debugTextureRequested)
         {
-            for (var col = 0; col < actualW; col++)
-            {
-                var pixel = image.GetPixel(offX + col, offY + row);
-                if (_channels == 1)
-                    output[idx++] = (byte)(pixel.R * 76 + pixel.G * 150 + pixel.B * 29);
-                else
-                {
-                    output[idx++] = (byte)(pixel.R * 255f);
-                    output[idx++] = (byte)(pixel.G * 255f);
-                    output[idx++] = (byte)(pixel.B * 255f);
-                }
-            }
+            _finalDebugTexture ??= ImageTexture.CreateFromImage(image);
+            _finalDebugTexture.Update(image);
         }
 
-        return output;
+        return image.GetData();
     }
-
-    // ── Private helpers ──────────────────────────────────────────────────────
 
     private void BuildViewport()
     {
@@ -242,6 +257,7 @@ public partial class RLCameraSensor2D : Node2D
             TransparentBg          = false,
         };
         AddChild(_viewport);
+        _viewport.World2D = GetViewport().World2D; // Share the main scene's World2D so the internal camera sees scene content.
 
         _camera = new Camera2D { Enabled = true };
         _viewport.AddChild(_camera);
@@ -251,11 +267,7 @@ public partial class RLCameraSensor2D : Node2D
 
     private void RebuildCache()
     {
-        _cropW    = Mathf.Max(1, _cropSize.X);
-        _cropH    = Mathf.Max(1, _cropSize.Y);
-        _channels = _grayscale ? 1 : 3;
-        _dirty    = false;
-
+        _dirty = false;
         if (_viewport is not null)
             _viewport.Size = _renderSize;
     }

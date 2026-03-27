@@ -1,0 +1,13 @@
+[configuration]
+entry_symbol = "rl_cnn_library_init"
+compatibility_minimum = "4.1"
+
+[libraries]
+linux.debug.x86_64   = "res://addons/rl-agent-plugin/native/bin/librl_cnn.so"
+linux.release.x86_64 = "res://addons/rl-agent-plugin/native/bin/librl_cnn.so"
+
+windows.debug.x86_64   = "res://addons/rl-agent-plugin/native/bin/librl_cnn.dll"
+windows.release.x86_64 = "res://addons/rl-agent-plugin/native/bin/librl_cnn.dll"
+
+macos.debug   = "res://addons/rl-agent-plugin/native/bin/librl_cnn.dylib"
+macos.release = "res://addons/rl-agent-plugin/native/bin/librl_cnn.dylib"

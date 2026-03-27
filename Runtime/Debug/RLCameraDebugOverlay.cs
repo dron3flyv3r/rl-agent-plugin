@@ -97,6 +97,7 @@ public partial class RLCameraDebugOverlay : CanvasLayer
         {
             var s = entry.Sensor;
             entry.Label.Text = $"{s.Name}  {s.OutputWidth}×{s.OutputHeight}  {(s.OutputChannels == 1 ? "Gray" : "RGB")}";
+            entry.Rect.Texture = s.DebugTexture;
         }
     }
 
@@ -123,7 +124,7 @@ public partial class RLCameraDebugOverlay : CanvasLayer
             CustomMinimumSize = new Vector2(128, 128),
             ExpandMode        = TextureRect.ExpandModeEnum.IgnoreSize,
             StretchMode       = TextureRect.StretchModeEnum.Scale,
-            Texture           = sensor.ViewportTexture,
+            Texture           = sensor.DebugTexture,
             MouseFilter       = Control.MouseFilterEnum.Ignore,
         };
         vbox.AddChild(rect);

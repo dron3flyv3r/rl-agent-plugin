@@ -18,7 +18,7 @@ namespace RlAgentPlugin.Runtime;
 internal static class RLProfiler
 {
     /// <summary>Set to false to disable all profiling with zero overhead.</summary>
-    public static bool Enabled = true;
+    public static bool Enabled = false;
 
     /// <summary>How many calls to <see cref="End"/> on the trigger label before printing a summary.</summary>
     public static int ReportEvery = 200;
