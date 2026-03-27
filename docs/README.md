@@ -9,6 +9,7 @@
 - [Algorithms (PPO & SAC)](algorithms.md)
 - [Tuning Guide](tuning.md)
 - [Architecture Overview](architecture.md)
+- [Sensors (raycast, camera)](sensors.md)
 
 ## Demo project
 - Demo scenes are maintained in the companion workspace repository:
@@ -16,7 +17,9 @@
 - In this workspace clone, demos are under `../../demo/` from this docs folder.
 
 ## Common tasks
-- **First agent structure**: keep movement on a player node and put `RLAgent2D/RLAgent3D` as a child agent node
+- **First agent structure**: player node owns physics; `RLAgent2D/3D` is a child; sensors are children of the agent — see [get-started.md](get-started.md#recommended-node-structure)
+- **Add a camera sensor**: add `RLCameraSensor2D` as a child of the agent node, then call `obs.AddImage("name", _camera)` — see [sensors.md](sensors.md)
+- **Debug camera during training**: tick **Enable Camera Debug** on `RLAcademy` → live preview panel appears top-right
 - **Start training**: top toolbar **Start Training** or right-side **RL Setup** dock
 - **Watch metrics**: open **RLDash**
 - **Export model**: in RLDash, use **Export Run** (or checkpoint-row **Export**) to create `.rlmodel`

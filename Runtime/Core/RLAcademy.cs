@@ -52,6 +52,8 @@ public partial class RLAcademy : Node
     [ExportGroup("Debug")]
     /// <summary>Show the observation/reward/action spy overlay when running outside of training. Press Tab to cycle agents.</summary>
     [Export] public bool EnableSpyOverlay { get; set; } = false;
+    /// <summary>Show a live preview panel of every RLCameraSensor2D found on any agent. Works both in play mode and during training.</summary>
+    [Export] public bool EnableCameraDebug { get; set; } = false;
 
     // Delegating properties — not exported; satisfy TrainingBootstrap C# property access.
     public string RunPrefix           => RunConfig?.RunPrefix           ?? string.Empty;
@@ -111,7 +113,8 @@ public partial class RLAcademy : Node
         return warnings.ToArray();
     }
 
-    private RLAgentSpyOverlay? _spyOverlay;
+    private RLAgentSpyOverlay?    _spyOverlay;
+    private RLCameraDebugOverlay? _cameraDebugOverlay;
     private readonly Dictionary<IRLAgent, IInferencePolicy> _agentInferencePolicies = new();
     private readonly Dictionary<IRLAgent, string> _agentObservationGroups = new();
     private readonly Dictionary<IRLAgent, int> _inferenceStepCounters = new();
@@ -134,6 +137,13 @@ public partial class RLAcademy : Node
             _spyOverlay = new RLAgentSpyOverlay();
             _spyOverlay.Initialize(this);
             AddChild(_spyOverlay);
+        }
+
+        if (EnableCameraDebug)
+        {
+            _cameraDebugOverlay = new RLCameraDebugOverlay();
+            _cameraDebugOverlay.Initialize(this);
+            AddChild(_cameraDebugOverlay);
         }
     }
 

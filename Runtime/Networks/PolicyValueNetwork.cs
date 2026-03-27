@@ -162,9 +162,30 @@ internal sealed class PolicyValueNetwork
         return merged;
     }
 
+    /// <summary>
+    /// Runs <see cref="EncodeStreams"/> on every row of <paramref name="observations"/> and
+    /// returns a new <see cref="VectorBatch"/> of the merged embedding size.
+    /// </summary>
+    private VectorBatch EncodeStreamsBatch(VectorBatch observations)
+    {
+        var encoders   = _streamEncoders!;
+        var mergedSize = 0;
+        foreach (var enc in encoders) mergedSize += enc.OutputSize;
+
+        var encoded = new VectorBatch(observations.BatchSize, mergedSize);
+        for (var b = 0; b < observations.BatchSize; b++)
+        {
+            var row = observations.CopyRow(b);
+            encoded.SetRow(b, EncodeStreams(row));
+        }
+        return encoded;
+    }
+
     public BatchNetworkInference InferBatch(VectorBatch observations)
     {
-        var trunkOutput = observations;
+        var trunkOutput = _streamEncoders is not null
+            ? EncodeStreamsBatch(observations)
+            : observations;
         foreach (var layer in _trunkLayers)
             trunkOutput = layer.ForwardBatch(trunkOutput);
 

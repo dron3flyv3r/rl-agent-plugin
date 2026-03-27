@@ -50,6 +50,10 @@ public partial class TrainingBootstrap : Node
     private long _totalSteps;
     private RLStoppingConfig? _stoppingConfig;
 
+    // Diagnostic: log the first N local training updates to verify data quality.
+    private const int LocalDiagnosticCount = 6;
+    private int _localDiagnosticsLogged;
+
     // ── Evaluation rollout state ───────────────────────────────────────────────
     private RLEvaluationConfig? _evaluationConfig;
     private readonly Dictionary<string, bool>             _evalInProgressByGroup        = new(StringComparer.Ordinal);
@@ -356,6 +360,13 @@ public partial class TrainingBootstrap : Node
             var spyOverlay = new RLAgentSpyOverlay();
             spyOverlay.Initialize(firstAcademy, includeTrainAgents: true);
             firstAcademy.AddChild(spyOverlay);
+        }
+
+        if (firstAcademy.EnableCameraDebug)
+        {
+            var cameraOverlay = new RLCameraDebugOverlay();
+            cameraOverlay.Initialize(firstAcademy);
+            firstAcademy.AddChild(cameraOverlay);
         }
 
         if (_academies.Count == 0)
@@ -767,6 +778,26 @@ public partial class TrainingBootstrap : Node
             if (updateStats is null)
             {
                 continue;
+            }
+
+            // Log first N local updates so the user can verify data quality without workers.
+            if (!_isWorkerMode && _distributedMaster is null && _localDiagnosticsLogged < LocalDiagnosticCount)
+            {
+                _localDiagnosticsLogged++;
+                var lastReward = _lastEpisodeRewardByGroup.GetValueOrDefault(groupId, float.NaN);
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"[RL Diagnostic] Local update #{_localDiagnosticsLogged}/{LocalDiagnosticCount}  |  group '{groupId}'");
+                sb.AppendLine("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                sb.AppendLine($"  Total steps     : {_totalSteps}");
+                sb.AppendLine($"  Episodes done   : {episodeCount}");
+                sb.AppendLine($"  Last ep reward  : {(float.IsNaN(lastReward) ? "—" : lastReward.ToString("F4"))}");
+                sb.AppendLine($"  Policy loss     : {updateStats.PolicyLoss:F5}");
+                sb.AppendLine($"  Value  loss     : {updateStats.ValueLoss:F5}");
+                sb.AppendLine($"  Entropy         : {updateStats.Entropy:F5}");
+                if (updateStats.ClipFraction > 0f)
+                    sb.AppendLine($"  Clip fraction   : {updateStats.ClipFraction:F4}");
+                GD.Print(sb.ToString().TrimEnd());
             }
 
             _updateCountByGroup[groupId] += 1;

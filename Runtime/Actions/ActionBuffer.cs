@@ -65,6 +65,21 @@ public sealed class ActionBuffer
         return copy;
     }
 
+    public float GetContinuous(string name, int index)
+    {
+        if (!_continuousActions.TryGetValue(name, out var value))
+        {
+            throw new KeyNotFoundException($"Continuous action '{name}' is not defined in the current action buffer.");
+        }
+
+        if (index < 0 || index >= value.Length)
+        {
+            throw new IndexOutOfRangeException($"Index {index} is out of range for continuous action '{name}' with length {value.Length}.");
+        }
+
+        return value[index];
+    }
+
     public bool TryGetDiscrete(string name, out Tuple<int, string>? value)
     {
         if (_discreteActions.TryGetValue(name, out var stored))

@@ -82,6 +82,16 @@ public sealed class ObservationBuffer
     }
 
     /// <summary>
+    /// Captures <paramref name="sensor"/> and adds the result as a named image stream.
+    /// Width, height, and channel count are read from the sensor's output properties.
+    /// </summary>
+    public void AddImage(string name, RLCameraSensor2D sensor)
+    {
+        var pixels = sensor.Capture();
+        AddImage(name, pixels, sensor.OutputWidth, sensor.OutputHeight, sensor.OutputChannels);
+    }
+
+    /// <summary>
     /// Adds a named image stream. <paramref name="pixels"/> must be row-major bytes of length
     /// <c>width * height * channels</c>. Each byte is normalized to [0, 1] before storage.
     /// The stream is tagged as <see cref="ObservationStreamKind.Image"/> in the spec.

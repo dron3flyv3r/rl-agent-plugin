@@ -42,27 +42,50 @@ This is a simple plan similar to Demo 04:
 ```text
 MoveToPoint3D (Node3D)
 ├── RLAcademy
-├── Player (CharacterBody3D)               # can also be Node3D/Node2D style depending on game
+├── Player (CharacterBody3D)               # game entity — owns physics, movement, visuals
 │   ├── MeshInstance3D (CubeMesh)
-│   └── Agent (RLAgent3D script)           # extend script here for RL logic
+│   ├── CollisionShape3D
+│   └── Agent (Node3D + RLAgent3D script)  # RL logic only — child of player
+│       └── RaycastSensor3D               # sensors attach here, as children of the agent
 └── Target (Marker3D)
 ```
 
-> 2D equivalent pattern:
-> - `Player` can be `CharacterBody2D` or `Node2D` with your movement script.
-> - Add `Agent` as a child using `RLAgent2D`.
+The same pattern applies in 2D:
+
+```text
+MyScene (Node2D)
+├── RLAcademy
+├── Player (CharacterBody2D)               # game entity
+│   ├── CollisionShape2D
+│   ├── Sprite2D
+│   └── Agent (Node2D + RLAgent2D script)  # RL logic only
+│       └── RaycastSensor2D               # sensors as children of the agent
+└── Target (Node2D)
+```
+
+If the agent needs a camera sensor, add `RLCameraSensor2D` as a child of `Agent` too:
+
+```text
+Player (CharacterBody2D)
+└── Agent (Node2D + RLAgent2D script)
+    └── Camera (RLCameraSensor2D)          # positioned/zoomed to frame the area of interest
+```
 
 ### Why this structure matters
 
-Use your **player node** for movement/physics and your **agent child node** for RL decisions.
+| Node | Responsibility |
+|------|----------------|
+| **Player** | Physics, movement, visuals, game state |
+| **Agent** | Observations, actions, rewards, episode resets |
+| **Sensors** | Data collection — children of Agent |
 
 Flow each step:
-1. Agent collects observations.
-2. Agent receives an action.
+1. Agent collects observations (including any sensors).
+2. Agent receives an action from the policy.
 3. Agent forwards that decision to the parent player node.
-4. Player applies movement.
+4. Player applies movement and physics.
 
-This keeps gameplay code and RL code cleanly separated.
+Keeping gameplay code and RL code in separate nodes means you can swap, duplicate, or remove the agent without touching the player, and vice versa.
 
 ---
 
@@ -302,3 +325,4 @@ Set your agent to inference and point to the exported `.rlmodel`.
 - Algorithm tradeoffs: `algorithms.md`
 - Reading charts and debugging learning: `tuning.md`
 - Demo-specific walkthroughs: `demos.md`
+- Sensors (raycast, camera): `sensors.md`
