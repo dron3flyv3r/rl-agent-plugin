@@ -82,13 +82,25 @@ public sealed class ObservationBuffer
     }
 
     /// <summary>
+    /// Captures <paramref name="sensor"/> and adds the result as an image stream.
+    /// The stream name is derived from <c>sensor.Name</c>. If the sensor has an
+    /// <see cref="RLStreamEncoderConfig"/> set, it is bound to the stream directly
+    /// so no string lookup is required in the network graph.
+    /// </summary>
+    public void AddImage(RLCameraSensor2D sensor)
+    {
+        var pixels = sensor.Capture();
+        AddImage(sensor.Name, pixels, sensor.OutputWidth, sensor.OutputHeight, sensor.OutputChannels, sensor.EncoderConfig);
+    }
+
+    /// <summary>
     /// Captures <paramref name="sensor"/> and adds the result as a named image stream.
     /// Width, height, and channel count are read from the sensor's output properties.
     /// </summary>
     public void AddImage(string name, RLCameraSensor2D sensor)
     {
         var pixels = sensor.Capture();
-        AddImage(name, pixels, sensor.OutputWidth, sensor.OutputHeight, sensor.OutputChannels);
+        AddImage(name, pixels, sensor.OutputWidth, sensor.OutputHeight, sensor.OutputChannels, sensor.EncoderConfig);
     }
 
     /// <summary>
@@ -96,7 +108,7 @@ public sealed class ObservationBuffer
     /// <c>width * height * channels</c>. Each byte is normalized to [0, 1] before storage.
     /// The stream is tagged as <see cref="ObservationStreamKind.Image"/> in the spec.
     /// </summary>
-    public void AddImage(string name, byte[] pixels, int width, int height, int channels)
+    public void AddImage(string name, byte[] pixels, int width, int height, int channels, RLStreamEncoderConfig? encoderConfig = null)
     {
         var expectedLength = width * height * channels;
         if (pixels.Length != expectedLength)
@@ -114,7 +126,7 @@ public sealed class ObservationBuffer
                 _values.Add(b / 255f);
             _segments.Add(new ObservationSegment(name, startIndex, expectedLength));
         }
-        _streamSpecs.Add(new ObservationStreamSpec(name, ObservationStreamKind.Image, expectedLength, width, height, channels));
+        _streamSpecs.Add(new ObservationStreamSpec(name, ObservationStreamKind.Image, expectedLength, width, height, channels, encoderConfig));
     }
 
     public void AddSegment(string name, System.Action<ObservationBuffer> writer, int? expectedSize = null, IReadOnlyList<string>? debugLabels = null)

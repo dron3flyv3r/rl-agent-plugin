@@ -15,4 +15,9 @@ public sealed record ObservationStreamSpec(
     /// <summary>Image height in pixels (0 for Vector streams).</summary>
     int Height,
     /// <summary>Number of image channels (0 for Vector streams).</summary>
-    int Channels);
+    int Channels,
+    /// <summary>
+    /// Optional encoder config bound directly to this stream via its source sensor.
+    /// When set, the network uses this config directly to build the stream's encoder.
+    /// </summary>
+    RLStreamEncoderConfig? EncoderConfig = null);

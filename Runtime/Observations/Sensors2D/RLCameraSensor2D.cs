@@ -20,6 +20,15 @@ public partial class RLCameraSensor2D : Node2D
 {
     // ── Exports ──────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Optional CNN/MLP encoder config for this sensor's image stream.
+    /// Assign this to configure how this sensor's image stream is encoded by the network.
+    /// When set, it is bound to the stream automatically when the agent calls
+    /// <c>buffer.AddImage(this)</c>.
+    /// </summary>
+    [Export(PropertyHint.ResourceType, nameof(RLStreamEncoderConfig))]
+    public RLStreamEncoderConfig? EncoderConfig { get; set; }
+
     [Export]
     public Vector2I RenderSize
     {

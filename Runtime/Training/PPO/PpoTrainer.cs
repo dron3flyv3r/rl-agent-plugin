@@ -152,6 +152,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             return null;
         }
 
+        var tUpdate = RLProfiler.Begin();
         var samples = BuildTrainingSamples();
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(_trainerConfig.PpoMiniBatchSize, 1, samples.Count);
@@ -184,6 +185,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
 
         _transitions.Clear();
         var normalizer = Math.Max(1, processedSamples);
+        RLProfiler.End("PPO.TryUpdate", tUpdate);
 
         return new TrainerUpdateStats
         {
@@ -283,6 +285,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         List<PpoTransition> transitions,
         RLTrainerConfig config)
     {
+        var tBg = RLProfiler.Begin();
         var samples = BuildTrainingSamplesFrom(transitions, config);
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(config.PpoMiniBatchSize, 1, samples.Count);
@@ -313,6 +316,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         }
 
         var norm = Math.Max(1, processedSamples);
+        RLProfiler.End("PPO.BackgroundUpdate", tBg);
         return new PpoAsyncResult
         {
             PolicyLoss = policyLoss / norm,

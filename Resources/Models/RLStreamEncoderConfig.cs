@@ -3,26 +3,14 @@ using Godot;
 namespace RlAgentPlugin.Runtime;
 
 /// <summary>
-/// Associates a named observation stream with a specific encoder architecture.
-/// Add one of these to <see cref="RLNetworkGraph.StreamEncoders"/> for each stream
-/// that needs non-default processing.
-/// <list type="bullet">
-///   <item>For <b>image</b> streams: set <see cref="CnnEncoder"/>.</item>
-///   <item>For <b>vector</b> streams with a custom sub-MLP: set <see cref="VectorEncoder"/>.</item>
-///   <item>Leave both null to fall back to the graph's default trunk layers.</item>
-/// </list>
+/// Defines the encoder architecture for a single observation stream.
+/// Assign this resource directly to a sensor node (e.g. <see cref="RLCameraSensor2D.EncoderConfig"/>).
+/// The sensor binds it to its stream automatically — no string name needed.
 /// </summary>
 [GlobalClass]
 [Tool]
 public partial class RLStreamEncoderConfig : Resource
 {
-    /// <summary>
-    /// Name of the observation stream this config applies to.
-    /// Must match the <c>name</c> argument passed to
-    /// <see cref="ObservationBuffer.AddVector"/> or <see cref="ObservationBuffer.AddImage"/>.
-    /// </summary>
-    [Export] public string StreamName { get; set; } = string.Empty;
-
     /// <summary>
     /// CNN encoder definition for image streams.
     /// Leave null for vector streams or to use the default MLP path.

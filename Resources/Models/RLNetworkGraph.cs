@@ -15,15 +15,6 @@ public partial class RLNetworkGraph : Resource
 
     [Export] public RLOptimizerKind Optimizer { get; set; } = RLOptimizerKind.Adam;
 
-    /// <summary>
-    /// Per-stream encoder overrides for multi-modal observations.
-    /// Each entry maps a named observation stream to a specific encoder architecture.
-    /// When empty (the default), all observations are treated as a single flat vector
-    /// and processed by <see cref="TrunkLayers"/> directly.
-    /// </summary>
-    [Export(PropertyHint.ResourceType, nameof(RLStreamEncoderConfig))]
-    public Array<Resource> StreamEncoders { get; set; } = new();
-
     /// <summary>Output size of the trunk; chains GetOutputSize through each layer def.</summary>
     public int OutputSize(int inputSize)
     {
@@ -87,19 +78,6 @@ public partial class RLNetworkGraph : Resource
             },
             Optimizer = RLOptimizerKind.Adam,
         };
-    }
-
-    /// <summary>
-    /// Returns the <see cref="RLStreamEncoderConfig"/> for a named stream, or null if none.
-    /// </summary>
-    internal RLStreamEncoderConfig? FindStreamEncoder(string streamName)
-    {
-        foreach (var resource in StreamEncoders)
-        {
-            if (resource is RLStreamEncoderConfig cfg && cfg.StreamName == streamName)
-                return cfg;
-        }
-        return null;
     }
 
     private IEnumerable<RLLayerDef> EnumerateTrunkLayerDefs()

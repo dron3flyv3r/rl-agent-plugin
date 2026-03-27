@@ -58,7 +58,7 @@ internal sealed class PolicyValueNetwork
         for (var i = 0; i < spec.Streams.Count; i++)
         {
             var stream = spec.Streams[i];
-            var streamCfg = graph.FindStreamEncoder(stream.Name);
+            var streamCfg = stream.EncoderConfig;
 
             CnnEncoder? cnn = null;
             NetworkLayer[]? vectorLayers = null;
@@ -110,12 +110,14 @@ internal sealed class PolicyValueNetwork
 
     public NetworkInference Infer(float[] observation)
     {
+        var t = RLProfiler.Begin();
         var x = _streamEncoders is not null ? EncodeStreams(observation) : observation;
         foreach (var layer in _trunkLayers)
             x = layer.Forward(x);
 
         var logits = _policyHead.Forward(x);
         var value  = _valueHead.Forward(x);
+        RLProfiler.End("Infer", t);
 
         return new NetworkInference { Logits = logits, Value = value[0] };
     }
@@ -142,7 +144,9 @@ internal sealed class PolicyValueNetwork
             float[] embedding;
             if (enc.Cnn is not null)
             {
+                var tc = RLProfiler.Begin();
                 embedding = enc.Cnn.Forward(slice);
+                RLProfiler.End("CNN.Encode", tc);
             }
             else
             {
@@ -183,6 +187,7 @@ internal sealed class PolicyValueNetwork
 
     public BatchNetworkInference InferBatch(VectorBatch observations)
     {
+        var t = RLProfiler.Begin();
         var trunkOutput = _streamEncoders is not null
             ? EncodeStreamsBatch(observations)
             : observations;
@@ -194,6 +199,7 @@ internal sealed class PolicyValueNetwork
         var values     = new float[observations.BatchSize];
         for (var b = 0; b < observations.BatchSize; b++)
             values[b] = valueBatch.Get(b, 0);
+        RLProfiler.End("InferBatch", t);
 
         return new BatchNetworkInference { Logits = logits, Values = values };
     }
@@ -202,6 +208,8 @@ internal sealed class PolicyValueNetwork
     {
         if (samples.Count == 0)
             return new PpoBatchUpdateStats();
+
+        var tGrad = RLProfiler.Begin();
 
         var trunkGradients = new GradientBuffer[_trunkLayers.Length];
         for (var i = 0; i < _trunkLayers.Length; i++)
@@ -423,6 +431,7 @@ internal sealed class PolicyValueNetwork
             }
         }
 
+        RLProfiler.End("ApplyGradients", tGrad);
         return new PpoBatchUpdateStats
         {
             PolicyLoss    = totalPolicyLoss / samples.Count,
