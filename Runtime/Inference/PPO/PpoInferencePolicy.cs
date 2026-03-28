@@ -6,11 +6,13 @@ public sealed class PpoInferencePolicy : IInferencePolicy
 {
     private readonly PolicyValueNetwork _network;
     private readonly int _continuousActionDims;
+    private readonly bool _stochastic;
+    private readonly Random _rng = new();
 
     public PpoInferencePolicy(int observationSize, int actionCount, RLNetworkGraph graph)
         : this(observationSize, actionCount, 0, graph) { }
 
-    public PpoInferencePolicy(int observationSize, int actionCount, int continuousActionDims, RLNetworkGraph graph)
+    public PpoInferencePolicy(int observationSize, int actionCount, int continuousActionDims, RLNetworkGraph graph, bool stochastic = false)
     {
         if (actionCount <= 0 && continuousActionDims <= 0)
         {
@@ -18,6 +20,7 @@ public sealed class PpoInferencePolicy : IInferencePolicy
         }
 
         _continuousActionDims = continuousActionDims;
+        _stochastic = stochastic;
         _network = new PolicyValueNetwork(observationSize, actionCount, continuousActionDims, graph);
     }
 
@@ -32,13 +35,17 @@ public sealed class PpoInferencePolicy : IInferencePolicy
         {
             return new PolicyDecision
             {
-                ContinuousActions = _network.SelectDeterministicContinuousAction(observation),
+                ContinuousActions = _stochastic
+                    ? _network.SelectStochasticContinuousAction(observation, _rng)
+                    : _network.SelectDeterministicContinuousAction(observation),
             };
         }
 
         return new PolicyDecision
         {
-            DiscreteAction = _network.SelectGreedyAction(observation),
+            DiscreteAction = _stochastic
+                ? _network.SelectStochasticAction(observation, _rng)
+                : _network.SelectGreedyAction(observation),
         };
     }
 }

@@ -68,8 +68,12 @@ public static class RLModelLoader
             var layerCount = reader.ReadInt32();
 
             // ── Layers ────────────────────────────────────────────────────────
-            var usesTypedLayerShapes = version >= 3;
-            var shapes  = new List<int>(layerCount * (usesTypedLayerShapes ? 4 : 3));
+            // Format v6+ uses typed layer shapes (type code + in + out + act) in the
+            // internal checkpoint format. For .rlmodel files with version < 6, produce
+            // the legacy 3-int format (in, out, act) so LoadCheckpoint's legacy path
+            // reads it correctly without expecting type codes.
+            var isCurrentVersion = version >= RLCheckpoint.CurrentFormatVersion;
+            var shapes  = new List<int>(layerCount * (isCurrentVersion ? 4 : 3));
             var weights = new List<float>();
 
             for (var i = 0; i < layerCount; i++)
@@ -78,7 +82,7 @@ public static class RLModelLoader
                 var outSize    = reader.ReadInt32();
                 var activation = reader.ReadInt32();
 
-                if (usesTypedLayerShapes)
+                if (isCurrentVersion)
                 {
                     shapes.Add((int)RLLayerKind.Dense);
                 }
@@ -92,13 +96,28 @@ public static class RLModelLoader
                 for (var j = 0; j < outSize;          j++) weights.Add(reader.ReadSingle());
             }
 
+            // Format v6+ checkpoints expect a flat/multi-stream marker at shapes[0]
+            // (written by PolicyValueNetwork.SaveCheckpoint). .rlmodel files don't store it,
+            // so prepend it here so LoadCheckpoint reads the shape buffer correctly.
+            int[] layerShapeBuffer;
+            if (isCurrentVersion)
+            {
+                layerShapeBuffer = new int[shapes.Count + 1];
+                layerShapeBuffer[0] = 0; // flat checkpoint marker
+                shapes.CopyTo(layerShapeBuffer, 1);
+            }
+            else
+            {
+                layerShapeBuffer = shapes.ToArray();
+            }
+
             var checkpoint = new RLCheckpoint
             {
                 WeightBuffer = weights.ToArray(),
-                LayerShapeBuffer = shapes.ToArray(),
+                LayerShapeBuffer = layerShapeBuffer,
             };
 
-            if (version >= RLCheckpoint.CurrentFormatVersion && stream.Position < stream.Length)
+            if (isCurrentVersion && stream.Position < stream.Length)
             {
                 var metadataLength = reader.ReadInt32();
                 var metadataBytes = reader.ReadBytes(metadataLength);
@@ -123,8 +142,6 @@ public static class RLModelLoader
                     checkpoint.DiscreteActionCount = headerActionDims;
                 }
             }
-
-            GD.Print($"[RLModelLoader] Loaded {layerCount} layers from {absPath}");
             return checkpoint;
         }
         catch (Exception ex)

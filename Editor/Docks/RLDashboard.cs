@@ -19,33 +19,33 @@ public partial class RLDashboard : Control
     private sealed class Metric
     {
         public float EpisodeReward;
-        public int   EpisodeLength;
+        public int EpisodeLength;
         public float PolicyLoss;
         public float ValueLoss;
         public float Entropy;
-        public long  TotalSteps;
-        public long  EpisodeCount;
+        public long TotalSteps;
+        public long EpisodeCount;
         public string PolicyGroup = "";
         public string OpponentGroup = "";
         public string OpponentSource = "";
         public string OpponentCheckpointPath = "";
-        public long?  OpponentUpdateCount;
+        public long? OpponentUpdateCount;
         public float? LearnerElo;
         public float? PoolWinRate;
         public float? CurriculumProgress;
         // Evaluation rollout fields
-        public bool   IsEval;
-        public float  EvalMeanReward;
-        public int    EvalEpisodes;
+        public bool IsEval;
+        public float EvalMeanReward;
+        public int EvalEpisodes;
     }
 
     private sealed class RunStatus
     {
-        public string Status              = "idle";
-        public long   TotalSteps;
-        public long   EpisodeCount;
-        public long   WorkerEpisodeCount;
-        public string Message             = "";
+        public string Status = "idle";
+        public long TotalSteps;
+        public long EpisodeCount;
+        public long WorkerEpisodeCount;
+        public string Message = "";
     }
 
     private sealed record RunMeta(string DisplayName, string[] AgentNames, string[] AgentGroups, bool HasCurriculum);
@@ -62,68 +62,68 @@ public partial class RLDashboard : Control
     }
 
     // ── UI handles ───────────────────────────────────────────────────────────
-    private OptionButton?   _runDropdown;
-    private LineEdit?       _prefixFilter;
-    private LineEdit?       _renameEdit;
-    private Button?         _renameBtn;
-    private Label?          _policyFilterLabel;
-    private OptionButton?   _policyFilterDropdown;
-    private Label?          _liveBadge;
-    private Label?          _headerStatus;
-    private ColorRect?      _statusDot;
-    private Label?          _statusLabel;
-    private Label?          _statAvgReward;
-    private Label?          _statBestReward;
-    private Label?          _statEvalReward;
-    private Label?          _statTotalSteps;
-    private Label?          _statEpisodes;
+    private OptionButton? _runDropdown;
+    private LineEdit? _prefixFilter;
+    private LineEdit? _renameEdit;
+    private Button? _renameBtn;
+    private Label? _policyFilterLabel;
+    private OptionButton? _policyFilterDropdown;
+    private Label? _liveBadge;
+    private Label? _headerStatus;
+    private ColorRect? _statusDot;
+    private Label? _statusLabel;
+    private Label? _statAvgReward;
+    private Label? _statBestReward;
+    private Label? _statEvalReward;
+    private Label? _statTotalSteps;
+    private Label? _statEpisodes;
     private LineChartPanel? _rewardChart;
     private LineChartPanel? _lossChart;
     private LineChartPanel? _entropyChart;
     private LineChartPanel? _lengthChart;
     private LineChartPanel? _eloChart;
     private LineChartPanel? _curriculumChart;
-    private FileDialog?     _exportDialog;
+    private FileDialog? _exportDialog;
 
     // Checkpoint history panel
-    private Button?          _checkpointToggleBtn;
-    private Control?         _checkpointHistoryPanel;
-    private VBoxContainer?   _checkpointRowContainer;
-    private Label?           _checkpointStatusLabel;
-    private OptionButton?    _checkpointSortDropdown;
+    private Button? _checkpointToggleBtn;
+    private Control? _checkpointHistoryPanel;
+    private VBoxContainer? _checkpointRowContainer;
+    private Label? _checkpointStatusLabel;
+    private OptionButton? _checkpointSortDropdown;
     private List<CheckpointHistoryEntry> _checkpointEntries = new();
-    private FileDialog?      _checkpointExportDialog;
+    private FileDialog? _checkpointExportDialog;
     private CheckpointHistoryEntry? _pendingExportCheckpointEntry;
 
     // ── State ────────────────────────────────────────────────────────────────
-    private readonly List<Metric>              _metrics            = new();
-    private readonly List<string>              _runIds             = new();
-    private readonly Dictionary<string, long>  _metricsFileOffsets = new();
-    private string       _selectedRunId            = "";
-    private RunMeta      _selectedRunMeta          = new("", Array.Empty<string>(), Array.Empty<string>(), false);
-    private string       _selectedPolicyGroupFilter = "";
-    private List<string> _knownPolicyGroups         = new();
-    private readonly HashSet<string> _rewardSeriesLabels  = new();
+    private readonly List<Metric> _metrics = new();
+    private readonly List<string> _runIds = new();
+    private readonly Dictionary<string, long> _metricsFileOffsets = new();
+    private string _selectedRunId = "";
+    private RunMeta _selectedRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false);
+    private string _selectedPolicyGroupFilter = "";
+    private List<string> _knownPolicyGroups = new();
+    private readonly HashSet<string> _rewardSeriesLabels = new();
     private readonly HashSet<string> _entropySeriesLabels = new();
-    private readonly HashSet<string> _lengthSeriesLabels  = new();
-    private readonly HashSet<string> _lossSeriesLabels    = new();
+    private readonly HashSet<string> _lengthSeriesLabels = new();
+    private readonly HashSet<string> _lossSeriesLabels = new();
     private double _pollTimer;
     private double _livePulseAccum;
-    private bool   _isLive;
-    private int    _lastKnownRunCount = -1;
+    private bool _isLive;
+    private int _lastKnownRunCount = -1;
     private string _activeRunId = "";
     private CheckpointSortMode _checkpointSortMode = CheckpointSortMode.NewestUpdate;
 
-    private const double PollInterval      = 2.0;
+    private const double PollInterval = 2.0;
     private const double LivePulseInterval = 0.8;
 
     // ── Palette ──────────────────────────────────────────────────────────────
-    private static readonly Color CRunning    = new(0.20f, 0.85f, 0.35f);
-    private static readonly Color CStopped    = new(0.70f, 0.70f, 0.70f);
-    private static readonly Color CIdle       = new(0.45f, 0.45f, 0.45f);
+    private static readonly Color CRunning = new(0.20f, 0.85f, 0.35f);
+    private static readonly Color CStopped = new(0.70f, 0.70f, 0.70f);
+    private static readonly Color CIdle = new(0.45f, 0.45f, 0.45f);
     private static readonly Color CPolicyLoss = new(0.92f, 0.42f, 0.22f);
-    private static readonly Color CValueLoss  = new(0.35f, 0.62f, 0.92f);
-    private static readonly Color CElo        = new(0.92f, 0.42f, 0.78f);
+    private static readonly Color CValueLoss = new(0.35f, 0.62f, 0.92f);
+    private static readonly Color CElo = new(0.92f, 0.42f, 0.78f);
     private static readonly Color CCurriculum = new(0.35f, 0.82f, 0.88f);
 
     // Palette used to assign one color per policy group (reward / entropy / length charts).
@@ -144,7 +144,7 @@ public partial class RLDashboard : Control
     {
         SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
         SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        SizeFlagsVertical   = SizeFlags.ExpandFill;
+        SizeFlagsVertical = SizeFlags.ExpandFill;
         BuildUi();
         DiscoverAndSelectLatestRun();
     }
@@ -216,9 +216,9 @@ public partial class RLDashboard : Control
     {
         var margin = new MarginContainer();
         margin.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
-        margin.AddThemeConstantOverride("margin_left",   10);
-        margin.AddThemeConstantOverride("margin_right",  10);
-        margin.AddThemeConstantOverride("margin_top",    8);
+        margin.AddThemeConstantOverride("margin_left", 10);
+        margin.AddThemeConstantOverride("margin_right", 10);
+        margin.AddThemeConstantOverride("margin_top", 8);
         margin.AddThemeConstantOverride("margin_bottom", 8);
         AddChild(margin);
 
@@ -270,7 +270,7 @@ public partial class RLDashboard : Control
         _runDropdown = new OptionButton
         {
             CustomMinimumSize = new Vector2(250, 0),
-            TooltipText       = "Select a training run to inspect",
+            TooltipText = "Select a training run to inspect",
         };
         _runDropdown.GetPopup().MaxSize = new Vector2I(1600, 360);
         _runDropdown.ItemSelected += OnRunSelected;
@@ -278,7 +278,7 @@ public partial class RLDashboard : Control
 
         var refreshBtn = new Button
         {
-            Text        = " ⟳ ",
+            Text = " ⟳ ",
             TooltipText = "Rescan runs directory for new runs",
         };
         refreshBtn.Pressed += () => DiscoverAndSelectLatestRun();
@@ -289,9 +289,9 @@ public partial class RLDashboard : Control
         // LIVE badge (hidden until training starts)
         _liveBadge = new Label
         {
-            Text                = "● LIVE",
-            Visible             = false,
-            VerticalAlignment   = VerticalAlignment.Center,
+            Text = "● LIVE",
+            Visible = false,
+            VerticalAlignment = VerticalAlignment.Center,
         };
         _liveBadge.AddThemeColorOverride("font_color", CRunning);
         _liveBadge.AddThemeFontSizeOverride("font_size", 12);
@@ -311,9 +311,9 @@ public partial class RLDashboard : Control
 
         _renameEdit = new LineEdit
         {
-            PlaceholderText   = "Display name…",
+            PlaceholderText = "Display name…",
             CustomMinimumSize = new Vector2(200, 0),
-            Editable          = false,
+            Editable = false,
         };
         row2.AddChild(_renameEdit);
 
@@ -347,8 +347,8 @@ public partial class RLDashboard : Control
         _policyFilterDropdown = new OptionButton
         {
             CustomMinimumSize = new Vector2(160, 0),
-            TooltipText       = "Filter charts to a single policy group",
-            Visible           = false,
+            TooltipText = "Filter charts to a single policy group",
+            Visible = false,
         };
         _policyFilterDropdown.AddItem("All Policies");
         _policyFilterDropdown.ItemSelected += OnPolicyFilterSelected;
@@ -358,7 +358,7 @@ public partial class RLDashboard : Control
 
         var exportBtn = new Button
         {
-            Text        = "Export Run",
+            Text = "Export Run",
             TooltipText = "Export trained model weights as .rlmodel file(s)",
         };
         exportBtn.Pressed += ExportRun;
@@ -384,15 +384,15 @@ public partial class RLDashboard : Control
         hbox.AddThemeConstantOverride("separation", 0);
         panel.AddChild(hbox);
 
-        _statAvgReward  = AddStatCard(hbox, "Avg Reward (50 ep)", "—", first: true);
+        _statAvgReward = AddStatCard(hbox, "Avg Reward (50 ep)", "—", first: true);
         hbox.AddChild(MakeVSep());
-        _statBestReward = AddStatCard(hbox, "Best Reward",        "—", first: false);
+        _statBestReward = AddStatCard(hbox, "Best Reward", "—", first: false);
         hbox.AddChild(MakeVSep());
-        _statEvalReward = AddStatCard(hbox, "Eval Reward",        "—", first: false);
+        _statEvalReward = AddStatCard(hbox, "Eval Reward", "—", first: false);
         hbox.AddChild(MakeVSep());
-        _statTotalSteps = AddStatCard(hbox, "Total Steps",        "—", first: false);
+        _statTotalSteps = AddStatCard(hbox, "Total Steps", "—", first: false);
         hbox.AddChild(MakeVSep());
-        _statEpisodes   = AddStatCard(hbox, "Episodes",           "—", first: false);
+        _statEpisodes = AddStatCard(hbox, "Episodes", "—", first: false);
 
         return panel;
     }
@@ -401,9 +401,9 @@ public partial class RLDashboard : Control
     {
         var margin = new MarginContainer();
         margin.SizeFlagsHorizontal = SizeFlags.ShrinkBegin;
-        margin.AddThemeConstantOverride("margin_left",   first ? 8 : 8);
-        margin.AddThemeConstantOverride("margin_right",  8);
-        margin.AddThemeConstantOverride("margin_top",    5);
+        margin.AddThemeConstantOverride("margin_left", first ? 8 : 8);
+        margin.AddThemeConstantOverride("margin_right", 8);
+        margin.AddThemeConstantOverride("margin_top", 5);
         margin.AddThemeConstantOverride("margin_bottom", 5);
         parent.AddChild(margin);
 
@@ -435,15 +435,15 @@ public partial class RLDashboard : Control
     {
         var grid = new GridContainer { Columns = 2 };
         grid.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        grid.SizeFlagsVertical   = SizeFlags.ExpandFill;
+        grid.SizeFlagsVertical = SizeFlags.ExpandFill;
         grid.AddThemeConstantOverride("h_separation", 4);
         grid.AddThemeConstantOverride("v_separation", 4);
 
-        _rewardChart  = MakeChart("Episode Reward");
-        _lossChart    = MakeChart("Policy Loss  /  Value Loss");
+        _rewardChart = MakeChart("Episode Reward");
+        _lossChart = MakeChart("Policy Loss  /  Value Loss");
         _entropyChart = MakeChart("Entropy");
-        _lengthChart  = MakeChart("Episode Length");
-        _eloChart     = MakeChart("Learner Elo");
+        _lengthChart = MakeChart("Episode Length");
+        _eloChart = MakeChart("Learner Elo");
         _curriculumChart = MakeChart("Curriculum Progress");
         _eloChart.Visible = false;  // shown only during self-play
         _curriculumChart.Visible = false;  // shown only when curriculum is configured
@@ -462,8 +462,8 @@ public partial class RLDashboard : Control
     {
         var chart = new LineChartPanel { ChartTitle = title };
         chart.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        chart.SizeFlagsVertical   = SizeFlags.ExpandFill;
-        chart.CustomMinimumSize   = new Vector2(0, 60);
+        chart.SizeFlagsVertical = SizeFlags.ExpandFill;
+        chart.CustomMinimumSize = new Vector2(0, 60);
         return chart;
     }
 
@@ -471,7 +471,7 @@ public partial class RLDashboard : Control
 
     private void DiscoverAndSelectLatestRun()
     {
-        var absDir    = ProjectSettings.GlobalizePath("res://RL-Agent-Training/runs");
+        var absDir = ProjectSettings.GlobalizePath("res://RL-Agent-Training/runs");
         var prevRunId = _selectedRunId;
 
         _lastKnownRunCount = System.IO.Directory.Exists(absDir)
@@ -497,7 +497,7 @@ public partial class RLDashboard : Control
 
         foreach (var id in dirs)
         {
-            var meta  = ReadMeta(System.IO.Path.Combine(absDir, id));
+            var meta = ReadMeta(System.IO.Path.Combine(absDir, id));
             var label = BuildRunLabel(id, meta.DisplayName);
             _runIds.Add(id);
             _runDropdown?.AddItem(label);
@@ -524,7 +524,7 @@ public partial class RLDashboard : Control
         _runDropdown.Clear();
         foreach (var id in _runIds)
         {
-            var meta  = ReadMeta(System.IO.Path.Combine(absDir, id));
+            var meta = ReadMeta(System.IO.Path.Combine(absDir, id));
             var label = BuildRunLabel(id, meta.DisplayName);
             _runDropdown.AddItem(label);
         }
@@ -574,7 +574,7 @@ public partial class RLDashboard : Control
         if (_curriculumChart is not null) _curriculumChart.Visible = false;
 
         if (_renameEdit is not null) _renameEdit.Editable = true;
-        if (_renameBtn  is not null) _renameBtn.Visible   = true;
+        if (_renameBtn is not null) _renameBtn.Visible = true;
         if (_renameEdit is not null) _renameEdit.Text = _selectedRunMeta.DisplayName;
 
         _checkpointEntries.Clear();
@@ -603,7 +603,7 @@ public partial class RLDashboard : Control
 
         if (string.IsNullOrEmpty(_selectedRunId)) return;
 
-        var runDir    = $"res://RL-Agent-Training/runs/{_selectedRunId}";
+        var runDir = $"res://RL-Agent-Training/runs/{_selectedRunId}";
         var runDirAbs = ProjectSettings.GlobalizePath(runDir);
         if (System.IO.Directory.Exists(runDirAbs))
         {
@@ -675,11 +675,11 @@ public partial class RLDashboard : Control
             var d = variant.AsGodotDictionary();
             return new RunStatus
             {
-                Status             = GetString(d, "status", "unknown"),
-                TotalSteps         = GetLong(d, "total_steps"),
-                EpisodeCount       = GetLong(d, "episode_count"),
+                Status = GetString(d, "status", "unknown"),
+                TotalSteps = GetLong(d, "total_steps"),
+                EpisodeCount = GetLong(d, "episode_count"),
                 WorkerEpisodeCount = GetLong(d, "worker_episode_count"),
-                Message            = GetString(d, "message", ""),
+                Message = GetString(d, "message", ""),
             };
         }
         catch
@@ -699,24 +699,24 @@ public partial class RLDashboard : Control
             {
                 EpisodeReward = GetFloat(d, "episode_reward"),
                 EpisodeLength = (int)GetLong(d, "episode_length"),
-                PolicyLoss    = GetFloat(d, "policy_loss"),
-                ValueLoss     = GetFloat(d, "value_loss"),
-                Entropy       = GetFloat(d, "entropy"),
-                TotalSteps    = GetLong(d, "total_steps"),
-                EpisodeCount  = GetLong(d, "episode_count"),
-                PolicyGroup   = GetString(d, "policy_group", ""),
+                PolicyLoss = GetFloat(d, "policy_loss"),
+                ValueLoss = GetFloat(d, "value_loss"),
+                Entropy = GetFloat(d, "entropy"),
+                TotalSteps = GetLong(d, "total_steps"),
+                EpisodeCount = GetLong(d, "episode_count"),
+                PolicyGroup = GetString(d, "policy_group", ""),
                 OpponentGroup = GetString(d, "opponent_group", ""),
                 OpponentSource = GetString(d, "opponent_source", ""),
                 OpponentCheckpointPath = GetString(d, "opponent_checkpoint_path", ""),
                 OpponentUpdateCount = d.ContainsKey("opponent_update_count")
                     ? GetLong(d, "opponent_update_count")
                     : null,
-                LearnerElo  = d.ContainsKey("learner_elo")       ? GetFloat(d, "learner_elo")       : null,
-                PoolWinRate = d.ContainsKey("pool_avg_win_rate")  ? GetFloat(d, "pool_avg_win_rate")  : null,
+                LearnerElo = d.ContainsKey("learner_elo") ? GetFloat(d, "learner_elo") : null,
+                PoolWinRate = d.ContainsKey("pool_avg_win_rate") ? GetFloat(d, "pool_avg_win_rate") : null,
                 CurriculumProgress = d.ContainsKey("curriculum_progress") ? GetFloat(d, "curriculum_progress") : null,
-                IsEval         = d.ContainsKey("is_eval") && (bool)d["is_eval"],
+                IsEval = d.ContainsKey("is_eval") && (bool)d["is_eval"],
                 EvalMeanReward = d.ContainsKey("eval_mean_reward") ? GetFloat(d, "eval_mean_reward") : 0f,
-                EvalEpisodes   = d.ContainsKey("eval_episodes")    ? (int)GetLong(d, "eval_episodes") : 0,
+                EvalEpisodes = d.ContainsKey("eval_episodes") ? (int)GetLong(d, "eval_episodes") : 0,
             };
         }
         catch
@@ -745,8 +745,8 @@ public partial class RLDashboard : Control
         _exportDialog = new FileDialog
         {
             FileMode = FileDialog.FileModeEnum.OpenDir,
-            Access   = FileDialog.AccessEnum.Filesystem,
-            Title    = "Select Export Folder",
+            Access = FileDialog.AccessEnum.Filesystem,
+            Title = "Select Export Folder",
         };
         _exportDialog.DirSelected += OnExportDirSelected;
         AddChild(_exportDialog);
@@ -757,7 +757,7 @@ public partial class RLDashboard : Control
         if (string.IsNullOrEmpty(_selectedRunId)) return;
 
         var runDirAbs = ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{_selectedRunId}");
-        var meta      = ReadMeta(runDirAbs);
+        var meta = ReadMeta(runDirAbs);
 
         // Build a list of (exportName, checkpointPath) pairs, deduplicating by checkpoint
         // so agents that share a policy group produce only one output file (named after the first agent).
@@ -768,11 +768,12 @@ public partial class RLDashboard : Control
         {
             for (var i = 0; i < meta.AgentNames.Length; i++)
             {
-                var agentName  = meta.AgentNames[i];
-                var safeGroup  = i < meta.AgentGroups.Length ? meta.AgentGroups[i] : string.Empty;
-                var cpPath     = string.IsNullOrEmpty(safeGroup)
+                var agentName = meta.AgentNames[i];
+                var safeGroup = i < meta.AgentGroups.Length ? meta.AgentGroups[i] : string.Empty;
+                var cpPath = string.IsNullOrEmpty(safeGroup)
                     ? null
-                    : System.IO.Path.Combine(runDirAbs, $"checkpoint__{safeGroup}.json");
+                    : RLCheckpoint.ResolveCheckpointExtension(
+                        System.IO.Path.Combine(runDirAbs, $"checkpoint__{safeGroup}.json"));
 
                 if (cpPath is null || !System.IO.File.Exists(cpPath))
                 {
@@ -819,7 +820,7 @@ public partial class RLDashboard : Control
         if (string.IsNullOrEmpty(_selectedRunId)) return;
 
         var runDirAbs = ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{_selectedRunId}");
-        var meta      = ReadMeta(runDirAbs);
+        var meta = ReadMeta(runDirAbs);
         WriteMeta(runDirAbs, meta with { DisplayName = name });
 
         // Update dropdown label in place.
@@ -841,11 +842,11 @@ public partial class RLDashboard : Control
             var variant = Json.ParseString(System.IO.File.ReadAllText(metaPath));
             if (variant.VariantType != Variant.Type.Dictionary) return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
 
-            var d           = variant.AsGodotDictionary();
+            var d = variant.AsGodotDictionary();
             var displayName = GetString(d, "display_name", "");
-            var agentArr    = d.ContainsKey("agent_names")  ? d["agent_names"].AsGodotArray()  : new Godot.Collections.Array();
-            var groupArr    = d.ContainsKey("agent_groups") ? d["agent_groups"].AsGodotArray()  : new Godot.Collections.Array();
-            var agentNames  = agentArr.Select(v => v.AsString()).ToArray();
+            var agentArr = d.ContainsKey("agent_names") ? d["agent_names"].AsGodotArray() : new Godot.Collections.Array();
+            var groupArr = d.ContainsKey("agent_groups") ? d["agent_groups"].AsGodotArray() : new Godot.Collections.Array();
+            var agentNames = agentArr.Select(v => v.AsString()).ToArray();
             var agentGroups = groupArr.Select(v => v.AsString()).ToArray();
             var hasCurriculum = d.ContainsKey("has_curriculum") && d["has_curriculum"].AsBool();
 
@@ -895,23 +896,23 @@ public partial class RLDashboard : Control
         switch (status.Status)
         {
             case "running":
-                _statusDot.Color  = CRunning;
+                _statusDot.Color = CRunning;
                 var epDisplay = status.WorkerEpisodeCount > 0
                     ? $"{status.EpisodeCount:N0} master  +  {status.WorkerEpisodeCount:N0} simulated"
                     : status.EpisodeCount.ToString("N0");
-                _statusLabel.Text = $"Running  •  ep {epDisplay}  •  {FormatSteps(status.TotalSteps)} steps";
+                _statusLabel.Text = $"Running";
                 break;
             case "done":
             case "stopped":
-                _statusDot.Color  = CStopped;
-                _statusLabel.Text = $"Stopped  •  {status.EpisodeCount:N0} episodes";
+                _statusDot.Color = CStopped;
+                _statusLabel.Text = $"Stopped";
                 break;
             case "loading":
-                _statusDot.Color  = CIdle;
+                _statusDot.Color = CIdle;
                 _statusLabel.Text = "Loading…";
                 break;
             default:
-                _statusDot.Color  = CIdle;
+                _statusDot.Color = CIdle;
                 _statusLabel.Text = string.IsNullOrEmpty(_selectedRunId) ? "No run selected" : "Idle";
                 break;
         }
@@ -1007,24 +1008,24 @@ public partial class RLDashboard : Control
 
         bool multi = activeGroups.Count > 1;
 
-        var newRewardLabels  = new HashSet<string>();
+        var newRewardLabels = new HashSet<string>();
         var newEntropyLabels = new HashSet<string>();
-        var newLengthLabels  = new HashSet<string>();
-        var newLossLabels    = new HashSet<string>();
+        var newLengthLabels = new HashSet<string>();
+        var newLossLabels = new HashSet<string>();
 
         for (int i = 0; i < activeGroups.Count; i++)
         {
-            var group        = activeGroups[i];
-            var color        = CPolicyPalette[i % CPolicyPalette.Length];
+            var group = activeGroups[i];
+            var color = CPolicyPalette[i % CPolicyPalette.Length];
             var groupMetrics = _metrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
 
-            var rewardLabel  = multi ? group : "Reward";
+            var rewardLabel = multi ? group : "Reward";
             var entropyLabel = multi ? group : "Entropy";
-            var lengthLabel  = multi ? group : "Length";
+            var lengthLabel = multi ? group : "Length";
 
-            _rewardChart?.UpdateSeries(rewardLabel,   color, groupMetrics.Select(m => m.EpisodeReward));
+            _rewardChart?.UpdateSeries(rewardLabel, color, groupMetrics.Select(m => m.EpisodeReward));
             _entropyChart?.UpdateSeries(entropyLabel, color, groupMetrics.Select(m => m.Entropy));
-            _lengthChart?.UpdateSeries(lengthLabel,   color, groupMetrics.Select(m => (float)m.EpisodeLength));
+            _lengthChart?.UpdateSeries(lengthLabel, color, groupMetrics.Select(m => (float)m.EpisodeLength));
 
             newRewardLabels.Add(rewardLabel);
             newEntropyLabels.Add(entropyLabel);
@@ -1042,12 +1043,12 @@ public partial class RLDashboard : Control
 
             // Loss: each group gets a policy-loss and value-loss series.
             var polLabel = multi ? $"{group} Policy" : "Policy";
-            var valLabel = multi ? $"{group} Value"  : "Value";
+            var valLabel = multi ? $"{group} Value" : "Value";
             var valColor = multi
                 ? new Color(color.R * 0.65f, color.G * 0.65f, color.B * 0.65f, 0.85f)
                 : CValueLoss;
 
-            _lossChart?.UpdateSeries(polLabel, color,    groupMetrics.Select(m => m.PolicyLoss));
+            _lossChart?.UpdateSeries(polLabel, color, groupMetrics.Select(m => m.PolicyLoss));
             _lossChart?.UpdateSeries(valLabel, valColor, groupMetrics.Select(m => m.ValueLoss));
 
             newLossLabels.Add(polLabel);
@@ -1064,10 +1065,10 @@ public partial class RLDashboard : Control
         foreach (var stale in _lossSeriesLabels.Except(newLossLabels))
             _lossChart?.RemoveSeries(stale);
 
-        _rewardSeriesLabels.Clear();  _rewardSeriesLabels.UnionWith(newRewardLabels);
+        _rewardSeriesLabels.Clear(); _rewardSeriesLabels.UnionWith(newRewardLabels);
         _entropySeriesLabels.Clear(); _entropySeriesLabels.UnionWith(newEntropyLabels);
-        _lengthSeriesLabels.Clear();  _lengthSeriesLabels.UnionWith(newLengthLabels);
-        _lossSeriesLabels.Clear();    _lossSeriesLabels.UnionWith(newLossLabels);
+        _lengthSeriesLabels.Clear(); _lengthSeriesLabels.UnionWith(newLengthLabels);
+        _lossSeriesLabels.Clear(); _lossSeriesLabels.UnionWith(newLossLabels);
 
         // Elo and curriculum are not split by policy (self-play learner has a single Elo).
         bool hasFilter = !string.IsNullOrEmpty(_selectedPolicyGroupFilter);
@@ -1106,18 +1107,18 @@ public partial class RLDashboard : Control
         if (filtered.Count == 0) return;
 
         var trainMetrics = filtered.Where(m => !m.IsEval).ToList();
-        var evalMetrics  = filtered.Where(m => m.IsEval).ToList();
+        var evalMetrics = filtered.Where(m => m.IsEval).ToList();
 
         if (trainMetrics.Count == 0 && evalMetrics.Count == 0) return;
 
-        var window  = (trainMetrics.Count > 0 ? trainMetrics : filtered).TakeLast(50).ToList();
-        var avg     = window.Average(m => m.EpisodeReward);
-        var best    = (trainMetrics.Count > 0 ? trainMetrics : filtered).Max(m => m.EpisodeReward);
-        var last    = _metrics[^1];
-        var steps   = status.TotalSteps   > 0 ? status.TotalSteps   : last.TotalSteps;
-        var eps     = status.EpisodeCount > 0 ? status.EpisodeCount : last.EpisodeCount;
+        var window = (trainMetrics.Count > 0 ? trainMetrics : filtered).TakeLast(50).ToList();
+        var avg = window.Average(m => m.EpisodeReward);
+        var best = (trainMetrics.Count > 0 ? trainMetrics : filtered).Max(m => m.EpisodeReward);
+        var last = _metrics[^1];
+        var steps = status.TotalSteps > 0 ? status.TotalSteps : last.TotalSteps;
+        var eps = status.EpisodeCount > 0 ? status.EpisodeCount : last.EpisodeCount;
 
-        if (_statAvgReward  is not null) _statAvgReward.Text  = avg.ToString("F3");
+        if (_statAvgReward is not null) _statAvgReward.Text = avg.ToString("F3");
         if (_statBestReward is not null) _statBestReward.Text = best.ToString("F3");
         if (_statEvalReward is not null)
         {
@@ -1143,23 +1144,23 @@ public partial class RLDashboard : Control
 
     private void SetHeaderStatus(string message)
     {
-        if (_headerStatus is not null) _headerStatus.Text =message.Length <= 60 ? message : message[..60] + "…";
+        if (_headerStatus is not null) _headerStatus.Text = message.Length <= 60 ? message : message[..60] + "…";
     }
 
     private void ShowLiveBadge()
     {
         if (_liveBadge is null) return;
-        _liveBadge.Visible  = true;
+        _liveBadge.Visible = true;
         _liveBadge.Modulate = Colors.White;
-        _livePulseAccum     = 0;
+        _livePulseAccum = 0;
     }
 
     private void HideLiveBadge()
     {
         if (_liveBadge is null) return;
-        _liveBadge.Visible  = false;
+        _liveBadge.Visible = false;
         _liveBadge.Modulate = Colors.White;
-        _livePulseAccum     = 0;
+        _livePulseAccum = 0;
     }
 
     // ── Run label helpers ─────────────────────────────────────────────────────
@@ -1185,15 +1186,15 @@ public partial class RLDashboard : Control
         var lastUnderscore = runId.LastIndexOf('_');
         if (lastUnderscore <= 0 || lastUnderscore >= runId.Length - 1) return runId;
 
-        var prefix       = runId[..lastUnderscore];
+        var prefix = runId[..lastUnderscore];
         var timestampStr = runId[(lastUnderscore + 1)..];
 
         if (!double.TryParse(timestampStr, NumberStyles.Float, CultureInfo.InvariantCulture, out var unixSeconds))
             return runId;
 
-        var dto   = DateTimeOffset.FromUnixTimeSeconds((long)unixSeconds).ToLocalTime();
+        var dto = DateTimeOffset.FromUnixTimeSeconds((long)unixSeconds).ToLocalTime();
         var today = DateTimeOffset.Now.Date;
-        var time  = dto.DateTime.Date == today
+        var time = dto.DateTime.Date == today
             ? $"Today, {dto:HH:mm}"
             : $"{dto:MMM d, HH:mm}";
 
@@ -1234,7 +1235,7 @@ public partial class RLDashboard : Control
         if (!d.ContainsKey(key)) return 0f;
         var v = d[key];
         return v.VariantType == Variant.Type.Float ? v.AsSingle()
-             : v.VariantType == Variant.Type.Int   ? (float)v.AsInt64()
+             : v.VariantType == Variant.Type.Int ? (float)v.AsInt64()
              : 0f;
     }
 
@@ -1242,7 +1243,7 @@ public partial class RLDashboard : Control
     {
         if (!d.ContainsKey(key)) return 0L;
         var v = d[key];
-        return v.VariantType == Variant.Type.Int   ? v.AsInt64()
+        return v.VariantType == Variant.Type.Int ? v.AsInt64()
              : v.VariantType == Variant.Type.Float ? (long)v.AsDouble()
              : 0L;
     }
@@ -1256,7 +1257,7 @@ public partial class RLDashboard : Control
 
     private static string FormatSteps(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:F2}M"
-        : n >= 1_000   ? $"{n / 1_000.0:F1}K"
+        : n >= 1_000 ? $"{n / 1_000.0:F1}K"
         : n.ToString();
 
     // ── Checkpoint history panel ──────────────────────────────────────────────
@@ -1271,9 +1272,9 @@ public partial class RLDashboard : Control
 
         _checkpointToggleBtn = new Button
         {
-            Text          = "▶  Checkpoint History",
-            Flat          = true,
-            ToggleMode    = true,
+            Text = "▶  Checkpoint History",
+            Flat = true,
+            ToggleMode = true,
             ButtonPressed = false,
         };
         _checkpointToggleBtn.AddThemeFontSizeOverride("font_size", 13);
@@ -1314,9 +1315,9 @@ public partial class RLDashboard : Control
         _checkpointHistoryPanel.AddThemeConstantOverride("separation", 2);
 
         var scroll = new ScrollContainer();
-        scroll.CustomMinimumSize    = new Vector2(0, 180);
-        scroll.SizeFlagsVertical    = SizeFlags.ExpandFill;
-        scroll.FollowFocus          = false;
+        scroll.CustomMinimumSize = new Vector2(0, 180);
+        scroll.SizeFlagsVertical = SizeFlags.ExpandFill;
+        scroll.FollowFocus = false;
 
         _checkpointRowContainer = new VBoxContainer();
         _checkpointRowContainer.SizeFlagsHorizontal = SizeFlags.ExpandFill;
@@ -1381,7 +1382,7 @@ public partial class RLDashboard : Control
 
         if (_checkpointEntries.Count == 0) return;
 
-        var byGroup   = _checkpointEntries.GroupBy(e => e.PolicyGroupId).OrderBy(g => g.Key).ToList();
+        var byGroup = _checkpointEntries.GroupBy(e => e.PolicyGroupId).OrderBy(g => g.Key).ToList();
         var multiGroup = byGroup.Count > 1;
 
         foreach (var group in byGroup)
@@ -1416,12 +1417,12 @@ public partial class RLDashboard : Control
             row.AddChild(lbl);
         }
 
-        AddCol("Update",   64);
-        AddCol("Steps",    72);
+        AddCol("Update", 64);
+        AddCol("Steps", 72);
         AddCol("Episodes", 72);
-        AddCol("Algo",     48);
-        AddCol("Reward",   70);
-        AddCol("Type",     70);
+        AddCol("Algo", 48);
+        AddCol("Reward", 70);
+        AddCol("Type", 70);
         row.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
         return row;
     }
@@ -1447,19 +1448,19 @@ public partial class RLDashboard : Control
 
         var typeLabel = new Label
         {
-            Text              = entry.IsSelfPlayFrozen ? "self-play" : "history",
+            Text = entry.IsSelfPlayFrozen ? "self-play" : "history",
             CustomMinimumSize = new Vector2(70, 0),
         };
         typeLabel.AddThemeFontSizeOverride("font_size", 10);
-        typeLabel.Modulate            = entry.IsSelfPlayFrozen ? new Color(0.85f, 0.65f, 0.25f) : new Color(0.55f, 0.85f, 0.55f);
-        typeLabel.VerticalAlignment   = VerticalAlignment.Center;
+        typeLabel.Modulate = entry.IsSelfPlayFrozen ? new Color(0.85f, 0.65f, 0.25f) : new Color(0.55f, 0.85f, 0.55f);
+        typeLabel.VerticalAlignment = VerticalAlignment.Center;
         row.AddChild(typeLabel);
 
         row.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
         var exportBtn = new Button
         {
-            Text        = "Export",
+            Text = "Export",
             TooltipText = $"Export as .rlmodel: {System.IO.Path.GetFileName(entry.AbsolutePath)}",
             CustomMinimumSize = new Vector2(64, 0),
         };

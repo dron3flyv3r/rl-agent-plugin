@@ -43,7 +43,22 @@ public static class RLModelExporter
         var checkpoint = LoadCheckpointJson(checkpointAbsPath);
         if (checkpoint is null) return Error.Failed;
 
-        if (!TryNormalizeDenseLayerShapes(checkpoint.LayerShapeBuffer, checkpointAbsPath, out var shapes))
+        var rawShapes = checkpoint.LayerShapeBuffer;
+
+        // Format v6+ prepends a flat (0) or multi-stream (1) marker before the typed layer
+        // shapes. The .rlmodel binary format does not include this marker, so strip it.
+        // We detect it when (length - 1) is divisible by 4 but length itself is not.
+        if (rawShapes.Length > 0 && rawShapes.Length % 4 != 0 && (rawShapes.Length - 1) % 4 == 0)
+        {
+            if (rawShapes[0] == 1)
+            {
+                GD.PushError($"[RLModelExporter] Multi-stream checkpoints cannot be exported to .rlmodel format: {checkpointAbsPath}");
+                return Error.Failed;
+            }
+            rawShapes = rawShapes[1..]; // strip flat marker
+        }
+
+        if (!TryNormalizeDenseLayerShapes(rawShapes, checkpointAbsPath, out var shapes))
             return Error.Failed;
 
         var weights = checkpoint.WeightBuffer;
@@ -110,6 +125,10 @@ public static class RLModelExporter
     public static string? FindCheckpointInRunDir(string runDirAbsPath)
     {
         if (!Directory.Exists(runDirAbsPath)) return null;
+
+        // Prefer the ZIP format (.rlcheckpoint) over plain JSON.
+        foreach (var file in Directory.GetFiles(runDirAbsPath, "*.rlcheckpoint"))
+            return file;
 
         foreach (var file in Directory.GetFiles(runDirAbsPath, "*.json"))
         {

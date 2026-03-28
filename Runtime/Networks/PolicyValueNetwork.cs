@@ -689,6 +689,45 @@ internal sealed class PolicyValueNetwork : IDisposable
         return bestIndex;
     }
 
+    /// <summary>
+    /// Stochastic discrete action: sample from softmax(logits).
+    /// </summary>
+    public int SelectStochasticAction(float[] observation, Random rng)
+    {
+        var logits = Infer(observation).Logits;
+        var probs = Softmax(logits);
+        var roll = rng.NextSingle();
+        var cum = 0f;
+        for (var i = 0; i < probs.Length; i++)
+        {
+            cum += probs[i];
+            if (roll <= cum) return i;
+        }
+        return probs.Length - 1;
+    }
+
+    /// <summary>
+    /// Stochastic continuous action: sample from N(mean, exp(logStd)) then tanh-squash.
+    /// Only valid when this network was built with continuousActionDims > 0.
+    /// </summary>
+    public float[] SelectStochasticContinuousAction(float[] observation, Random rng)
+    {
+        var actorOut = Infer(observation).Logits;
+        var D = _continuousActionDims;
+        var action = new float[D];
+        for (var i = 0; i < D; i++)
+        {
+            var mean   = actorOut[i];
+            var logStd = Math.Clamp(actorOut[D + i], -20f, 2f);
+            var std    = MathF.Exp(logStd);
+            var u1     = Math.Max(rng.NextSingle(), 1e-10f);
+            var u2     = rng.NextSingle();
+            var eps    = MathF.Sqrt(-2f * MathF.Log(u1)) * MathF.Cos(2f * MathF.PI * u2);
+            action[i]  = MathF.Tanh(mean + std * eps);
+        }
+        return action;
+    }
+
     public int[] SelectGreedyActions(VectorBatch observations)
     {
         var inference = InferBatch(observations);

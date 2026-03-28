@@ -26,7 +26,7 @@ public partial class RLRunConfig : Resource
     /// <summary>
     /// Repeat each selected action for N physics steps before requesting a new decision.
     /// </summary>
-    [Export] public int ActionRepeat { get; set; } = 4;
+    [Export(PropertyHint.Range, "1,15,or_greater")] public int ActionRepeat { get; set; } = 4;
     /// <summary>
     /// Save policy checkpoints every N trainer updates.
     /// Ignored when <see cref="CheckpointIntervalSteps"/> is greater than zero.

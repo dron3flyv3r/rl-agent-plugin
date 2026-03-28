@@ -2,9 +2,10 @@
 
 ## New users
 1. [Get Started Guide](get-started.md)
-2. [Configuration Reference](configuration.md)
-3. [2D vs 3D setup notes](get-started.md)
-4. [Get Started Tips & Tricks](get-started.md#tips--tricks)
+2. [Feature Catalog](features.md)
+3. [Configuration Reference](configuration.md)
+4. [2D vs 3D setup notes](get-started.md)
+5. [Get Started Tips & Tricks](get-started.md#tips--tricks)
 
 ## Deep dives
 - [Algorithms (PPO & SAC)](algorithms.md)
@@ -12,6 +13,11 @@
 - [Architecture Overview](architecture.md)
 - [GPU CNN Training](gpu-cnn.md)
 - [Sensors (raycast, camera)](sensors.md)
+
+## How-to guides
+- [How to Use Curriculum Learning](How-to/curriculum-learning.md)
+- [How to Use Self-Play](How-to/self-play.md)
+- [How to Use Human Control Mode](How-to/human-control-mode.md)
 
 ## Demo scenes
 - Example scenes are maintained in the companion demo repository:

@@ -30,7 +30,7 @@ public static class InferencePolicyFactory
             _customFactories.Remove(algorithmName.Trim());
     }
 
-    public static IInferencePolicy Create(RLCheckpoint checkpoint, RLNetworkGraph? fallbackGraph = null)
+    public static IInferencePolicy Create(RLCheckpoint checkpoint, RLNetworkGraph? fallbackGraph = null, bool stochasticInference = false)
     {
         var graph = ReconstructGraph(checkpoint, fallbackGraph);
 
@@ -46,7 +46,8 @@ public static class InferencePolicyFactory
                     ? checkpoint.ContinuousActionDimensions
                     : checkpoint.DiscreteActionCount,
                 checkpoint.ContinuousActionDimensions > 0,
-                graph);
+                graph,
+                stochasticInference);
         }
 
         // PPO: use spec-aware constructor when the checkpoint has a multi-stream or image spec.
@@ -57,14 +58,16 @@ public static class InferencePolicyFactory
                 spec,
                 checkpoint.DiscreteActionCount,
                 checkpoint.ContinuousActionDimensions,
-                graph);
+                graph,
+                stochasticInference);
         }
 
         return new PpoInferencePolicy(
             checkpoint.ObservationSize,
             checkpoint.DiscreteActionCount,
             checkpoint.ContinuousActionDimensions,
-            graph);
+            graph,
+            stochasticInference);
     }
 
     /// <summary>

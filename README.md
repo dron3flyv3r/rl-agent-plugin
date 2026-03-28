@@ -45,6 +45,7 @@ git submodule update --init --recursive
 ## Documentation
 
 - Docs index: `docs/README.md`
+- Feature catalog: `docs/features.md`
 - Get started: `docs/get-started.md`
 - Configuration reference: `docs/configuration.md`
 - Architecture: `docs/architecture.md`

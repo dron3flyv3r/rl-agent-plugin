@@ -1036,14 +1036,42 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     private static bool ValidateInferenceModel(Node node, Node root, TrainingSceneValidation validation, bool requireConfiguredModel)
     {
-        if (node is not IRLAgent agent)
+        var errorCount = validation.Errors.Count;
+        var nodePath = root.GetPathTo(node).ToString();
+
+        // Try typed C# access first; fall back to Godot property access when the managed type
+        // cannot be resolved from the editor plugin context (packedScene.Instantiate() returns
+        // plain GodotObjects when the game assembly isn't yet visible to the plugin assembly).
+        string modelPath;
+        int discreteCount;
+        int continuousDims;
+        var hasTypedAgent = node is IRLAgent;
+
+        if (hasTypedAgent)
         {
-            return false;
+            var agent = (IRLAgent)node;
+            modelPath = agent.GetInferenceModelPath();
+            discreteCount = agent.GetDiscreteActionCount();
+            continuousDims = agent.GetContinuousActionDimensions();
+        }
+        else
+        {
+            // C# cast unavailable — read InferenceModelPath via the PolicyGroupConfig sub-resource.
+            var policyGroupConfig = ReadResourceProperty(node, "PolicyGroupConfig");
+            var rawPath = ReadStringProperty(policyGroupConfig, "InferenceModelPath");
+            // Resolve UID paths the same way RLAgent2D.NormalizeResourcePath does.
+            if (rawPath.StartsWith("uid://", StringComparison.Ordinal))
+            {
+                var resolved = ResourceUid.EnsurePath(rawPath);
+                rawPath = !string.IsNullOrWhiteSpace(resolved) ? resolved : rawPath;
+            }
+            modelPath = rawPath;
+            // Action-space dimensions are unknown without the typed interface.
+            // Use -1 as "unknown" so the checks below are skipped rather than producing false positives.
+            discreteCount = -1;
+            continuousDims = -1;
         }
 
-        var errorCount = validation.Errors.Count;
-        var modelPath = agent.GetInferenceModelPath();
-        var nodePath = root.GetPathTo(node).ToString();
         if (string.IsNullOrWhiteSpace(modelPath))
         {
             if (requireConfiguredModel)
@@ -1056,7 +1084,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         if (!modelPath.EndsWith(".rlmodel", StringComparison.OrdinalIgnoreCase))
         {
-            validation.Errors.Add($"Agent '{nodePath}': inference model path must point to a .rlmodel file.");
+            if (requireConfiguredModel)
+                validation.Errors.Add($"Agent '{nodePath}': inference model path must point to a .rlmodel file.");
             return false;
         }
 
@@ -1064,15 +1093,20 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         if (checkpoint is null)
         {
-            validation.Errors.Add($"Agent '{nodePath}': failed to load inference model '{modelPath}'.");
+            if (requireConfiguredModel)
+                validation.Errors.Add($"Agent '{nodePath}': failed to load inference model '{modelPath}'.");
             return false;
         }
 
-        var observationSize = ReadAgentObservationSize(node, root, validation);
-        var discreteCount = agent.GetDiscreteActionCount();
-        var continuousDims = agent.GetContinuousActionDimensions();
+        // For Auto-mode agents the model is optional — only add blocking errors when the model
+        // is explicitly required (Inference mode). Mismatch errors on an optional model should
+        // not prevent training from starting.
+        if (!requireConfiguredModel)
+            return true;
 
-        if (checkpoint.ObservationSize != observationSize)
+        var observationSize = hasTypedAgent ? ReadAgentObservationSize(node, root, validation) : -1;
+
+        if (observationSize > 0 && checkpoint.ObservationSize > 0 && checkpoint.ObservationSize != observationSize)
         {
             validation.Errors.Add(
                 $"Agent '{nodePath}': model observation size {checkpoint.ObservationSize} " +
@@ -1085,14 +1119,14 @@ public partial class RLAgentPluginEditor : EditorPlugin
             validation.Errors.Add($"Agent '{nodePath}': PPO models cannot drive continuous actions.");
         }
 
-        if (checkpoint.DiscreteActionCount > 0 && checkpoint.DiscreteActionCount != discreteCount)
+        if (discreteCount >= 0 && checkpoint.DiscreteActionCount > 0 && checkpoint.DiscreteActionCount != discreteCount)
         {
             validation.Errors.Add(
                 $"Agent '{nodePath}': model discrete action count {checkpoint.DiscreteActionCount} " +
                 $"does not match agent count {discreteCount}.");
         }
 
-        if (checkpoint.ContinuousActionDimensions > 0 && checkpoint.ContinuousActionDimensions != continuousDims)
+        if (continuousDims >= 0 && checkpoint.ContinuousActionDimensions > 0 && checkpoint.ContinuousActionDimensions != continuousDims)
         {
             validation.Errors.Add(
                 $"Agent '{nodePath}': model continuous action dims {checkpoint.ContinuousActionDimensions} " +
@@ -1478,19 +1512,9 @@ public partial class RLAgentPluginEditor : EditorPlugin
         return validation;
     }
 
-    private static void LogValidationMessages(string operation, TrainingSceneValidation validation)
+    private static void LogValidationMessages(string _, TrainingSceneValidation __)
     {
-        if (validation.Errors.Count == 0)
-        {
-            return;
-        }
-
-        foreach (var error in validation.Errors)
-        {
-            var message = $"{operation}: {error}";
-            GD.PushError(message);
-            GD.PrintErr(message);
-        }
+        // Validation errors are surfaced in the RL Setup UI — no console spam needed.
     }
 
     private static string ReadCompletedQuickTestStatus(string statusPath)

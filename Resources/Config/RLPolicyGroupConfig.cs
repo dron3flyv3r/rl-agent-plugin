@@ -25,6 +25,15 @@ public partial class RLPolicyGroupConfig : Resource
     /// </summary>
     [Export(PropertyHint.File, "*.rlmodel")] public string InferenceModelPath { get; set; } = string.Empty;
 
+    [ExportGroup("Inference")]
+    /// <summary>
+    /// When enabled, actions are sampled from the policy distribution rather than
+    /// taking the greedy/mean action. Adds natural behavioural variation between
+    /// agents sharing the same model and helps verify that a policy genuinely
+    /// learned rather than memorising a single deterministic path.
+    /// </summary>
+    [Export] public bool StochasticInference { get; set; } = false;
+
     [ExportGroup("Network")]
     /// <summary>
     /// Network architecture resource used when creating a trainable policy.

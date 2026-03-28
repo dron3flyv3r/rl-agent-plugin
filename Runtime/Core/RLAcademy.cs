@@ -467,7 +467,7 @@ public partial class RLAcademy : Node
 
             try
             {
-                var policy = InferencePolicyFactory.Create(checkpoint, fallbackNetworkGraph);
+                var policy = InferencePolicyFactory.Create(checkpoint, fallbackNetworkGraph, agent.PolicyGroupConfig.StochasticInference);
                 policy.LoadCheckpoint(checkpoint);
                 _agentInferencePolicies[agent] = policy;
                 _inferenceStepCounters[agent] = 0;
