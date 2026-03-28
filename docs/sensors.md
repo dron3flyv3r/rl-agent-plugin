@@ -31,6 +31,8 @@ Call them with `obs.AddSensor("name", sensor)` or `obs.Add(sensor.Read())`.
 
 `RLCameraSensor2D` captures a 2D scene region as pixels and feeds them into the observation as an image stream. The network builds a CNN encoder for the stream automatically.
 
+When training with PPO, that CNN can also switch to the GPU-backed training path automatically when Vulkan compute is available. See [gpu-cnn.md](gpu-cnn.md) for the activation rules and execution model.
+
 ### Node placement
 
 Add `RLCameraSensor2D` as a child of the `Agent` node. Position and rotate it in the scene like any `Node2D` — it behaves like a camera placed at that point.
@@ -104,6 +106,8 @@ public partial class MyAgent : RLAgent2D
 
 `AddImage(string name, RLCameraSensor2D sensor)` calls `sensor.Capture()` internally and registers the result as an image stream in the `ObservationSpec`. The network will build a CNN encoder for it automatically.
 
+There is no separate "use GPU CNN" flag on the sensor. The GPU backend is selected later by the PPO trainer if the policy contains image streams and Vulkan is available.
+
 You can add **multiple** camera sensors with different names:
 
 ```csharp
@@ -134,9 +138,21 @@ Each panel shows:
 
 This works in normal play mode and in training mode launched from the editor.
 
+### Distributed training
+
+`RLCameraSensor2D` requires a GPU renderer. Enable `WorkersRequireRenderer` on `RLDistributedConfig` to launch workers with a real renderer instead of `--headless`.
+
+When `WorkersRequireRenderer` is true, workers automatically run in **1:1 physics/render lock-step** (`Engine.MaxPhysicsStepsPerFrame = 1`, `Engine.MaxFps = 0`). This means every physics tick has exactly one freshly rendered `SubViewport` frame — zero stale observations regardless of GPU speed.
+
+**BatchSize must be 1** for camera-sensor workers. All environments within a worker share one render thread; `BatchSize > 1` causes most observations to come from stale frames. Scale throughput by increasing `WorkerCount` instead.
+
+All agent logic must be in `_PhysicsProcess` (not `_Process`). `_PhysicsProcess(delta)` always receives a fixed `1 / PhysicsTicksPerSecond` delta — physics is deterministic even at low real-time FPS.
+
+See [configuration.md — Camera sensors in distributed training](configuration.md#camera-sensors-in-distributed-training) for the full setup.
+
 ### Performance notes
 
-- `GetImage()` is a GPU readback — it stalls the render pipeline. Keep `RenderSize` small (64–128) during training.
+- GPU readback (`GetImage()`) is lazy — it only happens once per rendered frame, on the first `Capture()` call. Subsequent calls within the same frame return a cached result.
+- Keep `RenderSize` small (64–128) during training to reduce GPU readback cost.
 - Use `Grayscale = true` unless colour is essential. It cuts CNN input size by 3×.
-- The SubViewport renders every frame regardless of whether `Capture()` is called. If you have multiple sensors and want to save GPU time, reduce `RenderSize` rather than disabling the viewport.
 - For profiling, compare training steps/sec with and without the camera sensor active to measure the actual overhead for your scene.

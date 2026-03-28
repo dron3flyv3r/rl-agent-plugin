@@ -21,10 +21,10 @@ internal static class RLProfiler
     public static bool Enabled = false;
 
     /// <summary>How many calls to <see cref="End"/> on the trigger label before printing a summary.</summary>
-    public static int ReportEvery = 200;
+    public static int ReportEvery = 1;
 
     /// <summary>The label whose call count triggers the summary print.</summary>
-    public static string TriggerLabel = "Infer";
+    public static string TriggerLabel = "PPO.BackgroundUpdate";
 
     private static readonly Dictionary<string, Entry> _entries = new();
 

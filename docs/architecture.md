@@ -214,6 +214,29 @@ Actor Network (trunk + Gaussian head)
           Target Critics (polyak-averaged copies)
 ```
 
+### GPU CNN Path For Image Streams
+
+When a policy contains image streams, `PolicyValueNetwork` builds a per-stream CNN encoder before the shared trunk. The important detail is that the plugin currently uses two different execution roles:
+
+- rollout collection and action sampling use the normal CPU network
+- PPO training updates may use a dedicated GPU training network for image encoders
+
+Activation is automatic when:
+
+- the policy has at least one image stream
+- PPO is the active trainer
+- Vulkan compute is available
+
+In that case, `PpoTrainer` starts a dedicated background thread and creates a training-only `PolicyValueNetwork` whose image streams use `GpuCnnEncoder`. That thread owns a local Godot `RenderingDevice`, which is required because the GPU device is thread-bound.
+
+The current split is:
+
+- CNN forward/backward/update: GPU
+- shared trunk + policy/value heads: CPU
+- rollout inference: CPU
+
+This keeps the expensive camera/CNN training work on the GPU without changing the rest of the PPO stack. See [gpu-cnn.md](gpu-cnn.md) for the detailed activation flow and fallback behavior.
+
 ---
 
 ### Metrics & Dashboard

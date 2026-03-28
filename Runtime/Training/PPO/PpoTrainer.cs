@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Godot;
 
@@ -11,6 +13,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     private readonly PolicyGroupConfig _config;
     private readonly RLTrainerConfig _trainerConfig;
     private readonly PolicyValueNetwork _network;
+    private readonly bool _useGpuTrainingNetwork;
     private readonly List<PpoTransition> _transitions = new();
     private readonly RandomNumberGenerator _rng = new();
 
@@ -18,21 +21,41 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     private PolicyValueNetwork? _shadowNetwork;
     private Task<PpoAsyncResult>? _pendingUpdate;
 
+    // Dedicated GPU training thread — created once, reuses a single GpuCnnEncoder
+    // for the lifetime of the trainer.  GpuDevice is thread-bound, so we cannot
+    // share it across thread-pool threads; a dedicated thread sidesteps that.
+    private BlockingCollection<GpuTrainingJob>? _gpuJobQueue;
+    private Thread?                             _gpuThread;
+
+    private sealed class GpuTrainingJob
+    {
+        public required List<TrainingSample>             Samples;
+        public required int                              MiniBatchSize;
+        public required RLTrainerConfig                  Config;
+        public required RLCheckpoint                     BaseCheckpoint;
+        public required TaskCompletionSource<PpoAsyncResult> Result;
+    }
+
     public PpoTrainer(PolicyGroupConfig config)
     {
         _config = config;
         _trainerConfig = config.TrainerConfig;
-        _network = config.ObsSpec is not null
-            ? new PolicyValueNetwork(
-                config.ObsSpec,
-                config.DiscreteActionCount,
-                config.ContinuousActionDimensions,
-                config.NetworkGraph)
-            : new PolicyValueNetwork(
-                config.ObservationSize,
-                config.DiscreteActionCount,
-                config.ContinuousActionDimensions,
-                config.NetworkGraph);
+        var hasImageStreams = HasImageStreams(config);
+        _useGpuTrainingNetwork = hasImageStreams && GpuDevice.IsAvailable();
+        _network = CreatePolicyNetwork(config, preferGpuImageEncoders: false);
+
+        if (hasImageStreams)
+        {
+            if (_useGpuTrainingNetwork)
+            {
+                GD.Print($"[PPO] Group '{config.GroupId}': using GPU image encoder for training updates; rollout inference remains on CPU.");
+            }
+            else
+            {
+                GD.Print($"[PPO] Group '{config.GroupId}': GPU image encoder unavailable; training updates will run on CPU.");
+            }
+        }
+
         _rng.Randomize();
     }
 
@@ -156,44 +179,26 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         var samples = BuildTrainingSamples();
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(_trainerConfig.PpoMiniBatchSize, 1, samples.Count);
-        var policyLoss = 0.0f;
-        var valueLoss = 0.0f;
-        var entropy = 0.0f;
-        var clipFraction = 0.0f;
-        var processedSamples = 0;
-
-        for (var epoch = 0; epoch < _trainerConfig.EpochsPerUpdate; epoch++)
-        {
-            Shuffle(samples);
-            for (var start = 0; start < samples.Count; start += miniBatchSize)
-            {
-                var count = Math.Min(miniBatchSize, samples.Count - start);
-                var batchSamples = new TrainingSample[count];
-                for (var index = 0; index < count; index++)
-                {
-                    batchSamples[index] = samples[start + index];
-                }
-
-                var updateStats = _network.ApplyGradients(batchSamples, _trainerConfig);
-                policyLoss += updateStats.PolicyLoss * count;
-                valueLoss += updateStats.ValueLoss * count;
-                entropy += updateStats.Entropy * count;
-                clipFraction += updateStats.ClipFraction * count;
-                processedSamples += count;
-            }
-        }
+        var result = _useGpuTrainingNetwork
+            ? RunSynchronousGpuUpdate(samples, miniBatchSize)
+            : RunTrainingEpochs(_network, samples, _trainerConfig, miniBatchSize, new Random(unchecked((int)_rng.Randi())));
 
         _transitions.Clear();
-        var normalizer = Math.Max(1, processedSamples);
+        RLCheckpoint? statsCheckpoint = null;
+        if (result.Checkpoint is not null)
+        {
+            _network.LoadCheckpoint(result.Checkpoint);
+            statsCheckpoint = PrepareStatsCheckpoint(result.Checkpoint, groupId, totalSteps, episodeCount);
+        }
         RLProfiler.End("PPO.TryUpdate", tUpdate);
 
         return new TrainerUpdateStats
         {
-            PolicyLoss = policyLoss / normalizer,
-            ValueLoss = valueLoss / normalizer,
-            Entropy = entropy / normalizer,
-            ClipFraction = clipFraction / normalizer,
-            Checkpoint = CreateCheckpoint(groupId, totalSteps, episodeCount, 0),
+            PolicyLoss = result.PolicyLoss,
+            ValueLoss = result.ValueLoss,
+            Entropy = result.Entropy,
+            ClipFraction = result.ClipFraction,
+            Checkpoint = statsCheckpoint ?? new RLCheckpoint(),
         };
     }
 
@@ -227,25 +232,36 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         var transitions = _transitions.GetRange(0, count);
         _transitions.Clear();
 
-        // Lazy-create shadow network with identical architecture.
-        _shadowNetwork ??= _config.ObsSpec is not null
-            ? new PolicyValueNetwork(
-                _config.ObsSpec,
-                _config.DiscreteActionCount,
-                _config.ContinuousActionDimensions,
-                _config.NetworkGraph)
-            : new PolicyValueNetwork(
-                _config.ObservationSize,
-                _config.DiscreteActionCount,
-                _config.ContinuousActionDimensions,
-                _config.NetworkGraph);
+        if (_useGpuTrainingNetwork)
+        {
+            // Build samples on the calling thread; the GPU thread only trains.
+            var samples       = BuildTrainingSamplesFrom(transitions, _trainerConfig);
+            NormalizeAdvantages(samples);
+            var miniBatchSize = Math.Clamp(_trainerConfig.PpoMiniBatchSize, 1, samples.Count);
+
+            EnsureGpuTrainingThread();
+            var tcs = new TaskCompletionSource<PpoAsyncResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+            _gpuJobQueue!.Add(new GpuTrainingJob
+            {
+                Samples        = samples,
+                MiniBatchSize  = miniBatchSize,
+                Config         = _trainerConfig,
+                BaseCheckpoint = _network.SaveCheckpoint("_ppo_bg_src_", 0, 0, 0),
+                Result         = tcs,
+            });
+            _pendingUpdate = tcs.Task;
+            return true;
+        }
+
+        // Lazy-create CPU shadow network with identical architecture.
+        _shadowNetwork ??= CreatePolicyNetwork(_config, preferGpuImageEncoders: false);
 
         // Copy live weights into shadow so backprop works on an isolated copy.
         _network.CopyWeightsTo(_shadowNetwork);
 
         var shadow = _shadowNetwork;
-        var config = _trainerConfig;
-        _pendingUpdate = Task.Run(() => RunBackgroundUpdate(shadow, transitions, config));
+        var shadowConfig = _trainerConfig;
+        _pendingUpdate = Task.Run(() => RunBackgroundUpdate(shadow, transitions, shadowConfig));
         return true;
     }
 
@@ -254,11 +270,30 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         if (_pendingUpdate is null || !_pendingUpdate.IsCompleted)
             return null;
 
+        if (_pendingUpdate.IsFaulted)
+        {
+            var msg = _pendingUpdate.Exception?.GetBaseException().Message
+                      ?? _pendingUpdate.Exception?.Message
+                      ?? "unknown error";
+            GD.PushError($"[PPO] Background training task faulted — skipping update. {msg}");
+            _pendingUpdate = null;
+            return null;
+        }
+
         var result = _pendingUpdate.Result;
         _pendingUpdate = null;
 
-        // Apply the trained shadow weights back to the live network (main thread only).
-        _network.LoadWeightsFrom(_shadowNetwork!);
+        RLCheckpoint? statsCheckpoint = null;
+        if (result.Checkpoint is not null)
+        {
+            _network.LoadCheckpoint(result.Checkpoint);
+            statsCheckpoint = PrepareStatsCheckpoint(result.Checkpoint, groupId, totalSteps, episodeCount);
+        }
+        else
+        {
+            // Apply the trained CPU shadow weights back to the live network (main thread only).
+            _network.LoadWeightsFrom(_shadowNetwork!);
+        }
 
         return new TrainerUpdateStats
         {
@@ -266,7 +301,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             ValueLoss = result.ValueLoss,
             Entropy = result.Entropy,
             ClipFraction = result.ClipFraction,
-            Checkpoint = CreateCheckpoint(groupId, totalSteps, episodeCount, 0),
+            Checkpoint = statsCheckpoint ?? new RLCheckpoint(),
         };
     }
 
@@ -289,12 +324,82 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         var samples = BuildTrainingSamplesFrom(transitions, config);
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(config.PpoMiniBatchSize, 1, samples.Count);
+        var result = RunTrainingEpochs(network, samples, config, miniBatchSize, new Random());
+        RLProfiler.End("PPO.BackgroundUpdate", tBg);
+        return result;
+    }
+
+    /// <summary>
+    /// Lazy-creates the dedicated GPU training thread + job queue.
+    /// The thread owns the GpuCnnEncoder for its entire lifetime,
+    /// satisfying the GpuDevice thread-affinity requirement.
+    /// </summary>
+    private void EnsureGpuTrainingThread()
+    {
+        if (_gpuJobQueue is not null)
+            return;
+
+        _gpuJobQueue = new BlockingCollection<GpuTrainingJob>(boundedCapacity: 1);
+        _gpuThread   = new Thread(GpuTrainingThreadProc)
+        {
+            IsBackground = true,
+            Name         = $"PPO GPU Training [{_config.GroupId}]",
+        };
+        _gpuThread.Start();
+    }
+
+    private void GpuTrainingThreadProc()
+    {
+        using var network = CreatePolicyNetwork(_config, preferGpuImageEncoders: true);
+        GD.Print($"[PPO] GPU training network ready on dedicated thread for group '{_config.GroupId}'.");
+
+        foreach (var job in _gpuJobQueue!.GetConsumingEnumerable())
+        {
+            try
+            {
+                network.LoadCheckpoint(job.BaseCheckpoint);
+                var tBg    = RLProfiler.Begin();
+                var result = RunTrainingEpochs(network, job.Samples, job.Config,
+                                               job.MiniBatchSize, new Random(), captureCheckpoint: true);
+                RLProfiler.End("PPO.BackgroundUpdate", tBg);
+                job.Result.SetResult(result);
+            }
+            catch (Exception ex)
+            {
+                job.Result.SetException(ex);
+            }
+        }
+    }
+
+    private PpoAsyncResult RunSynchronousGpuUpdate(List<TrainingSample> samples, int miniBatchSize)
+    {
+        // Route through the persistent GPU thread to avoid repeated shader compilation.
+        EnsureGpuTrainingThread();
+        var tcs = new TaskCompletionSource<PpoAsyncResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _gpuJobQueue!.Add(new GpuTrainingJob
+        {
+            Samples        = samples,
+            MiniBatchSize  = miniBatchSize,
+            Config         = _trainerConfig,
+            BaseCheckpoint = _network.SaveCheckpoint("_ppo_sync_src_", 0, 0, 0),
+            Result         = tcs,
+        });
+        return tcs.Task.GetAwaiter().GetResult(); // block main thread — same as before
+    }
+
+    private static PpoAsyncResult RunTrainingEpochs(
+        PolicyValueNetwork network,
+        List<TrainingSample> samples,
+        RLTrainerConfig config,
+        int miniBatchSize,
+        Random rng,
+        bool captureCheckpoint = false)
+    {
         var policyLoss = 0f;
         var valueLoss = 0f;
         var entropy = 0f;
         var clipFraction = 0f;
         var processedSamples = 0;
-        var rng = new Random();
 
         for (var epoch = 0; epoch < config.EpochsPerUpdate; epoch++)
         {
@@ -316,14 +421,58 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         }
 
         var norm = Math.Max(1, processedSamples);
-        RLProfiler.End("PPO.BackgroundUpdate", tBg);
         return new PpoAsyncResult
         {
             PolicyLoss = policyLoss / norm,
             ValueLoss = valueLoss / norm,
             Entropy = entropy / norm,
             ClipFraction = clipFraction / norm,
+            Checkpoint = captureCheckpoint
+                ? network.SaveCheckpoint("_ppo_trained_", 0, 0, 0)
+                : null,
         };
+    }
+
+    private static PolicyValueNetwork CreatePolicyNetwork(PolicyGroupConfig config, bool preferGpuImageEncoders)
+    {
+        return config.ObsSpec is not null
+            ? new PolicyValueNetwork(
+                config.ObsSpec,
+                config.DiscreteActionCount,
+                config.ContinuousActionDimensions,
+                config.NetworkGraph,
+                preferGpuImageEncoders)
+            : new PolicyValueNetwork(
+                config.ObservationSize,
+                config.DiscreteActionCount,
+                config.ContinuousActionDimensions,
+                config.NetworkGraph);
+    }
+
+    private static bool ShouldUseGpuTrainingNetwork(PolicyGroupConfig config)
+    {
+        return HasImageStreams(config) && GpuDevice.IsAvailable();
+    }
+
+    private static bool HasImageStreams(PolicyGroupConfig config)
+    {
+        if (config.ObsSpec is null)
+            return false;
+
+        foreach (var stream in config.ObsSpec.Streams)
+            if (stream.Kind == ObservationStreamKind.Image)
+                return true;
+
+        return false;
+    }
+
+    private RLCheckpoint PrepareStatsCheckpoint(RLCheckpoint checkpoint, string groupId, long totalSteps, long episodeCount)
+    {
+        checkpoint.RunId = groupId;
+        checkpoint.TotalSteps = totalSteps;
+        checkpoint.EpisodeCount = episodeCount;
+        checkpoint.UpdateCount = 0;
+        return CheckpointMetadataBuilder.Apply(checkpoint, _config);
     }
 
     // ── Training sample construction ──────────────────────────────────────────
@@ -528,6 +677,7 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         public float ValueLoss { get; init; }
         public float Entropy { get; init; }
         public float ClipFraction { get; init; }
+        public RLCheckpoint? Checkpoint { get; init; }
     }
 
     private sealed class PpoTransition

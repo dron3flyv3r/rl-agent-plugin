@@ -43,6 +43,8 @@ public partial class TrainingBootstrap : Node
     private readonly Dictionary<string, float> _quickTestRewardTotalsByGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _quickTestEpisodeLengthTotalsByGroup = new(StringComparer.Ordinal);
     private readonly Queue<bool> _curriculumEpisodeOutcomes = new();
+    private readonly object _checkpointWriteLock = new();
+    private Task _checkpointWriteTail = Task.CompletedTask;
 
     // Per-agent state
     private readonly Dictionary<IRLAgent, AgentRuntimeState> _agentStates = new();
@@ -547,9 +549,41 @@ public partial class TrainingBootstrap : Node
             {
                 _distributedWorker = new DistributedWorker("127.0.0.1", _masterPort, distributedTrainers);
                 _distributedWorker.Connect();
-                // Override simulation speed for workers.
-                if (firstAcademy.DistributedConfig is { } wCfg)
+
+                if (DisplayServer.GetName() != "headless")
+                {
+                    DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
+                    DisplayServer.WindowSetFlag(DisplayServer.WindowFlags.NoFocus, true);
+                    Engine.MaxPhysicsStepsPerFrame = 1;  // 1 physics tick per render frame = zero staleness
+                    if (firstAcademy.DistributedConfig is { } wCfg)
+                    {
+                        Engine.PhysicsTicksPerSecond = Math.Max(1, (int)Math.Ceiling(_previousPhysicsTicksPerSecond * wCfg.WorkerSimulationSpeed));
+                        Engine.MaxFps = Engine.PhysicsTicksPerSecond;
+                        Engine.TimeScale = wCfg.WorkerSimulationSpeed;
+                    }
+                    GD.Print($"[RL Distributed] Worker: renderer mode — {Engine.PhysicsTicksPerSecond} physics steps/sec, render capped to match.");
+                }
+                else if (firstAcademy.DistributedConfig is { } wCfg)
+                {
+                    // Headless worker: use full ApplySimulationSpeed — no render loop to conflict with.
                     ApplySimulationSpeed(wCfg.WorkerSimulationSpeed);
+                }
+                
+
+                // Route camera-sensor validation messages back to the master console.
+                var worker = _distributedWorker;
+                var wid    = _workerId;
+                RLCameraSensor2D.OnValidationLog += msg =>
+                    worker?.SendLogMessage($"[Worker {wid}] {msg}");
+
+                // Health monitor: tracks physics/render throughput and warns on dropped steps.
+                // Paused time (PPO waiting for weights) is excluded so training pauses don't
+                // trigger false dropped-step warnings.
+                var isRenderer = DisplayServer.GetName() != "headless";
+                void HealthLog(string msg) => worker?.SendLogMessage($"[Worker {wid}] {msg}");
+                var healthMonitor = new WorkerHealthMonitor(HealthLog, isRenderer, () => worker?.IsWaitingForWeights ?? false);
+                AddChild(healthMonitor);
+
                 GD.Print($"[RL Distributed] Running as worker {_workerId}.");
             }
             else if (firstAcademy.DistributedConfig is { } distCfg)
@@ -559,6 +593,7 @@ public partial class TrainingBootstrap : Node
                     distCfg.WorkerCount,
                     distCfg.MonitorIntervalUpdates,
                     distCfg.VerboseLog,
+                    distCfg.ShowRolloutDiagnostics,
                     distributedTrainers,
                     _asyncRolloutPolicy,
                     _trainerConfig?.RolloutLength ?? 256);
@@ -566,7 +601,20 @@ public partial class TrainingBootstrap : Node
                 _distributedConfig = distCfg;
                 _nextWorkerId      = distCfg.WorkerCount;
                 if (distCfg.AutoLaunchWorkers)
+                {
+                    var cameraSensorCount = GetTree().Root
+                        .FindChildren("*", nameof(RLCameraSensor2D), true, false).Count;
+                    if (cameraSensorCount > 0 && !distCfg.WorkersRequireRenderer)
+                        GD.PushError("[RL Distributed] Scene contains RLCameraSensor2D node(s) but " +
+                                     "WorkersRequireRenderer is disabled on RLDistributedConfig. " +
+                                     "Workers will run headless and camera observations will be all zeros.");
+                    if (cameraSensorCount > 1)
+                        GD.PushWarning($"[RL Distributed] Scene contains {cameraSensorCount} RLCameraSensor2D node(s). " +
+                                       "All environments in a worker share one render thread — each extra environment " +
+                                       "reduces observation freshness proportionally. " +
+                                       "For camera sensors, use BatchSize=1 and scale via WorkerCount instead.");
                     LaunchDistributedWorkers(distCfg);
+                }
                 if (distCfg.ShowTrainingOverlay)
                     _trainingOverlay = CreateTrainingOverlay();
                 GD.Print($"[RL Distributed] Running as master on port {distCfg.MasterPort}.");
@@ -806,7 +854,13 @@ public partial class TrainingBootstrap : Node
             _lastEntropyByGroup[groupId] = updateStats.Entropy;
             _lastClipFractionByGroup[groupId] = updateStats.ClipFraction;
 
-            var currentCheckpoint = trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, _updateCountByGroup[groupId]);
+            var currentCheckpoint = HasUsableCheckpoint(updateStats.Checkpoint)
+                ? updateStats.Checkpoint
+                : trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, _updateCountByGroup[groupId]);
+            currentCheckpoint.RunId = groupId;
+            currentCheckpoint.TotalSteps = _totalSteps;
+            currentCheckpoint.EpisodeCount = episodeCount;
+            currentCheckpoint.UpdateCount = _updateCountByGroup[groupId];
             currentCheckpoint.RewardSnapshot = _lastEpisodeRewardByGroup.GetValueOrDefault(groupId);
 
             PersistCheckpoint(groupId, currentCheckpoint, _updateCountByGroup[groupId]);
@@ -988,6 +1042,8 @@ public partial class TrainingBootstrap : Node
             PersistCheckpoint(groupId, finalCheckpoint, updateCount, forceLatestWrite: true, allowFrozenSnapshot: false);
 
         }
+
+        FlushCheckpointWrites();
 
         if (!_isWorkerMode)
         {
@@ -1769,6 +1825,61 @@ public partial class TrainingBootstrap : Node
         if (shouldWriteLatest && _checkpointIntervalSteps > 0 && intervalMet)
             _lastCheckpointSteps = checkpoint.TotalSteps;
 
+        var historyWriteRequested = shouldWriteLatest && updateCount > 0 && _manifest is not null;
+        var safeId = historyWriteRequested
+            ? (_groupBindingsByGroup.TryGetValue(groupId, out var histBinding)
+                ? histBinding.SafeGroupId
+                : RLPolicyGroupBindingResolver.MakeSafeGroupId(groupId))
+            : string.Empty;
+
+        if (!participatesInSelfPlay)
+        {
+            var latestPathForWrite = string.Empty;
+            if (!string.IsNullOrEmpty(checkpointPath) && shouldWriteLatest)
+            {
+                latestPathForWrite = _compressCheckpoints
+                    ? System.IO.Path.ChangeExtension(ProjectSettings.GlobalizePath(checkpointPath), RLCheckpoint.ZipExtension)
+                    : checkpointPath;
+            }
+
+            var historyPathForWrite = string.Empty;
+            var runDirAbsPath = string.Empty;
+            if (historyWriteRequested && _manifest is not null)
+            {
+                if (_compressCheckpoints)
+                {
+                    historyPathForWrite = System.IO.Path.Combine(
+                        ProjectSettings.GlobalizePath(_manifest.RunDirectory),
+                        "history",
+                        $"checkpoint__{safeId}__u{updateCount:D6}{RLCheckpoint.ZipExtension}");
+                }
+                else
+                {
+                    historyPathForWrite = $"{_manifest.RunDirectory}/history/checkpoint__{safeId}__u{updateCount:D6}.json";
+                }
+
+                runDirAbsPath = ProjectSettings.GlobalizePath(_manifest.RunDirectory);
+            }
+
+            if (!string.IsNullOrEmpty(latestPathForWrite) || !string.IsNullOrEmpty(historyPathForWrite))
+            {
+                var writeSnapshot = CloneCheckpointForPersistence(checkpoint);
+                QueueCheckpointWrite(() =>
+                {
+                    if (!string.IsNullOrEmpty(latestPathForWrite))
+                        SaveCheckpointForPersistence(writeSnapshot, latestPathForWrite);
+
+                    if (!string.IsNullOrEmpty(historyPathForWrite))
+                    {
+                        SaveCheckpointForPersistence(writeSnapshot, historyPathForWrite);
+                        PruneHistoryCheckpoints(safeId, runDirAbsPath);
+                    }
+                });
+            }
+
+            return;
+        }
+
         // Determine the actual on-disk path used so bank.Pool.LatestCheckpointPath stays in sync.
         var actualCheckpointPath = checkpointPath;
         if (!string.IsNullOrEmpty(checkpointPath) && shouldWriteLatest)
@@ -1786,12 +1897,8 @@ public partial class TrainingBootstrap : Node
         }
 
         // Write a named history snapshot alongside the latest checkpoint (skip update 0).
-        if (shouldWriteLatest && updateCount > 0 && _manifest is not null)
+        if (historyWriteRequested && _manifest is not null)
         {
-            var safeId = _groupBindingsByGroup.TryGetValue(groupId, out var histBinding)
-                ? histBinding.SafeGroupId
-                : RLPolicyGroupBindingResolver.MakeSafeGroupId(groupId);
-
             if (_compressCheckpoints)
             {
                 var historyAbsPath = System.IO.Path.Combine(
@@ -1836,6 +1943,90 @@ public partial class TrainingBootstrap : Node
             : EloTracker.InitialRating;
         RLCheckpoint.SaveToFile(checkpoint, frozenPath);
         bank.Pool.AddSnapshot(frozenPath, snapshotKey, currentElo);
+    }
+
+    private static bool HasUsableCheckpoint(RLCheckpoint checkpoint) =>
+        checkpoint.WeightBuffer.Length > 0 && checkpoint.LayerShapeBuffer.Length > 0;
+
+    private void QueueCheckpointWrite(Action action)
+    {
+        lock (_checkpointWriteLock)
+        {
+            _checkpointWriteTail = _checkpointWriteTail.ContinueWith(_ => action(), TaskScheduler.Default);
+        }
+    }
+
+    private void FlushCheckpointWrites()
+    {
+        Task pending;
+        lock (_checkpointWriteLock)
+            pending = _checkpointWriteTail;
+
+        try
+        {
+            pending.Wait();
+        }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RL] Background checkpoint flush failed: {ex.GetBaseException().Message}");
+        }
+    }
+
+    private void SaveCheckpointForPersistence(RLCheckpoint checkpoint, string path)
+    {
+        if (path.EndsWith(RLCheckpoint.ZipExtension, StringComparison.OrdinalIgnoreCase))
+            RLCheckpoint.SaveToZip(checkpoint, path);
+        else
+            RLCheckpoint.SaveToFile(checkpoint, path);
+    }
+
+    private static RLCheckpoint CloneCheckpointForPersistence(RLCheckpoint checkpoint)
+    {
+        var clone = new RLCheckpoint
+        {
+            FormatVersion = checkpoint.FormatVersion,
+            RunId = checkpoint.RunId,
+            TotalSteps = checkpoint.TotalSteps,
+            EpisodeCount = checkpoint.EpisodeCount,
+            UpdateCount = checkpoint.UpdateCount,
+            RewardSnapshot = checkpoint.RewardSnapshot,
+            Algorithm = checkpoint.Algorithm,
+            ObservationSize = checkpoint.ObservationSize,
+            DiscreteActionCount = checkpoint.DiscreteActionCount,
+            ContinuousActionDimensions = checkpoint.ContinuousActionDimensions,
+            WeightBuffer = (float[])checkpoint.WeightBuffer.Clone(),
+            LayerShapeBuffer = (int[])checkpoint.LayerShapeBuffer.Clone(),
+            ObsSpec = checkpoint.ObsSpec,
+            NetworkOptimizer = checkpoint.NetworkOptimizer,
+        };
+
+        clone.NetworkLayers = checkpoint.NetworkLayers
+            .Select(layer => new RLCheckpointLayer
+            {
+                Type = layer.Type,
+                Size = layer.Size,
+                Activation = layer.Activation,
+                Rate = layer.Rate,
+            })
+            .ToList();
+
+        clone.DiscreteActionLabels = checkpoint.DiscreteActionLabels.ToDictionary(
+            kvp => kvp.Key,
+            kvp => (string[])kvp.Value.Clone(),
+            StringComparer.Ordinal);
+
+        clone.ContinuousActionRanges = checkpoint.ContinuousActionRanges.ToDictionary(
+            kvp => kvp.Key,
+            kvp => new RLContinuousActionRange
+            {
+                Dimensions = kvp.Value.Dimensions,
+                Min = kvp.Value.Min,
+                Max = kvp.Value.Max,
+            },
+            StringComparer.Ordinal);
+
+        clone.Hyperparams = new Dictionary<string, float>(checkpoint.Hyperparams, StringComparer.Ordinal);
+        return clone;
     }
 
     /// <summary>
@@ -2408,19 +2599,46 @@ public partial class TrainingBootstrap : Node
         var projectPath    = ProjectSettings.GlobalizePath("res://");
         var bootstrapScene = "res://addons/rl-agent-plugin/Scenes/Bootstrap/TrainingBootstrap.tscn";
 
-        var args = new[]
-        {
-            "--headless",
+        List<string> godotArgList = [];
+        if (!config.WorkersRequireRenderer)
+            godotArgList.Add("--headless");
+        godotArgList.AddRange(
+        [
             "--path", projectPath,
             bootstrapScene,
             "--",
             "--rl-worker",
             $"--master-port={config.MasterPort}",
             $"--worker-id={workerId}",
-        };
+        ]);
+        var godotArgs = godotArgList.ToArray();
 
-        GD.Print($"[RL Distributed] Launching worker {workerId}: {executable} {string.Join(" ", args)}");
-        var pid = OS.CreateProcess(executable, args);
+        // When xvfb-run is requested, prepend it as the actual process and pass the
+        // Godot executable + its args after the xvfb-run arguments.
+        string launchExe;
+        string[] launchArgs;
+        if (config.WorkersRequireRenderer && !string.IsNullOrWhiteSpace(config.XvfbWrapperArgs))
+        {
+            // Verify xvfb-run is available before attempting to use it.
+            var probe = OS.Execute("which", ["xvfb-run"]);
+            if (probe != 0)
+            {
+                GD.PushError("[RL Distributed] XvfbWrapperArgs is set but 'xvfb-run' was not found on PATH. " +
+                             "Install it (e.g. 'sudo apt install xvfb') or clear XvfbWrapperArgs to use a normal window instead.");
+                return;
+            }
+            launchExe  = "xvfb-run";
+            var xvfbParts = config.XvfbWrapperArgs.Trim().Split(' ', StringSplitOptions.RemoveEmptyEntries);
+            launchArgs = [..xvfbParts, executable, ..godotArgs];
+        }
+        else
+        {
+            launchExe  = executable;
+            launchArgs = godotArgs;
+        }
+
+        GD.Print($"[RL Distributed] Launching worker {workerId}: {launchExe} {string.Join(" ", launchArgs)}");
+        var pid = OS.CreateProcess(launchExe, launchArgs);
         if (pid > 0)
             GD.Print($"[RL Distributed] Worker {workerId} launched (PID {pid}).");
         else

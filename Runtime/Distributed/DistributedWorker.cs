@@ -49,6 +49,14 @@ public sealed class DistributedWorker : IDisposable
     /// </summary>
     public volatile bool ShouldQuit;
 
+    /// <summary>
+    /// True while waiting for updated weights from the master (PPO on-policy pause).
+    /// The worker is intentionally idle during this window — health monitors should
+    /// exclude this time from throughput calculations to avoid false drop warnings.
+    /// Only meaningful for on-policy (PPO) trainers; always false for off-policy (SAC).
+    /// </summary>
+    public bool IsWaitingForWeights => _waitingForWeights.Count > 0;
+
     private volatile bool _connectionLost;
     private int           _missedChecks;
 
@@ -279,6 +287,18 @@ public sealed class DistributedWorker : IDisposable
                 _pendingSummaries[groupId] = list = new List<WorkerEpisodeSummary>();
             list.Add(summary);
         }
+    }
+
+    /// <summary>
+    /// Sends a log string to the master to be printed on its console.
+    /// Safe to call from the main thread at any time.
+    /// </summary>
+    public void SendLogMessage(string message)
+    {
+        if (_writer is null) return;
+        var payload = System.Text.Encoding.UTF8.GetBytes(message);
+        lock (_writeLock)
+            DistributedProtocol.WriteMessage(_writer, DistributedMessageType.LogMessage, "", payload);
     }
 
     /// <summary>

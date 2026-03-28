@@ -31,6 +31,29 @@ Each agent also has its own `PolicyGroupConfig` property that links it to a shar
 
 ---
 
+## 2D vs 3D: What Actually Changes
+
+Most configuration resources are shared between 2D and 3D. The main differences are in scene setup and observation/action design rather than in the trainer.
+
+| Topic | 2D | 3D |
+|------|----|----|
+| Agent base class | `RLAgent2D` | `RLAgent3D` |
+| Agent node type | `Node2D` | `Node3D` |
+| Typical movement body | `CharacterBody2D` | `CharacterBody3D` |
+| Common movement space | `X/Y` | usually `X/Z`, with `Y` as height |
+| Common first tasks | top-down navigation, lane movement | target reaching, locomotion, physics interaction |
+| Camera sensor | `RLCameraSensor2D` available | no equivalent 3D camera sensor in this plugin today |
+| Common sensor style | vector sensors, 2D raycasts, optional image input | vector sensors, 3D raycasts, velocity/transform sensors |
+
+The important part is this:
+
+- the training resources are mostly the same in 2D and 3D
+- the agent script and scene wiring are where the real differences live
+
+If you want a concrete first setup, use [get-started.md](get-started.md) first.
+
+---
+
 ## RLPPOConfig
 
 Configuration for the **Proximal Policy Optimization** algorithm.
@@ -46,7 +69,7 @@ Configuration for the **Proximal Policy Optimization** algorithm.
 | `ClipEpsilon` | float | 0.2 | PPO clipping range. Prevents the new policy from deviating more than this from the old policy. |
 | `MaxGradientNorm` | float | 0.5 | Gradient clipping threshold. Prevents exploding gradients. |
 | `ValueLossCoefficient` | float | 0.5 | Weight of the value loss relative to policy loss. |
-| `UseValueClipping` | bool | false | Whether to apply PPO-style clipping to the value loss as well. Can help stability. |
+| `UseValueClipping` | bool | true | Whether to apply PPO-style clipping to the value loss as well. Can help stability. |
 | `ValueClipEpsilon` | float | 0.2 | Clipping range for value loss (only used if `UseValueClipping = true`). |
 | `EntropyCoefficient` | float | 0.01 | Weight of entropy bonus. Higher values encourage more exploration (more random actions). |
 
@@ -125,12 +148,27 @@ Controls how the training process executes — parallelism, checkpointing, and a
 |-----------|------|---------|-------------|
 | `RunPrefix` | string | `""` | Prefix for the run ID used in checkpoint folder names. Useful for organizing runs. |
 | `SimulationSpeed` | float | 1.0 | Speed multiplier for the Godot physics engine during training. Set to 4.0 for faster training (no visual output needed). |
-| `BatchSize` | int | 4 | Number of parallel environment instances to run in the master process. More instances = more diverse data per step. |
-| `ActionRepeat` | int | 1 | Repeat the sampled action for N physics frames before sampling again. Reduces action frequency; useful for agents that don't need per-frame decisions. |
-| `CheckpointInterval` | int | 50 | Save a checkpoint every N gradient updates. |
+| `BatchSize` | int | 1 | Number of parallel environment instances to run in the master process. More instances = more diverse data per step. |
+| `ActionRepeat` | int | 4 | Repeat the sampled action for N physics frames before sampling again. Reduces action frequency; useful for agents that don't need per-frame decisions. |
+| `CheckpointInterval` | int | 10 | Save a checkpoint every N gradient updates. |
 | `AsyncGradientUpdates` | bool | false | Run backpropagation on a background thread. The simulation continues while the gradient update happens. Can increase throughput on multi-core machines. |
 | `ParallelPolicyGroups` | bool | false | Parallelize forward passes across multiple policy groups. Only useful with many distinct agent types. |
 | `AsyncRolloutPolicy` | enum | `Pause` | What to do with rollouts that arrive while a background gradient update is running. `Pause` = discard and wait. `Cap` = buffer up to a limit. |
+
+### Recommended first-run values
+
+For a first project, override the defaults to something easier to debug:
+
+```text
+RLRunConfig:
+  BatchSize: 4
+  SimulationSpeed: 1.0
+  ActionRepeat: 1
+  CheckpointInterval: 10
+  AsyncGradientUpdates: false
+```
+
+That gives you predictable behavior while still collecting enough data to learn simple tasks quickly.
 
 ### AsyncGradientUpdates
 
@@ -153,10 +191,17 @@ Defines one population of agents that share a neural network. All agents with th
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `AgentId` | string | `"agent_0"` | Identifier for this policy group. Agents with the same `AgentId` share weights. |
+| `AgentId` | string | `""` | Identifier for this policy group. Agents with the same `AgentId` share weights. |
 | `MaxEpisodeSteps` | int | 0 | Maximum steps per episode. `0` = unlimited (use `EndEpisode()` manually). |
 | `InferenceModelPath` | string | `""` | Path to a `.rlmodel` file for inference mode. Leave empty during training. |
 | `NetworkGraph` | RLNetworkGraph | default | Neural network architecture for this group. |
+
+### RLPolicyGroupConfig notes
+
+- Assign this on each `RLAgent2D` or `RLAgent3D`.
+- Agents with the same `AgentId` share one policy.
+- Agents with different `AgentId` values train separate policies.
+- For your first scene, start with exactly one policy group.
 
 ---
 
@@ -332,20 +377,22 @@ public partial class MyAgent : RLAgent2D
 
 ## RLDistributedConfig
 
-Launch headless worker processes to collect experience faster. Attach to `RLAcademy.DistributedConfig`.
+Launch worker processes to collect experience faster. Attach to `RLAcademy.DistributedConfig`.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `WorkerCount` | int | 0 | Number of headless worker processes to launch. `0` = single-process training. |
+| `WorkerCount` | int | 4 | Number of worker processes to launch when this resource is assigned. Leave `DistributedConfig` unassigned to stay in single-process mode. |
 | `MasterPort` | int | 7890 | TCP port the master listens on. Workers connect to this. |
 | `AutoLaunchWorkers` | bool | true | Automatically start worker processes when training begins. |
 | `EngineExecutablePath` | string | `""` | Custom Godot executable. Leave empty to use the current Godot binary. |
 | `WorkerSimulationSpeed` | float | 4.0 | Simulation speed multiplier for workers. Higher = faster data collection. |
-| `MonitorIntervalUpdates` | int | 10 | Print distributed stats to console every N updates. |
-| `ShowTrainingOverlay` | bool | false | Show the spy overlay on workers (useful for debugging, but slow). |
+| `MonitorIntervalUpdates` | int | 5 | Print distributed stats to console every N updates. |
+| `ShowTrainingOverlay` | bool | true | Show the master training overlay with throughput and loss stats. |
 | `VerboseLog` | bool | false | Enable verbose worker connection logs. |
+| `WorkersRequireRenderer` | bool | false | Launch workers with a GPU renderer instead of `--headless`. Required when the scene contains `RLCameraSensor2D`. |
+| `XvfbWrapperArgs` | string | `""` | Arguments passed to `xvfb-run` before the Godot executable (Linux only). Only used when `WorkersRequireRenderer` is true. Example: `-a --server-args="-screen 0 1x1x24"`. |
 
-### Example: 4 workers
+### Example: 4 headless workers
 
 ```
 RLDistributedConfig:
@@ -357,10 +404,38 @@ RLDistributedConfig:
 
 With 4 workers at 4× speed, you collect experience ~16× faster than single-process at 1× speed.
 
+### Example: workers with RLCameraSensor2D
+
+```
+RLDistributedConfig:
+  WorkerCount: 6
+  WorkerSimulationSpeed: 1.0
+  WorkersRequireRenderer: true
+  XvfbWrapperArgs: -a --server-args="-screen 0 1x1x24"
+```
+
+See [camera sensors in distributed training](#camera-sensors-in-distributed-training) below.
+
 **Notes:**
-- Workers are headless (no window). They use less RAM and CPU for rendering.
+- Headless workers (default) have no window and use minimal CPU/RAM for rendering. Use these for all non-camera environments.
 - Each worker runs the full training scene but only collects data; the master owns the neural network.
 - Workers and master must use the same Godot project.
+
+### Camera sensors in distributed training
+
+`RLCameraSensor2D` requires a GPU renderer — `SubViewport` produces zeros in `--headless` mode. Enable `WorkersRequireRenderer` to launch workers with a real renderer.
+
+**Physics/render lock-step:** When `WorkersRequireRenderer` is true, workers automatically configure themselves to run exactly one physics tick per rendered frame (`Engine.MaxPhysicsStepsPerFrame = 1`, `Engine.MaxFps = 0`). This guarantees every `Capture()` call sees a freshly rendered frame — zero stale observations.
+
+**Delta time is always fixed:** `_PhysicsProcess(delta)` receives a fixed `1 / PhysicsTicksPerSecond` delta regardless of GPU speed. Movement and physics are deterministic even if real-time FPS is low. Never use `_Process(delta)` for agent logic — delta there varies with render FPS.
+
+**BatchSize constraint:** All environments within one worker share a single render thread. Using `BatchSize > 1` causes most observations to come from stale frames. **Set `BatchSize = 1` and scale training throughput via `WorkerCount` instead.**
+
+**`WorkerSimulationSpeed` is ignored for renderer workers.** Simulation speed > 1× requires multiple physics ticks per render frame, which reintroduces stale observations. Renderer worker throughput is `render_fps / PhysicsTicksPerSecond` × real-time speed — e.g. a GPU rendering at 120 fps with 60 Hz physics gives 2× speed. Scale training throughput via `WorkerCount` rather than simulation speed.
+
+**On Linux without a display (servers, CI):** Install `xvfb` and set `XvfbWrapperArgs`. The plugin will pre-flight check that `xvfb-run` is on PATH and error clearly if it is not.
+
+**Headless workers are unaffected:** Workers without a renderer run pure physics with no render loop. Their `_PhysicsProcess` delta is already fixed and they have no staleness problem.
 
 ---
 
@@ -415,7 +490,7 @@ An opponent with a 20% win rate gets much higher sampling weight than one with 8
 public partial class MyAgent : RLAgent2D  // or RLAgent3D
 {
     // Declare the action space (called once at startup)
-    protected override void DefineActions(ActionSpaceBuilder builder)
+    public override void DefineActions(ActionSpaceBuilder builder)
     {
         builder.AddDiscrete("Move", "Left", "Right", "Idle");
         builder.AddContinuous("Steer", dimensions: 2, min: -1f, max: 1f);
@@ -425,7 +500,7 @@ public partial class MyAgent : RLAgent2D  // or RLAgent3D
     public override void CollectObservations(ObservationBuffer obs)
     {
         obs.AddNormalized(GlobalPosition.X, -500f, 500f);
-        obs.Add(IsGrounded ? 1f : 0f);
+        obs.Add(IsGrounded);
         obs.AddNormalized(Target.GlobalPosition.X, -500f, 500f);
     }
 
@@ -437,7 +512,7 @@ public partial class MyAgent : RLAgent2D  // or RLAgent3D
     }
 
     // Compute rewards and end the episode when done
-    protected override void OnStep()
+    public override void OnStep()
     {
         AddReward(-0.001f);                  // step penalty
         AddReward(progress, "distance");     // named component (visible in debug overlay)
@@ -468,7 +543,9 @@ public partial class MyAgent : RLAgent2D  // or RLAgent3D
 | `obs.Add(Vector3)` | Add X, Y, and Z components. |
 | `obs.Add(bool)` | Add `1f` for true, `0f` for false. |
 | `obs.AddNormalized(value, min, max)` | Map `[min, max]` → `[-1, 1]`. |
+| `obs.AddNormalized(int, min, max)` | Integer-friendly normalized overload. |
 | `obs.AddSensor(name, sensor)` | Add a reusable `IObservationSensor`. |
+| `obs.AddImage(name, sensor)` | Add a named image stream from `RLCameraSensor2D`. |
 
 **Always normalize!** Neural networks learn much better when inputs are in `[-1, 1]` rather than raw pixel coordinates or world units.
 
@@ -503,7 +580,16 @@ Reusable sensor components you can attach and add with `obs.AddSensor()`.
 | `NormalizedVelocitySensor3D` | 3 | Normalized velocity. |
 | `RelativePositionSensor2D` | 2 | Normalized vector to target. |
 | `RelativePositionSensor3D` | 3 | Normalized vector to target. |
-| `RaycastSensor3D` | N rays × K | Ray distances + hit detection. |
+| `RaycastSensor2D` | N rays × K | 2D ray distances + optional hit encoding. |
+| `RaycastSensor3D` | N rays | Code-driven 3D ray distances. |
+| `RLRaycastSensor3D` | N rays × K | Node-based 3D ray sensor with live editor preview. |
+| `RLCameraSensor2D` | width × height × channels | 2D image stream for CNN-based policies. |
+
+### Sensor notes for 2D vs 3D
+
+- `RLCameraSensor2D` is currently 2D-only.
+- 3D projects usually start with vector observations and `RLRaycastSensor3D`.
+- 2D and 3D both support normalized transform, velocity, and relative-position sensors.
 
 ### Custom sensor
 

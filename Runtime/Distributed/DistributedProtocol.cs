@@ -21,6 +21,8 @@ public enum DistributedMessageType : byte
     CurriculumSync = 6,
     /// <summary>Worker → Master.  Payload: batch of episode summaries (reward, steps, breakdown) for metrics aggregation.</summary>
     EpisodeSummary = 7,
+    /// <summary>Worker → Master.  Payload: UTF-8 log string to be printed on the master console.</summary>
+    LogMessage = 8,
 }
 
 // ── Wire-format helpers ───────────────────────────────────────────────────────

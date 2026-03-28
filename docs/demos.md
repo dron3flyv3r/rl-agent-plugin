@@ -1,14 +1,16 @@
 # Demo Environments
 
-The plugin ships five demo environments that demonstrate different capabilities: single-agent navigation, competitive self-play, curriculum learning, 3D continuous control, and locomotion. Each demo is self-contained and can be trained directly from the dashboard.
+Example demo environments are maintained in the companion demo repository:
 
-All demos are in the `../../demo/` folder.
+- https://github.com/dron3flyv3r/rl-agent-godot
+
+That repository contains sample scenes demonstrating single-agent navigation, competitive self-play, curriculum learning, 3D continuous control, and locomotion.
 
 ---
 
 ## Demo 01 — Single Agent (ReachTargetDemo)
 
-**Folder:** `../../demo/01 SingleAgent/`
+**Scene:** `demo/01 SingleAgent/ReachTargetDemo.tscn` in the companion demo repository
 
 **Algorithm:** PPO (discrete actions)
 
@@ -50,7 +52,7 @@ This demo is the "hello world" of the plugin. Use it to verify your setup is wor
 
 ### Running It
 
-1. Open `../../demo/01 SingleAgent/ReachTargetDemo.tscn`
+1. Open `ReachTargetDemo.tscn` from the companion demo repository
 2. Click **Start Training** (top toolbar or RL Setup dock)
 3. The reward should start rising within a few hundred episodes
 
@@ -64,7 +66,7 @@ This demo is the "hello world" of the plugin. Use it to verify your setup is wor
 
 ## Demo 02 — Multi-Agent Self-Play (TagDemo)
 
-**Folder:** `../../demo/02 MultiAgentSelfPlay/`
+**Scene:** `demo/02 MultiAgentSelfPlay/TagDemo.tscn` in the companion demo repository
 
 **Algorithm:** PPO (discrete actions) + Self-Play
 
@@ -122,7 +124,7 @@ RLSelfPlayConfig:
 
 ### Running It
 
-1. Open `../../demo/02 MultiAgentSelfPlay/TagDemo.tscn`
+1. Open `TagDemo.tscn` from the companion demo repository
 2. Click **Start Training** (top toolbar or RL Setup dock)
 3. Watch the Elo chart — it should rise as the learner improves
 
@@ -137,7 +139,7 @@ RLSelfPlayConfig:
 
 ## Demo 03 — Curriculum Learning (WallClimbDemo)
 
-**Folder:** `../../demo/03 WallClimbCurriculum/`
+**Scene:** `demo/03 WallClimbCurriculum/WallClimbDemo.tscn` in the companion demo repository
 
 **Algorithm:** PPO (continuous actions) + Curriculum
 
@@ -209,7 +211,7 @@ RLCurriculumConfig:
 
 ### Running It
 
-1. Open `../../demo/03 WallClimbCurriculum/WallClimbDemo.tscn`
+1. Open `WallClimbDemo.tscn` from the companion demo repository
 2. Click **Start Training** (top toolbar or RL Setup dock)
 3. Watch both the reward chart and the curriculum progress chart
 4. Expect training to take longer than simpler tasks (the agent needs to master each difficulty level)
@@ -225,7 +227,7 @@ RLCurriculumConfig:
 
 ## Demo 04 — Move to Target 3D
 
-**Folder:** `../../demo/04 MoveToTarget3D/`
+**Scene:** `demo/04 MoveToTarget3D/MoveToTarget3D.tscn` in the companion demo repository
 
 **Algorithm:** PPO or SAC (continuous actions)
 
@@ -287,7 +289,7 @@ RLSACConfig:
 
 ## Demo 05 — Crawler (Locomotion)
 
-**Folder:** `../../demo/05 Crawler/`
+**Scene:** `demo/05 Crawler/CrawlerDemo.tscn` in the companion demo repository
 
 **Algorithm:** SAC or PPO (continuous actions)
 

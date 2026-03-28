@@ -41,6 +41,29 @@ public partial class RLDistributedConfig : Resource
     public string EngineExecutablePath { get; set; } = string.Empty;
 
     /// <summary>
+    /// When true, workers are launched with a renderer instead of <c>--headless</c>.
+    /// Required when any agent uses <see cref="RLCameraSensor2D"/>, because headless
+    /// workers have no GPU renderer and <c>SubViewport</c> produces no pixels.
+    ///
+    /// On a desktop machine workers will open minimised windows — this is normal.
+    /// On a true headless server set <see cref="XvfbWrapperArgs"/> so each worker
+    /// gets a virtual framebuffer via <c>xvfb-run</c>.
+    /// </summary>
+    [Export]
+    public bool WorkersRequireRenderer { get; set; } = false;
+
+    /// <summary>
+    /// Arguments passed to <c>xvfb-run</c> when <see cref="WorkersRequireRenderer"/> is true
+    /// and you are running on a headless server with no physical display.
+    /// Leave blank on a desktop machine (workers will open minimised windows instead).
+    ///
+    /// Typical value: <c>-a</c>  (auto-selects a free display number).
+    /// The Godot executable and its args are appended after these arguments automatically.
+    /// </summary>
+    [Export]
+    public string XvfbWrapperArgs { get; set; } = string.Empty;
+
+    /// <summary>
     /// <c>Engine.TimeScale</c> applied to worker processes.
     /// Workers have no display so they can run much faster than the master.
     /// </summary>
@@ -69,4 +92,12 @@ public partial class RLDistributedConfig : Resource
     /// </summary>
     [Export]
     public bool VerboseLog { get; set; } = false;
+    
+    /// <summary>
+    /// If true, the master prints diagnostic info about each rollout as it arrives.
+    /// Useful for debugging the distributed setup and understanding rollout quality,
+    /// but can be very verbose during normal training.
+    /// </summary>
+    [Export]
+    public bool ShowRolloutDiagnostics { get; set; } = true;
 }

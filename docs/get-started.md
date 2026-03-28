@@ -1,328 +1,550 @@
 # Get Started Guide
 
-This guide walks a new user through:
-1. Plugin setup
-2. Creating a simple training scene
-3. Building a first agent (Demo 04 style: cube to target point)
-4. Starting training from the editor UI
-5. Exporting and using a `.rlmodel`
+This guide is the shortest concrete path from "plugin installed" to "my first agent is training".
+
+It covers:
+
+1. project setup
+2. the core 2D/3D differences
+3. building a minimal first training scene
+4. creating the required config resources
+5. starting training from the editor
+6. exporting a trained `.rlmodel`
+
+The first walkthrough uses a simple 2D task because it is the fastest way to confirm your setup works. After that, there is a dedicated section on how the 3D version differs.
 
 ---
 
-## 1) Setup
+## 1) Before You Start
 
-### Prerequisites
+Prerequisites:
 
-- Godot 4.6+ with C# enabled
+- Godot 4.6+ with C# support
 - .NET 8 SDK installed
+- the plugin copied to `addons/rl-agent-plugin`
 
-### Install plugin
+Install steps:
 
-1. Copy the plugin to `addons/rl-agent-plugin` in your project.
-2. Enable it in **Project Settings → Plugins**.
-3. Build the project once (`Alt+B`).
+1. Open the project in Godot.
+2. Go to **Project Settings -> Plugins**.
+3. Enable **RL Agent Plugin**.
+4. Build once with `Alt+B`.
 
-After setup, verify the editor UI:
-- **RLDash** tab exists (main screen row)
-- **RL Setup** dock exists (right side)
-- Top toolbar has **Start Training**, **Stop Training**, **Run Inference**
+You should now see:
+
+- **RLDash** in the main screen tabs
+- **RL Setup** as a right-side dock
+- **Start Training**, **Stop Training**, and **Run Inference** in the top toolbar
+
+If those do not appear, build once and restart the editor.
 
 ---
 
-## 2) Build a simple scene (cube agent to target point)
+## 2) 2D vs 3D: Start With The Right Base
 
-This is a simple plan similar to Demo 04:
-- A cube (player) starts at random position.
-- A target point is spawned somewhere in the arena.
-- Agent gets reward for moving closer to the target.
-- Episode ends when target is reached or max steps are exceeded.
+The plugin supports both 2D and 3D, but the major differences are practical rather than architectural.
 
-### Recommended node structure
+| Topic | 2D | 3D |
+|------|----|----|
+| Agent base class | `RLAgent2D` | `RLAgent3D` |
+| Agent node type | `Node2D` | `Node3D` |
+| Typical player/body node | `CharacterBody2D` | `CharacterBody3D` |
+| Common movement plane | `X/Y` | usually `X/Z` with `Y` as height |
+| Best first environment | top-down navigation, lane tasks, simple avoidance | target reaching, locomotion, physics-heavy tasks |
+| Camera sensor | `RLCameraSensor2D` is available | no equivalent 3D camera sensor in this plugin today |
+| Common sensor style | vector observations, 2D raycasts, optional 2D camera | vector observations, 3D raycasts, velocity/transform sensors |
+| Debug difficulty | lower | higher because physics and spatial setup are usually more complex |
+
+Recommended starting point:
+
+- new to the plugin: start with 2D
+- already building a 3D game and comfortable with Godot physics: start with 3D
+
+The training loop, resources, dashboard, checkpoints, and export flow are the same in both versions.
+
+---
+
+## 3) What You Are Building
+
+The first example is a minimal 2D "move to target" task:
+
+- one player object moves in a bounded arena
+- one target marker is placed randomly
+- the agent observes its own position and the target position
+- the agent gets a small reward for moving closer
+- the episode ends when the target is reached
+
+This is deliberately simple. If this setup does not learn, the issue is usually in scene wiring, observations, or rewards, not in hyperparameter tuning.
+
+---
+
+## 4) Create The Scene
+
+Create a new scene with this structure:
 
 ```text
-MoveToPoint3D (Node3D)
+MoveToPoint2D (Node2D)
 ├── RLAcademy
-├── Player (CharacterBody3D)               # game entity — owns physics, movement, visuals
-│   ├── MeshInstance3D (CubeMesh)
-│   ├── CollisionShape3D
-│   └── Agent (Node3D + RLAgent3D script)  # RL logic only — child of player
-│       └── RaycastSensor3D               # sensors attach here, as children of the agent
-└── Target (Marker3D)
-```
-
-The same pattern applies in 2D:
-
-```text
-MyScene (Node2D)
-├── RLAcademy
-├── Player (CharacterBody2D)               # game entity
+├── Player (CharacterBody2D)
 │   ├── CollisionShape2D
 │   ├── Sprite2D
-│   └── Agent (Node2D + RLAgent2D script)  # RL logic only
-│       └── RaycastSensor2D               # sensors as children of the agent
-└── Target (Node2D)
+│   └── Agent (Node2D + RLAgent2D script)
+└── Target (Marker2D)
 ```
 
-If the agent needs a camera sensor, add `RLCameraSensor2D` as a child of `Agent` too:
+Responsibilities:
 
-```text
-Player (CharacterBody2D)
-└── Agent (Node2D + RLAgent2D script)
-    └── Camera (RLCameraSensor2D)          # positioned/zoomed to frame the area of interest
-```
+- `RLAcademy`: owns the training/run resources
+- `Player`: owns movement and physics
+- `Agent`: owns observations, rewards, and actions
+- `Target`: a simple marker the agent should reach
 
-### Why this structure matters
-
-| Node | Responsibility |
-|------|----------------|
-| **Player** | Physics, movement, visuals, game state |
-| **Agent** | Observations, actions, rewards, episode resets |
-| **Sensors** | Data collection — children of Agent |
-
-Flow each step:
-1. Agent collects observations (including any sensors).
-2. Agent receives an action from the policy.
-3. Agent forwards that decision to the parent player node.
-4. Player applies movement and physics.
-
-Keeping gameplay code and RL code in separate nodes means you can swap, duplicate, or remove the agent without touching the player, and vice versa.
+Keep the gameplay logic on `Player` and the RL logic on the child `Agent`. That separation is one of the most important conventions in this plugin.
 
 ---
 
-## 3) Create the player script (movement owner)
+## 5) Create The Player Script
 
-Attach this to `Player` (`CharacterBody3D`):
+Attach this to `Player`:
 
 ```csharp
 using Godot;
 
-public partial class SimplePlayer3D : CharacterBody3D
+public partial class SimplePlayer2D : CharacterBody2D
 {
-    [Export] public float MoveSpeed = 6.0f;
+    [Export] public float MoveSpeed { get; set; } = 180f;
 
     private Vector2 _moveInput = Vector2.Zero;
 
-    public void SetAgentMoveInput(Vector2 move)
+    public void SetMoveInput(Vector2 move)
     {
-        _moveInput = move.ClampLength(1.0f);
+        _moveInput = move.LimitLength(1f);
     }
 
     public override void _PhysicsProcess(double delta)
     {
-        var input = new Vector3(_moveInput.X, 0f, _moveInput.Y);
-        Velocity = input * MoveSpeed;
+        Velocity = _moveInput * MoveSpeed;
         MoveAndSlide();
     }
 }
 ```
 
+This script does only one thing: apply movement each physics frame based on the latest intent from the agent.
+
 ---
 
-## 4) Create the agent script (RL logic on child node)
+## 6) Create The Agent Script
 
-In the scene tree, select `Player/Agent` and click **Extend Script**. Make it inherit `RLAgent3D`.
-
-Attach this script to that child `Agent` node:
+Select `Player/Agent`, create a script that inherits `RLAgent2D`, and attach this:
 
 ```csharp
 using Godot;
 using RlAgentPlugin.Runtime;
 
-public partial class MoveToPointAgent3D : RLAgent3D
+public partial class MoveToPointAgent2D : RLAgent2D
 {
-    [Export] public NodePath PlayerPath = "..";
-    [Export] public NodePath TargetPath = "../../Target";
-    [Export] public float ArenaHalfSize = 8f;
-    [Export] public float ReachDistance = 0.75f;
+    [Export] public NodePath PlayerPath { get; set; } = "..";
+    [Export] public NodePath TargetPath { get; set; } = "../../Target";
+    [Export] public Vector2 ArenaHalfExtents { get; set; } = new(300f, 180f);
+    [Export] public float ReachDistance { get; set; } = 24f;
 
-    private SimplePlayer3D? _player;
-    private Node3D? _target;
+    private readonly RandomNumberGenerator _rng = new();
+
+    private SimplePlayer2D? _player;
+    private Node2D? _target;
+    private float _previousDistance;
 
     public override void _Ready()
     {
         base._Ready();
-        _player = GetNodeOrNull<SimplePlayer3D>(PlayerPath);
-        _target = GetNodeOrNull<Node3D>(TargetPath);
+        _rng.Randomize();
+        _player = GetNodeOrNull<SimplePlayer2D>(PlayerPath);
+        _target = GetNodeOrNull<Node2D>(TargetPath);
     }
 
     public override void DefineActions(ActionSpaceBuilder builder)
     {
-        // 2 continuous actions: move X and move Z in [-1, 1]
-        builder.AddContinuous("MoveX", 1, -1f, 1f);
-        builder.AddContinuous("MoveZ", 1, -1f, 1f);
+        builder.AddContinuous("move", dimensions: 2);
     }
 
     public override void CollectObservations(ObservationBuffer obs)
     {
         if (_player is null || _target is null)
         {
-            obs.Add(0f); obs.Add(0f); obs.Add(0f); obs.Add(0f);
+            obs.Add(0f); obs.Add(0f);
+            obs.Add(0f); obs.Add(0f);
+            obs.Add(0f); obs.Add(0f);
             return;
         }
 
-        var p = _player.GlobalPosition;
-        var t = _target.GlobalPosition;
+        var playerPos = _player.GlobalPosition;
+        var targetPos = _target.GlobalPosition;
+        var delta = targetPos - playerPos;
 
-        // Basic normalized observations
-        obs.AddNormalized(p.X, -ArenaHalfSize, ArenaHalfSize);
-        obs.AddNormalized(p.Z, -ArenaHalfSize, ArenaHalfSize);
-        obs.AddNormalized(t.X, -ArenaHalfSize, ArenaHalfSize);
-        obs.AddNormalized(t.Z, -ArenaHalfSize, ArenaHalfSize);
+        obs.AddNormalized(playerPos.X, -ArenaHalfExtents.X, ArenaHalfExtents.X);
+        obs.AddNormalized(playerPos.Y, -ArenaHalfExtents.Y, ArenaHalfExtents.Y);
+        obs.AddNormalized(targetPos.X, -ArenaHalfExtents.X, ArenaHalfExtents.X);
+        obs.AddNormalized(targetPos.Y, -ArenaHalfExtents.Y, ArenaHalfExtents.Y);
+        obs.AddNormalized(delta.X, -ArenaHalfExtents.X * 2f, ArenaHalfExtents.X * 2f);
+        obs.AddNormalized(delta.Y, -ArenaHalfExtents.Y * 2f, ArenaHalfExtents.Y * 2f);
     }
 
     protected override void OnActionsReceived(ActionBuffer actions)
     {
         if (_player is null) return;
 
-        // Forward RL decision to parent player node
-        var move = new Vector2(
-            actions.GetContinuous("MoveX")[0],
-            actions.GetContinuous("MoveZ")[0]);
-
-        _player.SetAgentMoveInput(move);
+        var move = actions.GetContinuous("move");
+        _player.SetMoveInput(new Vector2(move[0], move[1]));
     }
 
     public override void OnStep()
     {
         if (_player is null || _target is null) return;
 
-        var dist = _player.GlobalPosition.DistanceTo(_target.GlobalPosition);
+        AddReward(-0.001f, "step_penalty");
 
-        // Dense shaping toward target
-        AddReward(-dist * 0.001f);
+        var currentDistance = _player.GlobalPosition.DistanceTo(_target.GlobalPosition);
+        var progress = _previousDistance - currentDistance;
+        AddReward(progress * 0.01f, "distance_progress");
 
-        // Success condition
-        if (dist <= ReachDistance)
+        if (currentDistance <= ReachDistance)
         {
-            AddReward(1.0f);
+            AddReward(1.0f, "goal_reached");
             EndEpisode();
         }
 
-        if (EpisodeSteps > 600)
-            EndEpisode();
+        _previousDistance = currentDistance;
     }
 
     public override void OnEpisodeBegin()
     {
         if (_player is null || _target is null) return;
 
-        _player.GlobalPosition = new Vector3(
-            (float)GD.RandRange(-ArenaHalfSize, ArenaHalfSize),
-            0f,
-            (float)GD.RandRange(-ArenaHalfSize, ArenaHalfSize));
+        var playerPos = new Vector2(
+            _rng.RandfRange(-ArenaHalfExtents.X, ArenaHalfExtents.X),
+            _rng.RandfRange(-ArenaHalfExtents.Y, ArenaHalfExtents.Y));
 
-        _target.GlobalPosition = new Vector3(
-            (float)GD.RandRange(-ArenaHalfSize, ArenaHalfSize),
-            0f,
-            (float)GD.RandRange(-ArenaHalfSize, ArenaHalfSize));
+        var targetPos = new Vector2(
+            _rng.RandfRange(-ArenaHalfExtents.X, ArenaHalfExtents.X),
+            _rng.RandfRange(-ArenaHalfExtents.Y, ArenaHalfExtents.Y));
 
-        _player.SetAgentMoveInput(Vector2.Zero);
+        while (playerPos.DistanceTo(targetPos) < ReachDistance * 3f)
+        {
+            targetPos = new Vector2(
+                _rng.RandfRange(-ArenaHalfExtents.X, ArenaHalfExtents.X),
+                _rng.RandfRange(-ArenaHalfExtents.Y, ArenaHalfExtents.Y));
+        }
+
+        _player.GlobalPosition = playerPos;
+        _player.SetMoveInput(Vector2.Zero);
+        _target.GlobalPosition = targetPos;
+        _previousDistance = playerPos.DistanceTo(targetPos);
     }
 }
 ```
 
----
+What this script does:
 
-## 5) Configure `RLAcademy`
-
-On the `RLAcademy` node:
-
-1. Create and assign `RLTrainingConfig`
-2. Set `Algorithm` to `RLPPOConfig` (good starting point)
-3. Assign `RLRunConfig` and start with:
-   - `BatchSize = 4`
-   - `SimulationSpeed = 1.0`
-4. Set `MaxEpisodeSteps = 600`
-
-For first experiments, defaults are usually enough.
+- declares a 2D continuous action space
+- collects normalized observations
+- converts actions into player movement
+- gives a shaped reward for progress toward the target
+- resets both player and target every episode
 
 ---
 
-## 6) Use RL Setup dock (right side)
+## 7) Create The Required Resources
 
-Use **RL Setup** as your pre-launch checklist:
+You need four resources for a first run:
 
-- **Scene**: confirms which scene will launch
-- **Validation**: checks missing configs/invalid setup
-- **Resources**: shows resolved config assets
-- **Start/Stop/Quick Test**: launch controls
+1. `RLTrainingConfig`
+2. `RLPPOConfig`
+3. `RLRunConfig`
+4. `RLPolicyGroupConfig`
 
-If validation shows errors, fix those before training.
+You will also usually want:
+
+5. `RLNetworkGraph`
+
+### Training resource chain
+
+Create an `RLTrainingConfig` resource.
+
+Inside it:
+
+- set `Algorithm` to a new `RLPPOConfig`
+
+Recommended first values:
+
+```text
+RLPPOConfig
+- RolloutLength: 256
+- EpochsPerUpdate: 4
+- MiniBatchSize: 64
+- LearningRate: 0.0005
+- EntropyCoefficient: 0.01
+```
+
+The defaults are already close to a good first run, so you do not need to over-tune this.
+
+### Run config
+
+Create an `RLRunConfig` resource and start with:
+
+```text
+RLRunConfig
+- BatchSize: 4
+- SimulationSpeed: 1.0
+- ActionRepeat: 1
+- CheckpointInterval: 10
+- AsyncGradientUpdates: false
+```
+
+Why these values:
+
+- `BatchSize = 4` gives enough parallel data to learn quickly
+- `ActionRepeat = 1` keeps the first environment simple and predictable
+- `SimulationSpeed = 1.0` makes debugging easier
+
+### Policy group config
+
+Create an `RLPolicyGroupConfig` resource and set:
+
+```text
+RLPolicyGroupConfig
+- AgentId: "player"
+- MaxEpisodeSteps: 300
+- InferenceModelPath: leave empty for training
+- NetworkGraph: new RLNetworkGraph
+```
+
+Important:
+
+- every agent that should share weights must use the same `AgentId`
+- for this first scene, you only have one policy group
+
+### Network graph
+
+Create an `RLNetworkGraph` resource and keep the default trunk if you want the quickest first success:
+
+```text
+RLNetworkGraph
+- TrunkLayers: Dense(64, Tanh) -> Dense(64, Tanh)
+- Optimizer: Adam
+```
 
 ---
 
-## 7) Start training
+## 8) Assign The Resources In The Inspector
 
-You can start training in two places:
+Assign resources like this:
 
-- Top toolbar: **Start Training**
-- Right dock: **RL Setup → Start Training**
+### On `RLAcademy`
 
-You do **not** need to switch to RLDash to launch training.
+- `TrainingConfig` -> your `RLTrainingConfig`
+- `RunConfig` -> your `RLRunConfig`
+- `MaxEpisodeSteps` -> leave `0` if the policy group sets it, or set a global cap here
 
-Open **RLDash** to monitor progress (reward, losses, entropy, episode length, and optional curriculum/Elo charts).
+### On `Player/Agent`
 
----
+- `PolicyGroupConfig` -> your `RLPolicyGroupConfig`
+- `ControlMode` -> leave at `Auto` for normal training/inference workflow
 
-## 8) Export model as `.rlmodel`
+For this first run, do not assign:
 
-After or during a run, export from **RLDash**:
+- `DistributedConfig`
+- `Curriculum`
+- `SelfPlay`
+- `InferenceModelPath`
 
-- Use **Export Run** to export run outputs
-- Or expand **Checkpoint History** and use row-level **Export**
-
-This creates one or more `.rlmodel` files.
-
----
-
-## 9) Use exported model for inference
-
-Set your agent to inference and point to the exported `.rlmodel`.
-
-### Option A (per-agent)
-- In the agent Inspector:
-  - `ControlMode = Inference`
-  - `PolicyGroupConfig.InferenceModelPath = res://path/to/model.rlmodel`
-
-### Option B (Auto mode)
-- Keep `ControlMode = Auto`
-- Set `PolicyGroupConfig.InferenceModelPath` to `.rlmodel`
-- Use **Run Inference** in toolbar
+Those features are useful later, but they add failure modes you do not want in your first validation run.
 
 ---
 
-## 10) Recommended first run checklist
+## 9) Validate The Scene
 
-- Observation values are normalized (roughly `[-1, 1]`)
-- Reward is not always zero
-- `EndEpisode()` is reachable
-- `MaxEpisodeSteps` is reasonable
-- Training starts from **Start Training** button
-- Reward trend improves over time in RLDash
-- `.rlmodel` export succeeds and loads in inference
+Before training:
+
+1. Open the **RL Setup** dock.
+2. Make sure it points at your current scene.
+3. Read the validation output.
+4. Fix any missing config errors before pressing Start.
+
+The most common first-run mistakes are:
+
+- `RLAcademy` missing `TrainingConfig`
+- agent missing `PolicyGroupConfig`
+- scene builds but the agent never calls `AddReward()`
+- observations are not normalized
 
 ---
 
+## 10) Start The First Training Run
+
+Start training from either:
+
+- the top toolbar: **Start Training**
+- the right dock: **RL Setup -> Start Training**
+
+Then open **RLDash** and watch:
+
+- episode reward
+- episode length
+- policy loss
+- value loss
+- entropy
+
+What a healthy first run usually looks like:
+
+- reward starts noisy and low
+- entropy starts high
+- reward slowly rises over time
+- entropy gradually declines as the policy becomes more confident
+
+If reward stays completely flat for a long time, check the scene logic before touching hyperparameters.
+
+---
+
+## 11) What To Check If It Is Not Learning
+
+Use this checklist before tuning:
+
+- `CollectObservations()` is actually writing data every step
+- observations are roughly in `[-1, 1]`
+- `OnActionsReceived()` changes the player behavior
+- `OnStep()` calls `AddReward()`
+- `EndEpisode()` can happen
+- `MaxEpisodeSteps` is not so low that the agent never reaches the target
+- the target is not spawning on top of the player or impossibly far away
+
+If any of those are wrong, training quality will be poor no matter which algorithm you choose.
+
+---
+
+## 12) Export A Model
+
+After the run starts producing useful behavior:
+
+1. Open **RLDash**.
+2. Use **Export Run** or export from a checkpoint row.
+3. Save the generated `.rlmodel`.
+
+That file contains the trained policy for inference.
+
+---
+
+## 13) Run Inference
+
+To use the exported model:
+
+### Option A: per-agent inference setup
+
+On the agent:
+
+- set `ControlMode = Inference`
+- set `PolicyGroupConfig.InferenceModelPath` to the exported `.rlmodel`
+
+### Option B: Auto mode
+
+- keep `ControlMode = Auto`
+- set `PolicyGroupConfig.InferenceModelPath`
+- press **Run Inference** from the toolbar
+
+Inference uses the trained model without gradient updates.
+
+---
+
+## 14) How The 3D Version Differs
+
+Once the 2D version works, moving to 3D is mostly a scene and movement conversion exercise.
+
+### The major differences
+
+| Area | 2D version | 3D version |
+|------|------------|------------|
+| Agent type | `RLAgent2D` | `RLAgent3D` |
+| Agent node | `Node2D` | `Node3D` |
+| Player body | `CharacterBody2D` | `CharacterBody3D` |
+| Position observations | usually `X`, `Y` | usually `X`, `Z` for planar movement |
+| Gravity | usually none unless platformer | usually part of movement logic |
+| Movement output | `Vector2` | `Vector3` |
+| Camera/image path | 2D camera sensor is available | no matching 3D camera sensor here |
+| Common first task | top-down target reach | target reach on a flat plane |
+
+### Typical 3D scene structure
+
+```text
+MoveToPoint3D (Node3D)
+├── RLAcademy
+├── Player (CharacterBody3D)
+│   ├── MeshInstance3D
+│   ├── CollisionShape3D
+│   └── Agent (Node3D + RLAgent3D script)
+└── Target (Marker3D)
+```
+
+### Code changes you usually make
+
+- change `RLAgent2D` to `RLAgent3D`
+- change `Node2D` to `Node3D`
+- change `Vector2` to `Vector3`
+- use `X/Z` for planar movement and keep `Y` for height or gravity
+- update the player script to move in 3D
+
+### When 3D gets harder
+
+Compared with 2D, 3D setups more often fail because of:
+
+- unstable physics
+- unnormalized vertical velocity or height signals
+- rewards that do not reflect partial progress
+- too-large arenas
+- action spaces that are too big for a first run
+
+If you are new, keep the first 3D task as simple as the 2D one:
+
+- flat floor
+- one target
+- no jumping
+- no rigidbody interactions
+- one clear success condition
+
+For concrete 3D examples, look at the demo scenes in [demos.md](demos.md).
+
+---
+
+## 15) Recommended First-Run Checklist
+
+- scene contains exactly one `RLAcademy`
+- agent is a child of the player, not the other way around
+- player owns movement and physics
+- agent owns observations, rewards, and actions
+- `PolicyGroupConfig` is assigned on the agent
+- `TrainingConfig` and `RunConfig` are assigned on `RLAcademy`
+- reward is non-zero during training
+- episode resets are happening
+- `RLDash` shows metrics updating
+
+---
 
 ## Tips & Tricks
 
-- **Start with one clear objective**: one agent, one target, one success condition. Avoid adding multiple goals in your first environment.
-- **Use normalized observations**: keep values around `[-1, 1]` whenever possible.
-- **Keep rewards simple**: a small shaping reward + clear terminal success reward is usually enough for first runs.
-- **Add a small step penalty**: this encourages faster solutions and prevents stalling behavior.
-- **Use RL Setup validation before every run**: if validation reports issues, fix those first instead of tuning hyperparameters.
-- **Use Quick Test first**: run short smoke tests to confirm the loop works before long training sessions.
-- **Watch entropy with reward**: reward rising while entropy gradually falls is often healthier than reward-only tracking.
-- **Export often**: save useful `.rlmodel` snapshots during good runs so you can compare behavior quickly.
-- **Separate gameplay from RL code**: keep movement/physics in player scripts and policy logic in the child `RLAgent2D/3D` node.
-- **If learning stalls**: simplify the task (smaller arena, shorter distance, easier reset) before increasing model size.
+- start with PPO unless you already know you need SAC
+- start with one agent and one objective
+- keep observation values normalized
+- keep rewards simple and interpretable
+- use a small step penalty to encourage faster solutions
+- do not start with curriculum, self-play, or distributed workers
+- if learning stalls, simplify the environment before increasing model size
+- if you use camera observations, read [gpu-cnn.md](gpu-cnn.md) to understand how GPU training activation actually works
 
 ---
 
-## Next docs
+## Next Docs
 
-- Configuration details: `configuration.md`
-- Algorithm tradeoffs: `algorithms.md`
-- Reading charts and debugging learning: `tuning.md`
-- Demo-specific walkthroughs: `demos.md`
-- Sensors (raycast, camera): `sensors.md`
+- configuration details: [configuration.md](configuration.md)
+- algorithm tradeoffs: [algorithms.md](algorithms.md)
+- charts and debugging learning: [tuning.md](tuning.md)
+- plugin architecture: [architecture.md](architecture.md)
+- sensors and camera streams: [sensors.md](sensors.md)
+- demo walkthroughs: [demos.md](demos.md)

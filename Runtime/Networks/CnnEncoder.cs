@@ -5,14 +5,15 @@ using Godot;
 namespace RlAgentPlugin.Runtime;
 
 /// <summary>
-/// Wraps the native <c>RlCnnEncoder</c> GDExtension object.
-/// The public API is identical to the old pure-C# implementation so nothing
-/// else in the codebase needs to change.
+/// CPU CNN encoder — wraps the native <c>RlCnnEncoder</c> GDExtension object.
+/// Implements <see cref="IEncoder"/> so it is interchangeable with the future
+/// <c>GpuCnnEncoder</c> (Vulkan compute) without changing any training code.
 /// </summary>
-internal sealed class CnnEncoder
+internal sealed class CnnEncoder : IEncoder
 {
     private readonly GodotObject _native;
-    public  int OutputSize { get; }
+    public  int  OutputSize             { get; }
+    public  bool SupportsBatchedTraining => false;
 
     public CnnEncoder(int width, int height, int channels, RLCnnEncoderDef def)
     {
@@ -32,28 +33,61 @@ internal sealed class CnnEncoder
         OutputSize = def.OutputSize;
     }
 
-    // ── Forward ───────────────────────────────────────────────────────────────
+    // ── IEncoder: single-sample inference ────────────────────────────────────
 
     public float[] Forward(float[] input)
         => (float[])_native.Call(RlCnnEncoderNativeFunctions.Forward, (Variant)input);
 
-    // ── Gradient accumulation ─────────────────────────────────────────────────
+    public void ForwardBatch(float[] inputBatch, int batchSize, float[] outputBatch)
+    {
+        var inputSize = inputBatch.Length / Math.Max(1, batchSize);
+        if (inputBatch.Length != batchSize * inputSize)
+            throw new ArgumentException("[CnnEncoder] ForwardBatch input size is not divisible by batchSize.", nameof(inputBatch));
+        if (outputBatch.Length != batchSize * OutputSize)
+            throw new ArgumentException("[CnnEncoder] ForwardBatch output buffer has the wrong size.", nameof(outputBatch));
 
-    public CnnGradientBuffer CreateGradientBuffer()
-        => new CnnGradientBuffer((float[])_native.Call(RlCnnEncoderNativeFunctions.CreateGradientBuffer));
+        var input = new float[inputSize];
+        for (var b = 0; b < batchSize; b++)
+        {
+            Array.Copy(inputBatch, b * inputSize, input, 0, inputSize);
+            var output = Forward(input);
+            Array.Copy(output, 0, outputBatch, b * OutputSize, OutputSize);
+        }
+    }
 
-    public float[] AccumulateGradients(float[] outputGrad, CnnGradientBuffer buffer)
-        => (float[])_native.Call(RlCnnEncoderNativeFunctions.AccumulateGradients, (Variant)outputGrad, (Variant)buffer.Data);
+    // ── IEncoder: per-sample gradient accumulation ───────────────────────────
 
-    public void ApplyGradients(CnnGradientBuffer buffer, float learningRate, float gradScale)
-        => _native.Call(RlCnnEncoderNativeFunctions.ApplyGradients, (Variant)buffer.Data, learningRate, gradScale);
+    public ICnnGradientToken CreateGradientToken()
+        => new CnnGradientToken(_native.Call(RlCnnEncoderNativeFunctions.CreateGradientBuffer));
 
-    // ── Gradient norm (for gradient clipping) ────────────────────────────────
+    public float[] AccumulateGradients(float[] outputGrad, ICnnGradientToken token)
+        => (float[])_native.Call(RlCnnEncoderNativeFunctions.AccumulateGradients,
+               (Variant)outputGrad,
+               ((CnnGradientToken)token).Data);
 
-    public float GradNormSquared(CnnGradientBuffer buffer)
-        => (float)_native.Call(RlCnnEncoderNativeFunctions.GradNormSquared, (Variant)buffer.Data);
+    public void AccumulateGradientsBatch(float[] outputGradBatch, int batchSize, ICnnGradientToken token)
+    {
+        // CnnEncoder.SupportsBatchedTraining is false, so PolicyValueNetwork never calls this
+        // path — it uses the per-sample AccumulateGradients route instead.  A naive loop here
+        // would be incorrect because each AccumulateGradients call relies on activations cached
+        // by the immediately preceding Forward, but we don't have the input batch to re-run it.
+        throw new NotSupportedException(
+            "[CnnEncoder] AccumulateGradientsBatch is not supported on the CPU encoder. " +
+            "Check SupportsBatchedTraining before calling the batched backward path.");
+    }
 
-    // ── Serialization ─────────────────────────────────────────────────────────
+    public void ApplyGradients(ICnnGradientToken token, float learningRate, float gradScale)
+        => _native.Call(RlCnnEncoderNativeFunctions.ApplyGradients,
+               ((CnnGradientToken)token).Data, learningRate, gradScale);
+
+    public float GradNormSquared(ICnnGradientToken token)
+        => (float)_native.Call(RlCnnEncoderNativeFunctions.GradNormSquared,
+               ((CnnGradientToken)token).Data);
+
+    internal float[] DebugReadGradientBuffer(ICnnGradientToken token)
+        => (float[])((CnnGradientToken)token).Data;
+
+    // ── IEncoder: serialization ───────────────────────────────────────────────
 
     public void AppendSerialized(ICollection<float> weights, ICollection<int> shapes)
     {
@@ -64,14 +98,13 @@ internal sealed class CnnEncoder
     }
 
     public void LoadSerialized(IReadOnlyList<float> weights, ref int wi,
-                               IReadOnlyList<int> shapes, ref int si)
+                               IReadOnlyList<int>   shapes,  ref int si)
     {
         // shapes descriptor layout (matches get_shapes / AppendSerialized):
         //   [num_conv_layers, outC, kH, kW, inC, stride, ... (×num_conv), inSize, outSize]
         int nConv   = shapes[si];
-        int nShapes = 1 + nConv * 5 + 2; // total shape ints for this encoder
+        int nShapes = 1 + nConv * 5 + 2;
 
-        // Count weights from shape descriptor without calling get_weights.
         int nWeights = 0;
         for (var c = 0; c < nConv; c++)
         {
@@ -79,12 +112,11 @@ internal sealed class CnnEncoder
             int kH   = shapes[si + 1 + c * 5 + 1];
             int kW   = shapes[si + 1 + c * 5 + 2];
             int inC  = shapes[si + 1 + c * 5 + 3];
-            // stride is [4], not needed for weight count
-            nWeights += outC * kH * kW * inC + outC; // filters + biases
+            nWeights += outC * kH * kW * inC + outC;
         }
         int projIn  = shapes[si + 1 + nConv * 5];
         int projOut = shapes[si + 1 + nConv * 5 + 1];
-        nWeights += projIn * projOut + projOut; // weights + biases
+        nWeights += projIn * projOut + projOut;
 
         var wSlice = new float[nWeights];
         for (var i = 0; i < nWeights; i++) wSlice[i] = weights[wi++];
@@ -92,28 +124,43 @@ internal sealed class CnnEncoder
         var sSlice = new int[nShapes];
         for (var i = 0; i < nShapes; i++) sSlice[i] = shapes[si++];
 
-        _native.Call("set_weights", (Variant)wSlice, (Variant)sSlice);
+        _native.Call(RlCnnEncoderNativeFunctions.SetWeights, (Variant)wSlice, (Variant)sSlice);
     }
 
-    // ── Weight copy (SAC target network sync) ─────────────────────────────────
+    // ── IEncoder: weight copy ─────────────────────────────────────────────────
 
-    public void CopyWeightsTo(CnnEncoder other)
+    public void CopyWeightsTo(IEncoder other)
     {
-        var weights = _native.Call(RlCnnEncoderNativeFunctions.GetWeights);
-        var shapes  = _native.Call(RlCnnEncoderNativeFunctions.GetShapes);
-        other._native.Call(RlCnnEncoderNativeFunctions.SetWeights, weights, shapes);
-    }
+        if (ReferenceEquals(this, other))
+            return;
 
-    public void LoadWeightsFrom(CnnEncoder other) => other.CopyWeightsTo(this);
+        if (other is CnnEncoder cpu)
+        {
+            // Fast path: both native — direct native call, no intermediate allocation.
+            var weights = _native.Call(RlCnnEncoderNativeFunctions.GetWeights);
+            var shapes  = _native.Call(RlCnnEncoderNativeFunctions.GetShapes);
+            cpu._native.Call(RlCnnEncoderNativeFunctions.SetWeights, weights, shapes);
+            return;
+        }
+
+        // Cross-device path (e.g. CPU → GPU): round-trip through the serialization format.
+        var w = new List<float>();
+        var s = new List<int>();
+        AppendSerialized(w, s);
+        var wi = 0;
+        var si = 0;
+        other.LoadSerialized(w, ref wi, s, ref si);
+    }
 }
 
-// ── Gradient buffer ───────────────────────────────────────────────────────────
+// ── Gradient token ────────────────────────────────────────────────────────────
 
 /// <summary>
-/// Wraps the flat float[] gradient buffer managed by the native CNN encoder.
+/// CPU implementation of <see cref="ICnnGradientToken"/>.
+/// Wraps the flat <c>float[]</c> gradient buffer managed by the native CNN encoder.
 /// </summary>
-internal sealed class CnnGradientBuffer
+internal sealed class CnnGradientToken : ICnnGradientToken
 {
-    internal float[] Data { get; }
-    internal CnnGradientBuffer(float[] data) => Data = data;
+    internal Variant Data { get; }
+    internal CnnGradientToken(Variant data) => Data = data;
 }

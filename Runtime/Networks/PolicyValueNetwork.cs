@@ -5,7 +5,7 @@ using Godot;
 
 namespace RlAgentPlugin.Runtime;
 
-internal sealed class PolicyValueNetwork
+internal sealed class PolicyValueNetwork : IDisposable
 {
     private readonly NetworkLayer[] _trunkLayers;
     private readonly DenseLayer _policyHead;
@@ -47,7 +47,12 @@ internal sealed class PolicyValueNetwork
     /// Agents that only used legacy <c>buffer.Add()</c> produce a single-stream flat spec
     /// and fall back to the original single-trunk path transparently.
     /// </summary>
-    public PolicyValueNetwork(ObservationSpec spec, int actionCount, int continuousActionDims, RLNetworkGraph graph)
+    public PolicyValueNetwork(
+        ObservationSpec spec,
+        int actionCount,
+        int continuousActionDims,
+        RLNetworkGraph graph,
+        bool preferGpuImageEncoders = false)
     {
         _continuousActionDims = continuousActionDims;
         _observationSpec = spec;
@@ -60,14 +65,19 @@ internal sealed class PolicyValueNetwork
             var stream = spec.Streams[i];
             var streamCfg = stream.EncoderConfig;
 
-            CnnEncoder? cnn = null;
+            IEncoder? cnn = null;
             NetworkLayer[]? vectorLayers = null;
             int encoderOutputSize;
 
             if (stream.Kind == ObservationStreamKind.Image)
             {
                 var cnnDef = streamCfg?.CnnEncoder ?? new RLCnnEncoderDef();
-                cnn = new CnnEncoder(stream.Width, stream.Height, stream.Channels, cnnDef);
+                cnn = CreateImageEncoder(
+                    stream.Width,
+                    stream.Height,
+                    stream.Channels,
+                    cnnDef,
+                    preferGpuImageEncoders);
                 var cnnOut = cnn.OutputSize;
                 // Optional per-stream vector encoder after CNN projection.
                 if (streamCfg?.VectorEncoder is { } vecGraph && vecGraph.TrunkLayers.Count > 0)
@@ -123,7 +133,7 @@ internal sealed class PolicyValueNetwork
     }
 
     /// <summary>Routes a flat observation through per-stream encoders and concatenates embeddings.</summary>
-    private float[] EncodeStreams(float[] observation)
+    private float[] EncodeStreams(float[] observation, int batchIndex = -1, float[][]? batchedCnnOutputs = null)
     {
         var encoders = _streamEncoders!;
         var spec     = _observationSpec!;
@@ -144,9 +154,20 @@ internal sealed class PolicyValueNetwork
             float[] embedding;
             if (enc.Cnn is not null)
             {
-                var tc = RLProfiler.Begin();
-                embedding = enc.Cnn.Forward(slice);
-                RLProfiler.End("CNN.Encode", tc);
+                if (batchIndex >= 0 &&
+                    batchedCnnOutputs is not null &&
+                    enc.Cnn.SupportsBatchedTraining &&
+                    batchedCnnOutputs[i] is { } outputBatch)
+                {
+                    embedding = new float[enc.Cnn.OutputSize];
+                    Array.Copy(outputBatch, batchIndex * embedding.Length, embedding, 0, embedding.Length);
+                }
+                else
+                {
+                    var tc = RLProfiler.Begin();
+                    embedding = enc.Cnn.Forward(slice);
+                    RLProfiler.End("CNN.Encode", tc);
+                }
             }
             else
             {
@@ -164,6 +185,17 @@ internal sealed class PolicyValueNetwork
         }
 
         return merged;
+    }
+
+    private NetworkInference InferPrepared(float[] observation, int batchIndex, float[][]? batchedCnnOutputs)
+    {
+        var x = EncodeStreams(observation, batchIndex, batchedCnnOutputs);
+        foreach (var layer in _trunkLayers)
+            x = layer.Forward(x);
+
+        var logits = _policyHead.Forward(x);
+        var value  = _valueHead.Forward(x);
+        return new NetworkInference { Logits = logits, Value = value[0] };
     }
 
     /// <summary>
@@ -215,19 +247,59 @@ internal sealed class PolicyValueNetwork
         for (var i = 0; i < _trunkLayers.Length; i++)
             trunkGradients[i] = _trunkLayers[i].CreateGradientBuffer();
 
-        // Create fresh gradient buffers for stream encoders.
-        CnnGradientBuffer[]?    cnnGrads      = null;
-        GradientBuffer[][]?     vecLayerGrads = null;
+        // Create fresh gradient tokens for stream encoders.
+        ICnnGradientToken[]? cnnGrads      = null;
+        GradientBuffer[][]?  vecLayerGrads = null;
         if (_streamEncoders is not null)
         {
-            cnnGrads      = new CnnGradientBuffer[_streamEncoders.Length];
+            cnnGrads      = new ICnnGradientToken[_streamEncoders.Length];
             vecLayerGrads = new GradientBuffer[_streamEncoders.Length][];
             for (var ei = 0; ei < _streamEncoders.Length; ei++)
             {
                 if (_streamEncoders[ei].Cnn is not null)
-                    cnnGrads[ei] = _streamEncoders[ei].Cnn!.CreateGradientBuffer();
+                    cnnGrads[ei] = _streamEncoders[ei].Cnn!.CreateGradientToken();
                 vecLayerGrads[ei] = _streamEncoders[ei].CreateVectorGradBuffers() ?? System.Array.Empty<GradientBuffer>();
             }
+        }
+
+        float[][]? batchedCnnOutputs = null;
+        float[][]? batchedCnnOutputGrads = null;
+        if (_streamEncoders is not null && _observationSpec is not null)
+        {
+            var tBatchForward = RLProfiler.Begin();
+            batchedCnnOutputs = new float[_streamEncoders.Length][];
+            batchedCnnOutputGrads = new float[_streamEncoders.Length][];
+            var streamOffsets = BuildStreamOffsets(_observationSpec);
+            var batchedEncoderCount = 0;
+
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                var enc = _streamEncoders[ei];
+                if (enc.Cnn is null || !enc.Cnn.SupportsBatchedTraining)
+                    continue;
+
+                batchedEncoderCount++;
+
+                var stream = _observationSpec.Streams[ei];
+                var inputBatch = new float[samples.Count * stream.FlatSize];
+                for (var sampleIndex = 0; sampleIndex < samples.Count; sampleIndex++)
+                {
+                    Array.Copy(
+                        samples[sampleIndex].Observation,
+                        streamOffsets[ei],
+                        inputBatch,
+                        sampleIndex * stream.FlatSize,
+                        stream.FlatSize);
+                }
+
+                var outputBatch = new float[samples.Count * enc.Cnn.OutputSize];
+                enc.Cnn.ForwardBatch(inputBatch, samples.Count, outputBatch);
+                batchedCnnOutputs[ei] = outputBatch;
+                batchedCnnOutputGrads[ei] = new float[samples.Count * enc.Cnn.OutputSize];
+            }
+            RLProfiler.End("ApplyGradients.CnnBatchForward", tBatchForward);
+            if (batchedEncoderCount == 0)
+                GD.Print("[PolicyValueNetwork] ApplyGradients: no batched CNN encoders active for this network.");
         }
 
         var policyGradients = _policyHead.CreateGradientBuffer();
@@ -238,9 +310,13 @@ internal sealed class PolicyValueNetwork
         var totalEntropy    = 0f;
         var clipCount       = 0;
 
-        foreach (var sample in samples)
+        var tSampleLoop = RLProfiler.Begin();
+        for (var sampleIndex = 0; sampleIndex < samples.Count; sampleIndex++)
         {
-            var inference = Infer(sample.Observation);
+            var sample = samples[sampleIndex];
+            var inference = _streamEncoders is not null
+                ? InferPrepared(sample.Observation, sampleIndex, batchedCnnOutputs)
+                : Infer(sample.Observation);
             float[] logitsGradient;
 
             if (_continuousActionDims > 0)
@@ -390,11 +466,40 @@ internal sealed class PolicyValueNetwork
                     }
 
                     if (enc.Cnn is not null)
-                        enc.Cnn.AccumulateGradients(encGrad, cnnGrads![ei]);
+                    {
+                        if (enc.Cnn.SupportsBatchedTraining &&
+                            batchedCnnOutputGrads is not null &&
+                            batchedCnnOutputGrads[ei] is { } gradBatch)
+                        {
+                            Array.Copy(encGrad, 0, gradBatch, sampleIndex * encGrad.Length, encGrad.Length);
+                        }
+                        else
+                        {
+                            enc.Cnn.AccumulateGradients(encGrad, cnnGrads![ei]);
+                        }
+                    }
                 }
             }
         }
+        RLProfiler.End("ApplyGradients.SampleLoop", tSampleLoop);
 
+        if (batchedCnnOutputGrads is not null && cnnGrads is not null && _streamEncoders is not null)
+        {
+            var tBatchBackward = RLProfiler.Begin();
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                var enc = _streamEncoders[ei];
+                if (enc.Cnn is not null &&
+                    enc.Cnn.SupportsBatchedTraining &&
+                    batchedCnnOutputGrads[ei] is { } gradBatch)
+                {
+                    enc.Cnn.AccumulateGradientsBatch(gradBatch, samples.Count, cnnGrads[ei]);
+                }
+            }
+            RLProfiler.End("ApplyGradients.CnnBatchBackward", tBatchBackward);
+        }
+
+        var tGradNorm = RLProfiler.Begin();
         var globalNormSquared = policyGradients.SumSquares() + valueGradients.SumSquares();
         foreach (var g in trunkGradients) globalNormSquared += g.SumSquares();
 
@@ -411,15 +516,19 @@ internal sealed class PolicyValueNetwork
             if (averageNorm > config.MaxGradientNorm)
                 gradientScale *= config.MaxGradientNorm / averageNorm;
         }
+        RLProfiler.End("ApplyGradients.GradNorm", tGradNorm);
 
+        var tApplyCpu = RLProfiler.Begin();
         _policyHead.ApplyGradients(policyGradients, config.LearningRate, gradientScale);
         _valueHead.ApplyGradients(valueGradients,   config.LearningRate, gradientScale);
         for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
             _trunkLayers[layerIndex].ApplyGradients(trunkGradients[layerIndex], config.LearningRate, gradientScale);
+        RLProfiler.End("ApplyGradients.ApplyCpuLayers", tApplyCpu);
 
         // Apply stream encoder gradients.
         if (cnnGrads is not null && _streamEncoders is not null)
         {
+            var tApplyEncoders = RLProfiler.Begin();
             for (var ei = 0; ei < _streamEncoders.Length; ei++)
             {
                 var enc = _streamEncoders[ei];
@@ -429,6 +538,7 @@ internal sealed class PolicyValueNetwork
                     for (var li = 0; li < enc.VectorLayers.Length; li++)
                         enc.VectorLayers[li].ApplyGradients(vecLayerGrads![ei][li], config.LearningRate, gradientScale);
             }
+            RLProfiler.End("ApplyGradients.ApplyEncoders", tApplyEncoders);
         }
 
         RLProfiler.End("ApplyGradients", tGrad);
@@ -501,6 +611,16 @@ internal sealed class PolicyValueNetwork
             _trunkLayers[i].CopyFrom(other._trunkLayers[i]);
         _policyHead.CopyFrom(other._policyHead);
         _valueHead.CopyFrom(other._valueHead);
+    }
+
+    public void Dispose()
+    {
+        if (_streamEncoders is null)
+            return;
+
+        foreach (var encoder in _streamEncoders)
+            if (encoder.Cnn is IDisposable disposable)
+                disposable.Dispose();
     }
 
     public void LoadCheckpoint(RLCheckpoint checkpoint)
@@ -613,20 +733,60 @@ internal sealed class PolicyValueNetwork
         return expValues;
     }
 
+    private static int[] BuildStreamOffsets(ObservationSpec spec)
+    {
+        var offsets = new int[spec.Streams.Count];
+        var offset = 0;
+        for (var i = 0; i < spec.Streams.Count; i++)
+        {
+            offsets[i] = offset;
+            offset += spec.Streams[i].FlatSize;
+        }
+        return offsets;
+    }
+
+    private static IEncoder CreateImageEncoder(
+        int width,
+        int height,
+        int channels,
+        RLCnnEncoderDef def,
+        bool preferGpuImageEncoders)
+    {
+        if (preferGpuImageEncoders && GpuDevice.IsAvailable())
+        {
+            try
+            {
+                GD.Print($"[PolicyValueNetwork] Using GpuCnnEncoder for image stream {width}x{height}x{channels}.");
+                return new GpuCnnEncoder(width, height, channels, def);
+            }
+            catch (Exception ex)
+            {
+                var message =
+                    $"[PolicyValueNetwork] GpuCnnEncoder init failed for image stream {width}x{height}x{channels}: {ex}";
+                GD.PushError(message);
+                throw new InvalidOperationException(message, ex);
+            }
+        }
+
+        if (preferGpuImageEncoders)
+            GD.PushWarning($"[PolicyValueNetwork] Vulkan unavailable — falling back to CnnEncoder for image stream {width}x{height}x{channels}.");
+        return new CnnEncoder(width, height, channels, def);
+    }
+
     // ── StreamEncoder helper ─────────────────────────────────────────────────
 
     private sealed class StreamEncoder
     {
         public readonly int                StreamIndex;
         public readonly ObservationStreamSpec Stream;
-        public readonly CnnEncoder?        Cnn;
+        public readonly IEncoder?          Cnn;
         public readonly NetworkLayer[]?    VectorLayers;
         public readonly int                OutputSize;
 
         public StreamEncoder(
             int index,
             ObservationStreamSpec stream,
-            CnnEncoder? cnn,
+            IEncoder? cnn,
             NetworkLayer[]? vectorLayers,
             int outputSize)
         {

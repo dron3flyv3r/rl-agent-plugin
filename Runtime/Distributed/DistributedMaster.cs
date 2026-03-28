@@ -137,7 +137,7 @@ public sealed class DistributedMaster : IDisposable
     // Rolling steps/sec window (stores (steps, durationSec) for last N rounds).
     private const int StepsWindow = 8;
     private readonly Dictionary<string, Queue<(long steps, float dur)>> _throughputWindow = new(StringComparer.Ordinal);
-
+    private readonly bool _showRolloutDiagnostics;
     // ── Construction / lifecycle ─────────────────────────────────────────────
 
     public DistributedMaster(
@@ -145,17 +145,19 @@ public sealed class DistributedMaster : IDisposable
         int  workerCount,
         int  monitorInterval,
         bool verbose,
+        bool ShowRolloutDiagnostics,
         Dictionary<string, IDistributedTrainer> trainers,
         RLAsyncRolloutPolicy asyncRolloutPolicy = RLAsyncRolloutPolicy.Pause,
         int  rolloutLength = 256)
     {
-        _port               = port;
-        _workerCount        = workerCount;
-        _monitorInterval    = monitorInterval;
-        _verbose            = verbose;
-        _trainers           = trainers;
-        _asyncRolloutPolicy = asyncRolloutPolicy;
-        _rolloutLength      = rolloutLength;
+        _port                   = port;
+        _workerCount            = workerCount;
+        _monitorInterval        = monitorInterval;
+        _verbose                = verbose;
+        _trainers               = trainers;
+        _asyncRolloutPolicy     = asyncRolloutPolicy;
+        _rolloutLength          = rolloutLength;
+        _showRolloutDiagnostics = ShowRolloutDiagnostics;
 
         foreach (var (g, t) in trainers)
         {
@@ -331,6 +333,9 @@ public sealed class DistributedMaster : IDisposable
                         if (summaries.Count > 0)
                             lock (_rolloutsLock) _pendingEpisodeSummaries.Enqueue((groupId, summaries));
                         break;
+                    case DistributedMessageType.LogMessage:
+                        GD.Print(Encoding.UTF8.GetString(payload));
+                        break;
                 }
             }
         }
@@ -381,9 +386,9 @@ public sealed class DistributedMaster : IDisposable
 
                 trainer.InjectRollout(data);
 
-                if (_diagnosticRolloutsLogged < DiagnosticRolloutCount)
+                if (_diagnosticRolloutsLogged < DiagnosticRolloutCount && _showRolloutDiagnostics)
                 {
-                    LogRolloutDiagnostic(groupId, data, _diagnosticRolloutsLogged + 1);
+                    LogRolloutDiagnostic(groupId, data, _diagnosticRolloutsLogged + 1, trainer.IsOffPolicy);
                     _diagnosticRolloutsLogged++;
                 }
 
@@ -442,12 +447,24 @@ public sealed class DistributedMaster : IDisposable
         // Prefer async (non-blocking backprop).
         if (_asyncTrainers.TryGetValue(groupId, out var asyncT))
         {
-            // In Cap mode, limit the on-policy snapshot to one full round of rollouts so that
-            // excess transitions accumulated while waiting for workers do not inflate the batch.
-            // Off-policy trainers (SAC) sample a fixed mini-batch internally; the cap is a no-op for them.
-            var maxTransitions = _asyncRolloutPolicy == RLAsyncRolloutPolicy.Cap && !trainer.IsOffPolicy
-                ? (_workerCount + 1) * _rolloutLength
-                : int.MaxValue;
+            // In async PPO, keep the master scene running during background training but cap the
+            // next snapshot so local transitions collected while the GPU is busy do not inflate
+            // subsequent updates.
+            //
+            // Pause:
+            //   Worker rollouts are discarded while training is in flight, but the visible master
+            //   environment still steps. Only keep one local rollout worth of master-side data
+            //   for the next update; discard the rest.
+            //
+            // Cap:
+            //   Keep one full round of rollouts (master + workers) and discard any excess.
+            //
+            // Off-policy trainers (SAC) sample a fixed mini-batch internally; the cap is a no-op.
+            var maxTransitions = trainer.IsOffPolicy
+                ? int.MaxValue
+                : _asyncRolloutPolicy == RLAsyncRolloutPolicy.Cap
+                    ? (_workerCount + 1) * _rolloutLength
+                    : _rolloutLength;
 
             if (asyncT.TryScheduleBackgroundUpdate(groupId, totalSteps, episodeCount, maxTransitions))
             {
@@ -491,7 +508,10 @@ public sealed class DistributedMaster : IDisposable
         _lastUpdateTime[groupId]   = now;
 
         if (_verbose) GD.Print($"[RL Distributed] Broadcasting weights '{groupId}' to {ConnectedWorkers} worker(s).");
-        BroadcastWeights(groupId, trainer);
+        var weightBytes = HasUsableCheckpoint(stats.Checkpoint)
+            ? DistributedProtocol.SerializeWeights(stats.Checkpoint.WeightBuffer, stats.Checkpoint.LayerShapeBuffer)
+            : null;
+        BroadcastWeights(groupId, trainer, weightBytes);
 
         if (_monitorInterval > 0 && _totalUpdates[groupId] % _monitorInterval == 0)
             PrintMonitorSummary(groupId, totalSteps, ConnectedWorkers);
@@ -533,7 +553,7 @@ public sealed class DistributedMaster : IDisposable
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static void LogRolloutDiagnostic(string groupId, byte[] data, int rolloutIndex)
+    private static void LogRolloutDiagnostic(string groupId, byte[] data, int rolloutIndex, bool isOffPolicy)
     {
         List<DistributedTransition> transitions;
         try { transitions = DistributedProtocol.DeserializeRollout(data); }
@@ -608,10 +628,13 @@ public sealed class DistributedMaster : IDisposable
             sb.Append("  ← PROBLEM: physics exploded or observations are broken");
         sb.AppendLine();
 
-        sb.Append($"  NextObs present : {(nextObsLen > 0 ? $"yes ({nextObsLen} floats)" : "NO — SAC Bellman targets will be zero!")}");
-        if (nextObsLen == 0)
-            sb.Append("  ← PROBLEM");
-        sb.AppendLine();
+        if (isOffPolicy)
+        {
+            sb.Append($"  NextObs present : {(nextObsLen > 0 ? $"yes ({nextObsLen} floats)" : "NO — SAC Bellman targets will be zero!")}");
+            if (nextObsLen == 0)
+                sb.Append("  ← PROBLEM");
+            sb.AppendLine();
+        }
 
         if (nonZero == 0)
             sb.AppendLine("  *** WARNING: ALL rewards are zero — check reward function or env state ***");
@@ -620,9 +643,9 @@ public sealed class DistributedMaster : IDisposable
         GD.Print(sb.ToString());
     }
 
-    private void BroadcastWeights(string groupId, IDistributedTrainer trainer)
+    private void BroadcastWeights(string groupId, IDistributedTrainer trainer, byte[]? preSerializedWeights = null)
     {
-        var bytes = trainer.ExportWeights();
+        var bytes = preSerializedWeights ?? trainer.ExportWeights();
         List<WorkerConnection> snapshot;
         lock (_connectionsLock) snapshot = new List<WorkerConnection>(_connections);
         foreach (var conn in snapshot)
@@ -676,4 +699,7 @@ public sealed class DistributedMaster : IDisposable
         _running = false;
         _listener?.Stop();
     }
+
+    private static bool HasUsableCheckpoint(RLCheckpoint checkpoint) =>
+        checkpoint.WeightBuffer.Length > 0 && checkpoint.LayerShapeBuffer.Length > 0;
 }
