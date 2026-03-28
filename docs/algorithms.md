@@ -2,6 +2,21 @@
 
 The plugin ships two algorithms: **PPO** (Proximal Policy Optimization) and **SAC** (Soft Actor-Critic). Choosing between them is the first decision you make when setting up a new training run.
 
+
+---
+## Available algorithms:
+
+Algorithm | Action Space | On/Off Policy | Sample Efficiency | Exploration
+---|---|---|---|---
+PPO | Discrete + Continuous | On-policy | Moderate | Manual entropy bonus
+SAC | Continuous only | Off-policy | High | Auto-tuned alpha
+
+## PPO vs SAC: Which to choose?
+Algorithm | When to use | When not to use
+---|---|---
+PPO | Discrete actions, simple continuous control, dense rewards, fast iteration | Expensive simulations, complex continuous control
+SAC | Complex continuous control, sample efficiency, built-in exploration | Discrete actions, short episodes, memory constraints
+
 ---
 
 ## PPO — Proximal Policy Optimization

@@ -35,7 +35,7 @@ The episode reward chart is your primary signal.
  Reward
    │
 1.0┤                              ████████████
-   │                          █████
+   │                         █████
 0.5┤                    █████
    │              ██████
 0.0┤  ████████████

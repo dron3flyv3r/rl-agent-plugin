@@ -88,7 +88,7 @@ MoveToPoint2D (Node2D)
 ├── Player (CharacterBody2D)
 │   ├── CollisionShape2D
 │   ├── Sprite2D
-│   └── Agent (Node2D + RLAgent2D script)
+│   └── Agent (RLAgent2D + RLAgent2D script)
 └── Target (Marker2D)
 ```
 
@@ -443,6 +443,7 @@ On the agent:
 
 - set `ControlMode = Inference`
 - set `PolicyGroupConfig.InferenceModelPath` to the exported `.rlmodel`
+- press **Run Inference** from the toolbar
 
 ### Option B: Auto mode
 

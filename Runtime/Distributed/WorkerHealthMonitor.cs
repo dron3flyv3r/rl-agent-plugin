@@ -18,6 +18,7 @@ public partial class WorkerHealthMonitor : Node
 {
     /// <summary>Warn when actual physics rate falls below this fraction of PhysicsTicksPerSecond.</summary>
     private const float DroppedStepWarnThreshold = 0.85f;
+    private const int ConsecutiveWarnsToReport = 3;
 
     private readonly Action<string> _log;
     private readonly bool           _isRendererMode;
@@ -26,6 +27,8 @@ public partial class WorkerHealthMonitor : Node
 
     private int    _physicsSteps;
     private int    _renderFrames;
+    private int    _renderWarnStreak;
+    private int    _dropWarnStreak;
     private double _activeMs;      // accumulated real milliseconds while NOT paused
     private ulong  _lastTickMs;
 
@@ -81,20 +84,33 @@ public partial class WorkerHealthMonitor : Node
         var actualPhysicsHz   = _physicsSteps / elapsedSec;
         var expectedPhysicsHz = (float)Engine.PhysicsTicksPerSecond;
         var dropFraction      = 1f - (actualPhysicsHz / expectedPhysicsHz);
+        var dropWarning       = dropFraction > 1f - DroppedStepWarnThreshold;
 
         var sb = new StringBuilder("[Worker Health] ");
         sb.Append($"physics={actualPhysicsHz:F0}/{expectedPhysicsHz:F0} Hz");
 
+        var renderWarning = false;
         if (_isRendererMode)
         {
             var renderFps = _renderFrames / elapsedSec;
             sb.Append($"  render={renderFps:F0} fps");
             if (renderFps < actualPhysicsHz * 0.95)
+            {
+                renderWarning = true;
                 sb.Append("  !! render fps below physics rate — observations may be stale");
+            }
         }
 
-        if (dropFraction > 1f - DroppedStepWarnThreshold)
+        if (dropWarning)
             sb.Append($"  !! DROPPING ~{dropFraction * 100f:F0}% of physics steps (CPU bottleneck)");
+
+        _renderWarnStreak = renderWarning ? _renderWarnStreak + 1 : 0;
+        _dropWarnStreak   = dropWarning ? _dropWarnStreak + 1 : 0;
+
+        // Emit once when a warning first looks persistent; suppress repeated logs while it continues.
+        var shouldLog = _renderWarnStreak == ConsecutiveWarnsToReport || _dropWarnStreak == ConsecutiveWarnsToReport;
+        if (!shouldLog)
+            return;
 
         _log(sb.ToString());
     }
