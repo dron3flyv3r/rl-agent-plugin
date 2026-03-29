@@ -67,7 +67,7 @@ public partial class RLDistributedConfig : Resource
     /// <c>Engine.TimeScale</c> applied to worker processes.
     /// Workers have no display so they can run much faster than the master.
     /// </summary>
-    [Export(PropertyHint.Range, "1,20,0.5")]
+    [Export(PropertyHint.Range, "1,20,0.5,or_greater")]
     public float WorkerSimulationSpeed { get; set; } = 4.0f;
 
     [ExportGroup("Monitor")]
@@ -76,7 +76,7 @@ public partial class RLDistributedConfig : Resource
     /// Shows worker count, batch size, training losses, and throughput.
     /// Set to 0 to disable.
     /// </summary>
-    [Export(PropertyHint.Range, "0,500,1")]
+    [Export(PropertyHint.Range, "0,500,1,or_greater")]
     public int MonitorIntervalUpdates { get; set; } = 5;
 
     /// <summary>

@@ -18,7 +18,7 @@ public abstract partial class RLAlgorithmConfig : Resource
     /// <summary>
     /// Frequency (in environment steps) for console/dashboard status writes during training.
     /// </summary>
-    [Export] public int StatusWriteIntervalSteps  { get; set; } = 32;
+    [Export(PropertyHint.Range, "1,1000,1,or_greater")] public int StatusWriteIntervalSteps  { get; set; } = 32;
 
     /// <summary>The algorithm this config represents. Implemented by each concrete subclass.</summary>
     public virtual RLAlgorithmKind AlgorithmKind => RLAlgorithmKind.Custom;

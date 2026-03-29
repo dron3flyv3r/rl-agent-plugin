@@ -15,9 +15,39 @@
 - [Sensors (raycast, camera)](sensors.md)
 
 ## How-to guides
-- [How to Use Curriculum Learning](How-to/curriculum-learning.md)
-- [How to Use Self-Play](How-to/self-play.md)
-- [How to Use Human Control Mode](How-to/human-control-mode.md)
+
+### Training & Algorithms
+- [How to Choose Between PPO and SAC](How-to/Training%20&%20Algorithms/choose-between-ppo-and-sac.md)
+- [How to Implement a Custom Reward Function](How-to/Training%20&%20Algorithms/implement-custom-reward-function.md)
+- [How to Use SAC for Continuous Control](How-to/Training%20&%20Algorithms/use-sac-for-continuous-control.md)
+- [How to Switch Between Training Modes](How-to/Training%20&%20Algorithms/switch-between-training-modes.md)
+- [How to Use Human Control Mode](How-to/Training%20&%20Algorithms/human-control-mode.md)
+
+### Training Methods
+- [How to Use Curriculum Learning](How-to/Training%20Methods/curriculum-learning.md)
+- [How to Use Self-Play](How-to/Training%20Methods/self-play.md)
+
+### Observations & Sensors
+- [How to Set Up Vector Observations](How-to/Observations%20&%20Sensors/set-up-vector-observations.md)
+- [How to Create a Custom Sensor](How-to/Observations%20&%20Sensors/create-a-custom-sensor.md)
+- [How to Use Image Observations with CNN](How-to/Observations%20&%20Sensors/use-image-observations-with-cnn.md)
+- [How to Use Raycast Sensors for Navigation](How-to/Observations%20&%20Sensors/use-raycast-sensors-for-navigation.md)
+
+### Advanced Training
+- [How to Set Up Distributed Workers](How-to/Advanced%20Training/set-up-distributed-workers.md)
+- [How to Monitor Training with RLDash](How-to/Advanced%20Training/monitor-training-with-rldash.md)
+- [How to Run Multiple Experiments in Parallel](How-to/Advanced%20Training/run-multiple-experiments-in-parallel.md)
+
+### Deployment & Transfer
+- [How to Export and Deploy a Trained Model](How-to/Deployment%20&%20Transfer/export-and-deploy-a-trained-model.md)
+- [How to Use Inference Mode](How-to/Deployment%20&%20Transfer/use-inference-mode.md)
+- [How to Fine-Tune a Pre-Trained Model](How-to/Deployment%20&%20Transfer/fine-tune-a-pre-trained-model.md)
+
+### Debugging & Optimization
+- [How to Debug Agent Behavior](How-to/Debugging%20&%20Optimization/debug-agent-behavior.md)
+- [How to Tune Hyperparameters Effectively](How-to/Debugging%20&%20Optimization/tune-hyperparameters-effectively.md)
+- [How to Share Policies Across Multiple Agents](How-to/Debugging%20&%20Optimization/share-policies-across-multiple-agents.md)
+- [How to Handle Training Instability](How-to/Debugging%20&%20Optimization/handle-training-instability.md)
 
 ## Demo scenes
 - Example scenes are maintained in the companion demo repository:

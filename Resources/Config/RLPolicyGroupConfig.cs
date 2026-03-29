@@ -19,7 +19,7 @@ public partial class RLPolicyGroupConfig : Resource
     /// <summary>
     /// Optional per-episode step cap for agents in this group (0 = unlimited).
     /// </summary>
-    [Export] public int MaxEpisodeSteps { get; set; } = 0;
+    [Export(PropertyHint.Range, "0,1000,or_greater")] public int MaxEpisodeSteps { get; set; } = 0;
     /// <summary>
     /// Optional model path used for inference or warm-starting this policy group.
     /// </summary>

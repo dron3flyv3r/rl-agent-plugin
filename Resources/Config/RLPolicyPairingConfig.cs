@@ -50,13 +50,13 @@ public partial class RLPolicyPairingConfig : Resource
 
     [ExportGroup("PFSP")]
     /// <summary>Maximum number of historical opponent snapshots to keep per group.</summary>
-    [Export] public int   MaxPoolSize  { get; set; } = 20;
+    [Export(PropertyHint.Range, "0,100,or_greater")] public int   MaxPoolSize  { get; set; } = 20;
     /// <summary>Enable Prioritized Fictitious Self-Play sampling.</summary>
     [Export] public bool  PfspEnabled  { get; set; } = true;
     /// <summary>PFSP weighting exponent; larger values bias harder opponents.</summary>
-    [Export] public float PfspAlpha    { get; set; } = 4.0f;
+    [Export(PropertyHint.Range, "0.0,10.0,0.1")] public float PfspAlpha    { get; set; } = 4.0f;
     /// <summary>Minimum win-rate threshold considered "solved" for PFSP weighting.</summary>
-    [Export] public float WinThreshold { get; set; } = 0.0f;
+    [Export(PropertyHint.Range, "0.0,1.0,0.01")] public float WinThreshold { get; set; } = 0.0f;
 
     public RLPolicyGroupConfig? ResolvedGroupA => _groupA as RLPolicyGroupConfig;
     public RLPolicyGroupConfig? ResolvedGroupB => _groupB as RLPolicyGroupConfig;

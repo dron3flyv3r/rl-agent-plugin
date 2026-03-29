@@ -18,7 +18,7 @@ public partial class RLRunConfig : Resource
     /// <summary>
     /// Global simulation speed multiplier applied during training.
     /// </summary>
-    [Export] public float SimulationSpeed { get; set; } = 1.0f;
+    [Export(PropertyHint.Range, "0.0,10.0,0.1,or_greater")] public float SimulationSpeed { get; set; } = 1.0f;
     /// <summary>
     /// Number of parallel academy environments stepped per decision tick.
     /// </summary>
@@ -31,23 +31,23 @@ public partial class RLRunConfig : Resource
     /// Save policy checkpoints every N trainer updates.
     /// Ignored when <see cref="CheckpointIntervalSteps"/> is greater than zero.
     /// </summary>
-    [Export] public int CheckpointInterval { get; set; } = 10;
+    [Export(PropertyHint.Range, "0,1000,or_greater")] public int CheckpointInterval { get; set; } = 10;
     /// <summary>
     /// If greater than zero, save history checkpoints every N total environment steps instead of
     /// every N trainer updates. Takes precedence over <see cref="CheckpointInterval"/>.
     /// </summary>
-    [Export] public long CheckpointIntervalSteps { get; set; } = 0;
+    [Export(PropertyHint.Range, "0,1000000,or_greater")] public long CheckpointIntervalSteps { get; set; } = 0;
     /// <summary>
     /// Number of most-recent history checkpoints to always keep intact.
     /// Older checkpoints beyond this count are thinned by <see cref="HistoryKeepEveryNth"/>.
     /// Set to 0 to disable thinning entirely.
     /// </summary>
-    [Export] public int HistoryKeepRecentCount { get; set; } = 20;
+    [Export(PropertyHint.Range, "0,100,or_greater")] public int HistoryKeepRecentCount { get; set; } = 20;
     /// <summary>
     /// For history checkpoints older than <see cref="HistoryKeepRecentCount"/>, keep every Nth
     /// and delete the rest. Set to 0 to disable thinning.
     /// </summary>
-    [Export] public int HistoryKeepEveryNth { get; set; } = 10;
+    [Export(PropertyHint.Range, "0,100,or_greater")] public int HistoryKeepEveryNth { get; set; } = 10;
     /// <summary>
     /// Compress history checkpoint files into a ZIP archive (.rlcheckpoint).
     /// The archive contains an uncompressed <c>meta.json</c> for fast metadata reads

@@ -18,13 +18,13 @@ namespace RlAgentPlugin.Runtime;
 public partial class RLScheduleConfig : Resource
 {
     /// <summary>Optional schedule for trainer learning rate.</summary>
-    [Export] public RLHyperparamSchedule? LearningRate      { get; set; }
+    [Export] public RLHyperparamSchedule? LearningRate { get; set; }
     /// <summary>Optional schedule for PPO entropy bonus coefficient.</summary>
     [Export] public RLHyperparamSchedule? EntropyCoefficient { get; set; }
     /// <summary>Optional schedule for PPO clip epsilon.</summary>
-    [Export] public RLHyperparamSchedule? ClipEpsilon        { get; set; }
+    [Export] public RLHyperparamSchedule? ClipEpsilon { get; set; }
     /// <summary>Optional schedule for SAC alpha temperature.</summary>
-    [Export] public RLHyperparamSchedule? SacAlpha           { get; set; }
+    [Export] public RLHyperparamSchedule? SacAlpha { get; set; }
 
     /// <summary>
     /// Evaluates assigned schedules and writes resulting values into the trainer config.
@@ -33,9 +33,9 @@ public partial class RLScheduleConfig : Resource
     /// <param name="ctx">Current schedule evaluation context.</param>
     internal void ApplyTo(RLTrainerConfig config, ScheduleContext ctx)
     {
-        if (LearningRate       is not null) config.LearningRate      = LearningRate.Evaluate(ctx);
+        if (LearningRate is not null) config.LearningRate = LearningRate.Evaluate(ctx);
         if (EntropyCoefficient is not null) config.EntropyCoefficient = EntropyCoefficient.Evaluate(ctx);
-        if (ClipEpsilon        is not null) config.ClipEpsilon        = ClipEpsilon.Evaluate(ctx);
-        if (SacAlpha           is not null) config.SacInitAlpha       = SacAlpha.Evaluate(ctx);
+        if (ClipEpsilon is not null) config.ClipEpsilon = ClipEpsilon.Evaluate(ctx);
+        if (SacAlpha is not null) config.SacInitAlpha = SacAlpha.Evaluate(ctx);
     }
 }
