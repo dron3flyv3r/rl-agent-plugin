@@ -18,6 +18,8 @@ Reinforcement learning plugin for Godot 4 with in-editor training, live metrics,
 
 ## Install in a Godot project
 
+Latest stable release in this line: `v0.1.0-beta`
+
 Option A: copy plugin folder
 
 1. Copy this repository into your game project as `addons/rl-agent-plugin`.
@@ -31,6 +33,34 @@ Option B: add as submodule
 ```bash
 git submodule add https://github.com/dron3flyv3r/rl-agent-plugin.git addons/rl-agent-plugin
 git submodule update --init --recursive
+git -C addons/rl-agent-plugin fetch --tags
+git -C addons/rl-agent-plugin checkout v0.1.0-beta
+```
+
+Optional (bleeding edge): track `main` instead of a release tag.
+
+## Upgrade to a newer release
+
+If you installed as a submodule, update to a newer tagged release with:
+
+```bash
+git -C addons/rl-agent-plugin fetch --tags
+git -C addons/rl-agent-plugin checkout <new-release-tag>
+git add addons/rl-agent-plugin
+```
+
+Example:
+
+```bash
+git -C addons/rl-agent-plugin fetch --tags
+git -C addons/rl-agent-plugin checkout v0.1.0-beta
+git add addons/rl-agent-plugin
+```
+
+To list available tags:
+
+```bash
+git -C addons/rl-agent-plugin tag --list
 ```
 
 ## Quick usage

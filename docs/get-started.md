@@ -21,7 +21,16 @@ Prerequisites:
 
 - Godot 4.6+ with C# support
 - .NET 8 SDK installed
-- the plugin copied to `addons/rl-agent-plugin`
+- the plugin copied to `addons/rl-agent-plugin` from release tag `v0.1.0-beta`
+
+Recommended install source (release-pinned):
+
+```bash
+git submodule add https://github.com/dron3flyv3r/rl-agent-plugin.git addons/rl-agent-plugin
+git submodule update --init --recursive
+git -C addons/rl-agent-plugin fetch --tags
+git -C addons/rl-agent-plugin checkout v0.1.0-beta
+```
 
 Install steps:
 
