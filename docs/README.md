@@ -14,6 +14,9 @@
 - [GPU CNN Training](gpu-cnn.md)
 - [Sensors (raycast, camera)](sensors.md)
 
+## Release notes
+- [0.1.0-beta Full Technical Release Notes](releases/0.1.0-beta-full-details.md)
+
 ## How-to guides
 
 ### Training & Algorithms
