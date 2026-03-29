@@ -45,7 +45,7 @@ If you installed as a submodule, update to a newer tagged release with:
 
 ```bash
 git -C addons/rl-agent-plugin fetch --tags
-git -C addons/rl-agent-plugin checkout <new-release-tag>
+git -C addons/rl-agent-plugin switch <new-release-tag>
 git add addons/rl-agent-plugin
 ```
 
@@ -53,7 +53,7 @@ Example:
 
 ```bash
 git -C addons/rl-agent-plugin fetch --tags
-git -C addons/rl-agent-plugin checkout v0.1.0-beta
+git -C addons/rl-agent-plugin switch v0.1.0-beta
 git add addons/rl-agent-plugin
 ```
 
