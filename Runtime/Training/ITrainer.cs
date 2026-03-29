@@ -1,4 +1,5 @@
 using System;
+using Godot;
 
 namespace RlAgentPlugin.Runtime;
 
@@ -135,4 +136,15 @@ public interface ITrainer
     /// No optimizer state, replay buffer, or rollout buffer is touched.
     /// </summary>
     IInferencePolicy SnapshotPolicyForEval();
+
+    /// <summary>
+    /// Loads network weights from a checkpoint into the live trainer network.
+    /// Call this immediately after trainer construction to resume a previous training run.
+    /// The optimizer state and replay/rollout buffers are not affected.
+    /// Custom trainers that do not override this will log a warning and start with fresh weights.
+    /// </summary>
+    void LoadFromCheckpoint(RLCheckpoint checkpoint)
+    {
+        GD.PushWarning($"[RL Resume] Trainer '{GetType().Name}' does not implement LoadFromCheckpoint — resuming with fresh weights.");
+    }
 }

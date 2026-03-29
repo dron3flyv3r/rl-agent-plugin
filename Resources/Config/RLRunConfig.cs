@@ -86,6 +86,19 @@ public partial class RLRunConfig : Resource
     [Export] public RLAsyncRolloutPolicy AsyncRolloutPolicy { get; set; } = RLAsyncRolloutPolicy.Pause;
 
     /// <summary>
+    /// When true, training resumes from the most recent checkpoint in the current run directory
+    /// instead of starting from scratch. Set <see cref="ResumeCheckpointPath"/> to load from a
+    /// specific file; leave it empty to auto-detect the latest checkpoint for each policy group.
+    /// </summary>
+    [Export] public bool ResumeFromCheckpoint { get; set; } = false;
+    /// <summary>
+    /// Explicit path to a checkpoint file (.rlcheckpoint or .json) to resume from.
+    /// Only used when <see cref="ResumeFromCheckpoint"/> is true.
+    /// Leave empty to automatically find the latest checkpoint for each policy group in the current run.
+    /// </summary>
+    [Export] public string ResumeCheckpointPath { get; set; } = string.Empty;
+
+    /// <summary>
     /// Optional stopping conditions for this training run.
     /// When null, training continues indefinitely until manually stopped.
     /// </summary>

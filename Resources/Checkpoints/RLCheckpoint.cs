@@ -10,7 +10,7 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLCheckpoint : Resource
 {
-    public const int CurrentFormatVersion = 6;
+    public const int CurrentFormatVersion = 7;
     public const string ZipExtension      = ".rlcheckpoint";
     public const string PpoAlgorithm = "PPO";
     public const string SacAlgorithm = "SAC";
@@ -21,6 +21,8 @@ public partial class RLCheckpoint : Resource
     [Export] public long EpisodeCount { get; set; }
     [Export] public long UpdateCount { get; set; }
     [Export] public float RewardSnapshot { get; set; }
+    /// <summary>Curriculum difficulty level [0, 1] at the time this checkpoint was saved.</summary>
+    [Export] public float CurriculumProgress { get; set; }
     [Export] public string Algorithm { get; set; } = PpoAlgorithm;
     [Export] public int ObservationSize { get; set; }
     [Export] public int DiscreteActionCount { get; set; }
@@ -67,9 +69,10 @@ public partial class RLCheckpoint : Resource
 
         var training = new Godot.Collections.Dictionary
         {
-            { "total_steps",   checkpoint.TotalSteps   },
-            { "episode_count", checkpoint.EpisodeCount },
-            { "update_count",  checkpoint.UpdateCount  },
+            { "total_steps",         checkpoint.TotalSteps         },
+            { "episode_count",       checkpoint.EpisodeCount       },
+            { "update_count",        checkpoint.UpdateCount        },
+            { "curriculum_progress", checkpoint.CurriculumProgress },
         };
 
         var data = new Godot.Collections.Dictionary
@@ -220,9 +223,10 @@ public partial class RLCheckpoint : Resource
 
         var training = new Godot.Collections.Dictionary
         {
-            { "total_steps",   checkpoint.TotalSteps   },
-            { "episode_count", checkpoint.EpisodeCount },
-            { "update_count",  checkpoint.UpdateCount  },
+            { "total_steps",         checkpoint.TotalSteps         },
+            { "episode_count",       checkpoint.EpisodeCount       },
+            { "update_count",        checkpoint.UpdateCount        },
+            { "curriculum_progress", checkpoint.CurriculumProgress },
         };
         var metaDoc = new Godot.Collections.Dictionary
         {
@@ -685,17 +689,18 @@ public partial class RLCheckpoint : Resource
 
     private static void ReadTrainingStats(Godot.Collections.Dictionary data, RLCheckpoint checkpoint)
     {
-        // v4: training sub-object
+        // v4+: training sub-object
         if (data.ContainsKey("training") && data["training"].VariantType == Variant.Type.Dictionary)
         {
             var t = data["training"].AsGodotDictionary();
-            checkpoint.TotalSteps   = t.ContainsKey("total_steps")   ? t["total_steps"].AsInt64()   : 0;
-            checkpoint.EpisodeCount = t.ContainsKey("episode_count") ? t["episode_count"].AsInt64() : 0;
-            checkpoint.UpdateCount  = t.ContainsKey("update_count")  ? t["update_count"].AsInt64()  : 0;
+            checkpoint.TotalSteps         = t.ContainsKey("total_steps")         ? t["total_steps"].AsInt64()          : 0;
+            checkpoint.EpisodeCount       = t.ContainsKey("episode_count")       ? t["episode_count"].AsInt64()        : 0;
+            checkpoint.UpdateCount        = t.ContainsKey("update_count")        ? t["update_count"].AsInt64()         : 0;
+            checkpoint.CurriculumProgress = t.ContainsKey("curriculum_progress") ? t["curriculum_progress"].AsSingle() : 0f;
         }
         else
         {
-            // v3: flat root fields
+            // v3: flat root fields (no curriculum_progress in this legacy format)
             checkpoint.TotalSteps   = data.ContainsKey("total_steps")   ? data["total_steps"].AsInt64()   : 0;
             checkpoint.EpisodeCount = data.ContainsKey("episode_count") ? data["episode_count"].AsInt64() : 0;
             checkpoint.UpdateCount  = data.ContainsKey("update_count")  ? data["update_count"].AsInt64()  : 0;

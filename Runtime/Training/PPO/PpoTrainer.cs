@@ -216,6 +216,8 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         return InferencePolicyFactory.Create(checkpoint);
     }
 
+    public void LoadFromCheckpoint(RLCheckpoint checkpoint) => _network.LoadCheckpoint(checkpoint);
+
     // ── IAsyncTrainer ─────────────────────────────────────────────────────────
 
     public bool TryScheduleBackgroundUpdate(string groupId, long totalSteps, long episodeCount, int maxTransitions = int.MaxValue)

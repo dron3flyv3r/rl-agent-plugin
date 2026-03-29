@@ -91,6 +91,12 @@ public partial class TrainingBootstrap : Node
     private readonly List<SubViewport> _viewports = new();
     private int _curriculumSuccessCount;
 
+    // Resume-from-checkpoint
+    private bool  _resumeFromCheckpoint;
+    private string _resumeCheckpointPath = string.Empty;
+    private float _resumedCurriculumProgress;
+    private string _resumedFromFilename = string.Empty;  // filename of the checkpoint we resumed from (for status display)
+
     // Distributed training
     private bool _isWorkerMode;
     private int  _workerId;
@@ -236,6 +242,8 @@ public partial class TrainingBootstrap : Node
         _historyKeepRecentCount  = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepRecentCount)  : 20;
         _historyKeepEveryNth     = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepEveryNth)     : 10;
         _compressCheckpoints     = runConfig is null || runConfig.CompressCheckpoints;
+        _resumeFromCheckpoint    = runConfig?.ResumeFromCheckpoint ?? false;
+        _resumeCheckpointPath    = runConfig?.ResumeCheckpointPath ?? string.Empty;
         if (_quickTestMode)
         {
             _batchSize = 1;
@@ -536,6 +544,17 @@ public partial class TrainingBootstrap : Node
 
         ConfigureEnvironmentRoles();
         InitializeOpponentBanks();
+
+        // ── Resume from checkpoint (before initial save so the initial write reflects resumed weights) ──
+        if (_resumeFromCheckpoint && !_isWorkerMode)
+        {
+            foreach (var (groupId, trainer) in _trainersByGroup)
+            {
+                var binding = _groupBindingsByGroup[groupId];
+                TryResumeFromCheckpoint(groupId, binding.SafeGroupId, trainer);
+            }
+        }
+
         if (!_isWorkerMode) SaveInitialCheckpoints();
 
         // ── Distributed training setup ────────────────────────────────────────
@@ -625,10 +644,11 @@ public partial class TrainingBootstrap : Node
         foreach (var environment in _environments)
         {
             // In quick-test mode, seed the curriculum to the debug value so OnEpisodeBegin sees the right difficulty.
+            // On resume, restore the curriculum difficulty that was active when the checkpoint was saved.
             if (_quickTestMode && environment.Academy.DebugCurriculumProgress > 0f)
                 environment.Academy.SetCurriculumProgress(environment.Academy.DebugCurriculumProgress);
             else if (!_quickTestMode)
-                environment.Academy.SetCurriculumProgress(0f);
+                environment.Academy.SetCurriculumProgress(_resumedCurriculumProgress);
 
             if (!TryInitializeEnvironment(environment, out var initializationError))
             {
@@ -653,7 +673,8 @@ public partial class TrainingBootstrap : Node
                 0,
                 _quickTestMode
                     ? $"Quick test running ({_quickTestEpisodeLimit} episode target)."
-                    : "Training started.");
+                    : string.IsNullOrEmpty(_resumedFromFilename) ? "Training started." : $"Resumed from {_resumedFromFilename}.",
+                resumedFrom: _resumedFromFilename);
         }
         GD.Print($"[RL] Run: {_manifest.RunId}");
         if (_quickTestMode)
@@ -862,6 +883,7 @@ public partial class TrainingBootstrap : Node
             currentCheckpoint.EpisodeCount = episodeCount;
             currentCheckpoint.UpdateCount = _updateCountByGroup[groupId];
             currentCheckpoint.RewardSnapshot = _lastEpisodeRewardByGroup.GetValueOrDefault(groupId);
+            currentCheckpoint.CurriculumProgress = _academies.Count > 0 ? _academies[0].CurriculumProgress : 0f;
 
             PersistCheckpoint(groupId, currentCheckpoint, _updateCountByGroup[groupId]);
 
@@ -1039,6 +1061,7 @@ public partial class TrainingBootstrap : Node
                 asyncTrainer.FlushPendingUpdate(groupId, _totalSteps, episodeCount);
 
             var finalCheckpoint = trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, updateCount);
+            finalCheckpoint.CurriculumProgress = _academies.Count > 0 ? _academies[0].CurriculumProgress : 0f;
             PersistCheckpoint(groupId, finalCheckpoint, updateCount, forceLatestWrite: true, allowFrozenSnapshot: false);
 
         }
@@ -1416,8 +1439,73 @@ public partial class TrainingBootstrap : Node
         foreach (var (groupId, trainer) in _trainersByGroup)
         {
             var checkpoint = trainer.CreateCheckpoint(groupId, _totalSteps, _episodeCountByGroup[groupId], _updateCountByGroup[groupId]);
+            checkpoint.CurriculumProgress = _resumedCurriculumProgress;
             PersistCheckpoint(groupId, checkpoint, _updateCountByGroup[groupId], forceLatestWrite: true, allowFrozenSnapshot: false);
         }
+    }
+
+    /// <summary>
+    /// Loads network weights and restores training counters from the most recent checkpoint
+    /// for <paramref name="groupId"/> in the current run directory.
+    /// Also restores curriculum progress so the difficulty level is not reset to zero.
+    /// Called once per policy group during <see cref="_Ready"/> when
+    /// <see cref="RLRunConfig.ResumeFromCheckpoint"/> is enabled.
+    /// </summary>
+    private void TryResumeFromCheckpoint(string groupId, string safeGroupId, ITrainer trainer)
+    {
+        string resolvedPath;
+        if (!string.IsNullOrWhiteSpace(_resumeCheckpointPath))
+        {
+            // Explicit override: resolve extension (ZIP preferred over JSON).
+            resolvedPath = RLCheckpoint.ResolveCheckpointExtension(_resumeCheckpointPath);
+        }
+        else
+        {
+            // Auto-detect: find the most recent checkpoint for this group across all runs.
+            // NOTE: we search all runs (not just the current run directory) because each
+            // training session generates a new run ID — the current run directory is empty
+            // at this point and was just created.
+            resolvedPath = CheckpointRegistry.GetLatestCheckpointPath(groupId);
+        }
+
+        if (string.IsNullOrEmpty(resolvedPath))
+        {
+            GD.PushWarning($"[RL Resume] Group '{groupId}': no checkpoint found. Starting from scratch.");
+            return;
+        }
+
+        var absPath = resolvedPath.StartsWith("res://", StringComparison.Ordinal) || resolvedPath.StartsWith("user://", StringComparison.Ordinal)
+            ? ProjectSettings.GlobalizePath(resolvedPath)
+            : resolvedPath;
+
+        if (!System.IO.File.Exists(absPath) && !FileAccess.FileExists(resolvedPath))
+        {
+            GD.PushWarning($"[RL Resume] Group '{groupId}': no checkpoint found at '{resolvedPath}'. Starting from scratch.");
+            return;
+        }
+
+        var checkpoint = RLCheckpoint.LoadFromFile(resolvedPath);
+        if (checkpoint is null)
+        {
+            GD.PushError($"[RL Resume] Group '{groupId}': failed to load checkpoint from '{resolvedPath}'.");
+            return;
+        }
+
+        trainer.LoadFromCheckpoint(checkpoint);
+
+        _episodeCountByGroup[groupId] = checkpoint.EpisodeCount;
+        _updateCountByGroup[groupId]  = checkpoint.UpdateCount;
+        _totalSteps = Math.Max(_totalSteps, checkpoint.TotalSteps);
+        _lastEpisodeRewardByGroup[groupId] = checkpoint.RewardSnapshot;
+
+        if (checkpoint.CurriculumProgress > 0f)
+            _resumedCurriculumProgress = checkpoint.CurriculumProgress;
+
+        _resumedFromFilename = System.IO.Path.GetFileName(resolvedPath);
+
+        GD.Print($"[RL Resume] Group '{groupId}': resumed from '{System.IO.Path.GetFileName(resolvedPath)}' " +
+                 $"— steps={checkpoint.TotalSteps}, episodes={checkpoint.EpisodeCount}, updates={checkpoint.UpdateCount}" +
+                 (checkpoint.CurriculumProgress > 0f ? $", curriculum={checkpoint.CurriculumProgress:F3}" : string.Empty));
     }
 
     private bool TryInitializeEnvironment(EnvironmentRuntime environment, out string error)

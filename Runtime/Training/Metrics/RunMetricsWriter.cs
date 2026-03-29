@@ -19,7 +19,7 @@ public sealed class RunMetricsWriter
         : this(manifest.MetricsPath, manifest.StatusPath) { }
 
     public void WriteStatus(string status, string scenePath, long totalSteps, long episodeCount, string message,
-        long workerEpisodeCount = 0)
+        long workerEpisodeCount = 0, string resumedFrom = "")
     {
         EnsureFileDirectory(_statusPath);
         using var file = FileAccess.Open(_statusPath, FileAccess.ModeFlags.Write);
@@ -39,6 +39,8 @@ public sealed class RunMetricsWriter
         };
         if (workerEpisodeCount > 0)
             payload["worker_episode_count"] = workerEpisodeCount;
+        if (!string.IsNullOrEmpty(resumedFrom))
+            payload["resumed_from"] = resumedFrom;
 
         file.StoreString(Json.Stringify(payload));
     }

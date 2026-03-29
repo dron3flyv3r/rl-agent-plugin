@@ -46,6 +46,7 @@ public partial class RLDashboard : Control
         public long EpisodeCount;
         public long WorkerEpisodeCount;
         public string Message = "";
+        public string ResumedFrom = "";
     }
 
     private sealed record RunMeta(string DisplayName, string[] AgentNames, string[] AgentGroups, bool HasCurriculum);
@@ -680,6 +681,7 @@ public partial class RLDashboard : Control
                 EpisodeCount = GetLong(d, "episode_count"),
                 WorkerEpisodeCount = GetLong(d, "worker_episode_count"),
                 Message = GetString(d, "message", ""),
+                ResumedFrom = GetString(d, "resumed_from", ""),
             };
         }
         catch
@@ -897,15 +899,12 @@ public partial class RLDashboard : Control
         {
             case "running":
                 _statusDot.Color = CRunning;
-                var epDisplay = status.WorkerEpisodeCount > 0
-                    ? $"{status.EpisodeCount:N0} master  +  {status.WorkerEpisodeCount:N0} simulated"
-                    : status.EpisodeCount.ToString("N0");
-                _statusLabel.Text = $"Running";
+                _statusLabel.Text = string.IsNullOrEmpty(status.ResumedFrom) ? "Running" : "Running (resumed)";
                 break;
             case "done":
             case "stopped":
                 _statusDot.Color = CStopped;
-                _statusLabel.Text = $"Stopped";
+                _statusLabel.Text = string.IsNullOrEmpty(status.ResumedFrom) ? "Stopped" : "Stopped (resumed)";
                 break;
             case "loading":
                 _statusDot.Color = CIdle;
@@ -1139,6 +1138,10 @@ public partial class RLDashboard : Control
             var updateSuffix = last.OpponentUpdateCount.HasValue ? $" u{last.OpponentUpdateCount.Value}" : string.Empty;
             SetHeaderStatus(
                 $"Latest matchup: {last.PolicyGroup} vs {last.OpponentGroup} ({last.OpponentSource}{updateSuffix})");
+        }
+        else if (!string.IsNullOrEmpty(status.ResumedFrom))
+        {
+            SetHeaderStatus($"Resumed from: {status.ResumedFrom}");
         }
     }
 
@@ -1457,6 +1460,21 @@ public partial class RLDashboard : Control
         row.AddChild(typeLabel);
 
         row.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
+
+        var copyBtn = new Button
+        {
+            Text = "Copy Path",
+            TooltipText = $"Copy path to clipboard for use in ResumeCheckpointPath:\n{entry.AbsolutePath}",
+            CustomMinimumSize = new Vector2(80, 0),
+        };
+        copyBtn.Pressed += () =>
+        {
+            DisplayServer.ClipboardSet(entry.AbsolutePath);
+            copyBtn.Text = "Copied!";
+            var timer = GetTree().CreateTimer(1.5);
+            timer.Timeout += () => { if (IsInstanceValid(copyBtn)) copyBtn.Text = "Copy Path"; };
+        };
+        row.AddChild(copyBtn);
 
         var exportBtn = new Button
         {
