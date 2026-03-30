@@ -81,6 +81,7 @@ git -C addons/rl-agent-plugin tag --list
 - Architecture: `docs/architecture.md`
 - Algorithms: `docs/algorithms.md`
 - Tuning: `docs/tuning.md`
+- Building the native C++ GDExtension: `docs/build-native.md`
 
 ## Companion demo project
 
