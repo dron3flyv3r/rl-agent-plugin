@@ -9,6 +9,7 @@ internal static class RlCnnEncoderNativeFunctions
     public const string Forward = "forward";
     public const string CreateGradientBuffer = "create_gradient_buffer";
     public const string AccumulateGradients = "accumulate_gradients";
+    public const string AccumulateGradientsWithBuffer = "accumulate_gradients_with_buffer";
     public const string ApplyGradients = "apply_gradients";
     public const string GradNormSquared = "grad_norm_squared";
     public const string GetWeights = "get_weights";

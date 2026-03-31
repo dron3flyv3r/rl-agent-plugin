@@ -61,9 +61,17 @@ internal sealed class CnnEncoder : IEncoder
         => new CnnGradientToken(_native.Call(RlCnnEncoderNativeFunctions.CreateGradientBuffer));
 
     public float[] AccumulateGradients(float[] outputGrad, ICnnGradientToken token)
-        => (float[])_native.Call(RlCnnEncoderNativeFunctions.AccumulateGradients,
-               (Variant)outputGrad,
-               ((CnnGradientToken)token).Data);
+    {
+        var t = (CnnGradientToken)token;
+        var result = (Godot.Collections.Array)_native.Call(
+            RlCnnEncoderNativeFunctions.AccumulateGradientsWithBuffer,
+            (Variant)outputGrad,
+            t.Data);
+        var inputGrad = (float[])result[0];
+        var updatedBuffer = (float[])result[1];
+        t.Data = (Variant)updatedBuffer;
+        return inputGrad;
+    }
 
     public void AccumulateGradientsBatch(float[] outputGradBatch, int batchSize, ICnnGradientToken token)
     {
@@ -161,6 +169,6 @@ internal sealed class CnnEncoder : IEncoder
 /// </summary>
 internal sealed class CnnGradientToken : ICnnGradientToken
 {
-    internal Variant Data { get; }
+    internal Variant Data { get; set; }
     internal CnnGradientToken(Variant data) => Data = data;
 }

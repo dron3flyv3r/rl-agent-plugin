@@ -36,6 +36,10 @@ public partial class RLPPOConfig : RLAlgorithmConfig
     [Export(PropertyHint.Range, "0.0,1.0,0.01")] public float EntropyCoefficient { get; set; } = 0.01f;
 
     public override RLAlgorithmKind AlgorithmKind => RLAlgorithmKind.PPO;
+    public override bool SupportsDiscreteActions => true;
+    public override bool SupportsContinuousActions => true;
+    public override bool SupportsMultiAgent => true;
+    public override bool IsOnPolicy => true;
 
     /// <inheritdoc />
     internal override void ApplyTo(RLTrainerConfig config)

@@ -11,8 +11,13 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLLayerNormDef : RLLayerDef
 {
-    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer)
-        => new LayerNormLayer(inputSize);
+    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
+                                               bool useNativeLayers = false)
+    {
+        if (useNativeLayers && NativeLayerSupport.IsAvailable)
+            return new NativeLayerNormLayer(inputSize);
+        return new LayerNormLayer(inputSize);
+    }
 
     public override int GetOutputSize(int inputSize) => inputSize;
 }

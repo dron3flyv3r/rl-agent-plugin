@@ -1,6 +1,7 @@
 #pragma once
 
 #include <godot_cpp/classes/ref_counted.hpp>
+#include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/packed_float32_array.hpp>
 #include <godot_cpp/variant/packed_int32_array.hpp>
 
@@ -48,6 +49,10 @@ public:
     PackedFloat32Array accumulate_gradients(const PackedFloat32Array& output_grad,
                                             PackedFloat32Array        grad_buffer);
 
+    /// Returns [input_grad, updated_grad_buffer].
+    Array accumulate_gradients_with_buffer(const PackedFloat32Array& output_grad,
+                                           PackedFloat32Array        grad_buffer);
+
     /// Applies one Adam step using the accumulated grad_buffer, then the
     /// caller should zero the buffer before the next mini-batch.
     void apply_gradients(const PackedFloat32Array& grad_buffer,
@@ -73,6 +78,9 @@ protected:
     static void _bind_methods();
 
 private:
+    PackedFloat32Array accumulate_gradients_impl(const PackedFloat32Array& output_grad,
+                                                 PackedFloat32Array&       grad_buffer);
+
     // ── Internal layer structs ────────────────────────────────────────────────
 
     struct ConvLayer {

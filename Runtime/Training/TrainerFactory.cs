@@ -42,6 +42,9 @@ public static class TrainerFactory
         {
             RLAlgorithmKind.PPO => new PpoTrainer(config),
             RLAlgorithmKind.SAC => new SacTrainer(config),
+            RLAlgorithmKind.DQN  => new DqnTrainer(config),
+            RLAlgorithmKind.A2C  => new A2cTrainer(config),
+            RLAlgorithmKind.MCTS => new MctsTrainer(config),
             _ => throw new NotSupportedException($"Unknown algorithm: {config.Algorithm}"),
         };
     }

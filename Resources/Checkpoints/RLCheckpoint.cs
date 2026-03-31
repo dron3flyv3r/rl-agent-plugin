@@ -14,6 +14,9 @@ public partial class RLCheckpoint : Resource
     public const string ZipExtension      = ".rlcheckpoint";
     public const string PpoAlgorithm = "PPO";
     public const string SacAlgorithm = "SAC";
+    public const string DqnAlgorithm  = "DQN";
+    public const string A2CAlgorithm  = "A2C";
+    public const string MctsAlgorithm = "MCTS";
 
     [Export] public int FormatVersion { get; set; } = CurrentFormatVersion;
     [Export] public string RunId { get; set; } = string.Empty;

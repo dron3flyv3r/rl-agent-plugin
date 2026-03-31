@@ -9,9 +9,14 @@ internal static class CheckpointMetadataBuilder
     public static RLCheckpoint Apply(RLCheckpoint checkpoint, PolicyGroupConfig config)
     {
         checkpoint.FormatVersion           = RLCheckpoint.CurrentFormatVersion;
-        checkpoint.Algorithm               = config.Algorithm == RLAlgorithmKind.SAC
-            ? RLCheckpoint.SacAlgorithm
-            : RLCheckpoint.PpoAlgorithm;
+        checkpoint.Algorithm = config.Algorithm switch
+        {
+            RLAlgorithmKind.SAC  => RLCheckpoint.SacAlgorithm,
+            RLAlgorithmKind.DQN  => RLCheckpoint.DqnAlgorithm,
+            RLAlgorithmKind.A2C  => RLCheckpoint.A2CAlgorithm,
+            RLAlgorithmKind.MCTS => RLCheckpoint.MctsAlgorithm,
+            _                    => RLCheckpoint.PpoAlgorithm,
+        };
         checkpoint.ObservationSize         = config.ObservationSize;
         checkpoint.DiscreteActionCount     = config.DiscreteActionCount;
         checkpoint.ContinuousActionDimensions = config.ContinuousActionDimensions;
@@ -105,28 +110,47 @@ internal static class CheckpointMetadataBuilder
             ["gamma"]         = trainer.Gamma,
         };
 
-        if (config.Algorithm == RLAlgorithmKind.PPO)
+        switch (config.Algorithm)
         {
-            values["rollout_length"]       = trainer.RolloutLength;
-            values["epochs_per_update"]    = trainer.EpochsPerUpdate;
-            values["ppo_minibatch_size"]   = trainer.PpoMiniBatchSize;
-            values["gae_lambda"]           = trainer.GaeLambda;
-            values["clip_epsilon"]         = trainer.ClipEpsilon;
-            values["max_gradient_norm"]    = trainer.MaxGradientNorm;
-            values["value_loss_coefficient"] = trainer.ValueLossCoefficient;
-            values["use_value_clipping"]   = trainer.UseValueClipping ? 1f : 0f;
-            values["value_clip_epsilon"]   = trainer.ValueClipEpsilon;
-            values["entropy_coefficient"]  = trainer.EntropyCoefficient;
-        }
-        else
-        {
-            values["replay_buffer_capacity"] = trainer.ReplayBufferCapacity;
-            values["sac_batch_size"]         = trainer.SacBatchSize;
-            values["sac_warmup_steps"]       = trainer.SacWarmupSteps;
-            values["sac_tau"]                = trainer.SacTau;
-            values["sac_init_alpha"]         = trainer.SacInitAlpha;
-            values["sac_auto_tune_alpha"]    = trainer.SacAutoTuneAlpha ? 1f : 0f;
-            values["sac_update_every_steps"] = trainer.SacUpdateEverySteps;
+            case RLAlgorithmKind.PPO:
+            case RLAlgorithmKind.A2C:
+                values["rollout_length"]           = trainer.RolloutLength;
+                values["epochs_per_update"]        = trainer.EpochsPerUpdate;
+                values["ppo_minibatch_size"]       = trainer.PpoMiniBatchSize;
+                values["gae_lambda"]               = trainer.GaeLambda;
+                values["clip_epsilon"]             = trainer.ClipEpsilon;
+                values["max_gradient_norm"]        = trainer.MaxGradientNorm;
+                values["value_loss_coefficient"]   = trainer.ValueLossCoefficient;
+                values["use_value_clipping"]       = trainer.UseValueClipping ? 1f : 0f;
+                values["value_clip_epsilon"]       = trainer.ValueClipEpsilon;
+                values["entropy_coefficient"]      = trainer.EntropyCoefficient;
+                break;
+            case RLAlgorithmKind.DQN:
+                values["replay_buffer_capacity"]   = trainer.ReplayBufferCapacity;
+                values["dqn_batch_size"]           = trainer.DqnBatchSize;
+                values["dqn_warmup_steps"]         = trainer.DqnWarmupSteps;
+                values["dqn_epsilon_start"]        = trainer.DqnEpsilonStart;
+                values["dqn_epsilon_end"]          = trainer.DqnEpsilonEnd;
+                values["dqn_epsilon_decay_steps"]  = trainer.DqnEpsilonDecaySteps;
+                values["dqn_target_update_interval"] = trainer.DqnTargetUpdateInterval;
+                values["dqn_use_double"]           = trainer.DqnUseDouble ? 1f : 0f;
+                values["max_gradient_norm"]        = trainer.MaxGradientNorm;
+                break;
+            case RLAlgorithmKind.MCTS:
+                values["mcts_num_simulations"]     = trainer.MctsNumSimulations;
+                values["mcts_max_search_depth"]    = trainer.MctsMaxSearchDepth;
+                values["mcts_rollout_depth"]       = trainer.MctsRolloutDepth;
+                values["mcts_exploration_constant"] = trainer.MctsExplorationConstant;
+                break;
+            default:
+                values["replay_buffer_capacity"]   = trainer.ReplayBufferCapacity;
+                values["sac_batch_size"]           = trainer.SacBatchSize;
+                values["sac_warmup_steps"]         = trainer.SacWarmupSteps;
+                values["sac_tau"]                  = trainer.SacTau;
+                values["sac_init_alpha"]           = trainer.SacInitAlpha;
+                values["sac_auto_tune_alpha"]      = trainer.SacAutoTuneAlpha ? 1f : 0f;
+                values["sac_update_every_steps"]   = trainer.SacUpdateEverySteps;
+                break;
         }
 
         return values;

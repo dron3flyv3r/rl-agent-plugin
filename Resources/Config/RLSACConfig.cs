@@ -46,6 +46,11 @@ public partial class RLSACConfig : RLAlgorithmConfig
     [Export(PropertyHint.Range, "0.0,1.0,0.01")] public float TargetEntropyFraction { get; set; } = 0.5f;
 
     public override RLAlgorithmKind AlgorithmKind => RLAlgorithmKind.SAC;
+    /// <summary>SAC only supports continuous action spaces. Use PPO for discrete actions.</summary>
+    public override bool SupportsDiscreteActions => false;
+    public override bool SupportsContinuousActions => true;
+    public override bool SupportsMultiAgent => true;
+    public override bool IsOnPolicy => false;
 
     /// <inheritdoc />
     internal override void ApplyTo(RLTrainerConfig config)

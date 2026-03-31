@@ -10,7 +10,7 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     private readonly PolicyGroupConfig _config;
     private readonly RLTrainerConfig _trainerConfig;
     private readonly SacNetwork _network;
-    private readonly SacReplayBuffer _buffer;
+    private readonly ReplayBuffer<Transition> _buffer;
     private readonly Random _rng;
     private readonly bool _isContinuous;
 
@@ -82,7 +82,7 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             config.NetworkGraph,
             config.TrainerConfig.LearningRate);
 
-        _buffer = new SacReplayBuffer(config.TrainerConfig.ReplayBufferCapacity);
+        _buffer = new ReplayBuffer<Transition>(config.TrainerConfig.ReplayBufferCapacity);
 
         _logAlpha = MathF.Log(Math.Max(config.TrainerConfig.SacInitAlpha, 1e-8f));
 

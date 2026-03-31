@@ -29,6 +29,26 @@ public partial class RLTrainerConfig
     public float EntropyCoefficient { get; set; } = 0.01f;
     public int StatusWriteIntervalSteps { get; set; } = 32;
 
+    // ── DQN hyperparameters (ignored by other algorithms) ─────────────────
+    public int DqnBatchSize { get; set; } = 64;
+    public int DqnWarmupSteps { get; set; } = 1_000;
+    public float DqnEpsilonStart { get; set; } = 1.0f;
+    public float DqnEpsilonEnd { get; set; } = 0.05f;
+    public int DqnEpsilonDecaySteps { get; set; } = 50_000;
+    public int DqnTargetUpdateInterval { get; set; } = 1_000;
+    public bool DqnUseDouble { get; set; } = true;
+    /// <summary>Dyna-Q: imagined model-based updates per real step (0 = disabled).</summary>
+    public int DynaModelUpdatesPerStep { get; set; } = 0;
+    /// <summary>Dyna-Q: learning rate for the transition model.</summary>
+    public float DynaModelLearningRate { get; set; } = 0.001f;
+
+    // ── MCTS hyperparameters ───────────────────────────────────────────────
+    public int MctsNumSimulations { get; set; } = 50;
+    public int MctsMaxSearchDepth { get; set; } = 20;
+    public int MctsRolloutDepth { get; set; } = 10;
+    public float MctsExplorationConstant { get; set; } = 1.414f;
+    public float MctsGamma { get; set; } = 0.99f;
+
     // ── SAC hyperparameters (ignored by PPO) ───────────────────────────────
     public int ReplayBufferCapacity { get; set; } = 100_000;
     public int SacBatchSize { get; set; } = 256;

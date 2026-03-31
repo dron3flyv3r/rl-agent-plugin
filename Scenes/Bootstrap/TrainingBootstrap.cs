@@ -446,6 +446,57 @@ public partial class TrainingBootstrap : Node
                 return;
             }
 
+            // ── DQN action-space validation ───────────────────────────────────
+            if (algorithm == RLAlgorithmKind.DQN && continuousDims > 0)
+            {
+                GD.PushError(
+                    $"[RL] Group '{groupId}': DQN only supports discrete action spaces. " +
+                    $"This group has {continuousDims} continuous action dimension(s). " +
+                    $"Use SAC or PPO for continuous control.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            if (algorithm == RLAlgorithmKind.DQN && discreteCount <= 0)
+            {
+                GD.PushError($"[RL] Group '{groupId}': DQN requires a discrete action space.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            // ── A2C action-space validation ───────────────────────────────────
+            if (algorithm == RLAlgorithmKind.A2C && discreteCount <= 0 && continuousDims <= 0)
+            {
+                GD.PushError($"[RL] Group '{groupId}': A2C requires at least one discrete or continuous action.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            if (algorithm == RLAlgorithmKind.A2C && discreteCount > 0 && continuousDims > 0)
+            {
+                GD.PushError($"[RL] Group '{groupId}': A2C does not support mixing discrete and continuous actions.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            // ── MCTS action-space validation ──────────────────────────────────
+            if (algorithm == RLAlgorithmKind.MCTS && continuousDims > 0)
+            {
+                GD.PushError(
+                    $"[RL] Group '{groupId}': MCTS only supports discrete action spaces. " +
+                    $"This group has {continuousDims} continuous action dimension(s). " +
+                    $"Use SAC or PPO for continuous control.");
+                GetTree().Quit(1);
+                return;
+            }
+
+            if (algorithm == RLAlgorithmKind.MCTS && discreteCount <= 0)
+            {
+                GD.PushError($"[RL] Group '{groupId}': MCTS requires a discrete action space.");
+                GetTree().Quit(1);
+                return;
+            }
+
             // Custom trainers declare their own action-space constraints; skip built-in checks.
             if (algorithm == RLAlgorithmKind.Custom && string.IsNullOrWhiteSpace(customTrainerId))
             {
@@ -528,6 +579,28 @@ public partial class TrainingBootstrap : Node
             GD.Print($"[RL] Group '{binding.DisplayName}': {groupAgents.Count} agent(s), {algorithm}, obs={obsSize}, discrete={discreteCount}, continuous={continuousDims}");
             GD.Print($"[RL]   Checkpoint: {checkpointPath}");
             GD.Print($"[RL]   Metrics:    {metricsPath}");
+        }
+
+        // ── Multi-agent algorithm advisory ───────────────────────────────────
+        if (_trainersByGroup.Count > 1)
+        {
+            var algorithmNames = string.Join(", ", _groupConfigsByGroup.Values
+                .Select(c => c.Algorithm.ToString())
+                .Distinct());
+            GD.Print($"[RL] Multi-agent scene detected ({_trainersByGroup.Count} policy groups, algorithms: {algorithmNames}).");
+
+            // Warn if any algorithm is discrete-only (DQN) paired with continuous-action groups,
+            // or if the user should consider native MARL algorithms for cooperative tasks.
+            foreach (var (gid, groupCfg) in _groupConfigsByGroup)
+            {
+                if (groupCfg.Algorithm == RLAlgorithmKind.DQN)
+                    GD.Print($"[RL]   Note: Group '{gid}' uses DQN (discrete only). " +
+                             "For cooperative multi-agent with continuous actions, consider SAC or PPO.");
+            }
+
+            GD.Print("[RL]   Tip: For native multi-agent coordination (centralized training), " +
+                     "consider QMIX (discrete cooperative) or MADDPG (continuous) — " +
+                     "both can be added as custom trainers via TrainerFactory.Register().");
         }
 
         // Inform SAC trainers how many parallel envs are running per process so the
@@ -1461,10 +1534,6 @@ public partial class TrainingBootstrap : Node
         }
         else
         {
-            // Auto-detect: find the most recent checkpoint for this group across all runs.
-            // NOTE: we search all runs (not just the current run directory) because each
-            // training session generates a new run ID — the current run directory is empty
-            // at this point and was just created.
             resolvedPath = CheckpointRegistry.GetLatestCheckpointPath(groupId);
         }
 

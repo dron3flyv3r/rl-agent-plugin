@@ -38,6 +38,28 @@ public static class InferencePolicyFactory
         if (_customFactories.TryGetValue(checkpoint.Algorithm, out var customFactory))
             return customFactory(checkpoint, graph);
 
+        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.MctsAlgorithm, StringComparison.OrdinalIgnoreCase))
+            return MctsInferencePolicy.FromCheckpoint(checkpoint);
+
+        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.DqnAlgorithm, StringComparison.OrdinalIgnoreCase))
+        {
+            return new DqnInferencePolicy(
+                checkpoint.ObsSpec?.TotalSize ?? checkpoint.ObservationSize,
+                checkpoint.DiscreteActionCount,
+                graph,
+                stochasticInference);
+        }
+
+        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.A2CAlgorithm, StringComparison.OrdinalIgnoreCase))
+        {
+            return new A2cInferencePolicy(
+                checkpoint.ObsSpec?.TotalSize ?? checkpoint.ObservationSize,
+                checkpoint.DiscreteActionCount,
+                checkpoint.ContinuousActionDimensions,
+                graph,
+                stochasticInference);
+        }
+
         if (string.Equals(checkpoint.Algorithm, RLCheckpoint.SacAlgorithm, StringComparison.OrdinalIgnoreCase))
         {
             return new SacInferencePolicy(

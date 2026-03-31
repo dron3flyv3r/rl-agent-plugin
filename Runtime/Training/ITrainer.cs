@@ -8,6 +8,22 @@ public enum RLAlgorithmKind
     PPO = 0,
     SAC = 1,
     /// <summary>
+    /// Deep Q-Network. Off-policy, discrete actions only.
+    /// Set <see cref="RLDQNConfig.UseDoubleDqn"/> to true to enable Double DQN.
+    /// </summary>
+    DQN = 2,
+    /// <summary>
+    /// Advantage Actor-Critic. On-policy, discrete and continuous actions.
+    /// Simpler than PPO (no clipping), suitable as a baseline.
+    /// </summary>
+    A2C = 3,
+    /// <summary>
+    /// Monte Carlo Tree Search. Pure planning — no learning.
+    /// Requires a registered <see cref="IEnvironmentModel"/> via <c>MctsTrainer.SetEnvironmentModel</c>.
+    /// Discrete action spaces only.
+    /// </summary>
+    MCTS = 4,
+    /// <summary>
     /// Use a custom trainer registered via <see cref="TrainerFactory.Register"/>.
     /// Set <see cref="PolicyGroupConfig.CustomTrainerId"/> to the registered key.
     /// </summary>

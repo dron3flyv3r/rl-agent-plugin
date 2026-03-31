@@ -1,21 +1,59 @@
-# Algorithms: PPO and SAC
+# Algorithms
 
-The plugin ships two algorithms: **PPO** (Proximal Policy Optimization) and **SAC** (Soft Actor-Critic). Choosing between them is the first decision you make when setting up a new training run.
-
+The plugin ships five built-in algorithms. Choosing the right one is the first decision you make when setting up a new training run.
 
 ---
-## Available algorithms:
 
-Algorithm | Action Space | On/Off Policy | Sample Efficiency | Exploration
----|---|---|---|---
-PPO | Discrete + Continuous | On-policy | Moderate | Manual entropy bonus
-SAC | Continuous only | Off-policy | High | Auto-tuned alpha
+## Capability matrix
 
-## PPO vs SAC: Which to choose?
-Algorithm | When to use | When not to use
----|---|---
-PPO | Discrete actions, simple continuous control, dense rewards, fast iteration | Expensive simulations, complex continuous control
-SAC | Complex continuous control, sample efficiency, built-in exploration | Discrete actions, short episodes, memory constraints
+Algorithm | Config resource | Action space | On/Off policy | Multi-agent | Sample efficiency | Exploration
+---|---|---|---|---|---|---
+**PPO** | `RLPPOConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | Moderate | Entropy bonus
+**SAC** | `RLSACConfig` | Continuous only | Off-policy | ✓ (policy sharing) | High | Auto-tuned entropy (α)
+**DQN / DDQN** | `RLDQNConfig` | **Discrete only** | Off-policy | ✓ (policy sharing) | Moderate-High | ε-greedy (decaying)
+**A2C** | `RLA2CConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | Low-Moderate | Entropy bonus
+**MCTS** | `RLMCTSConfig` | **Discrete only** | Planning (no replay) | ✓ (independent) | N/A (no learning) | UCT exploration term
+
+> **Multi-agent note:** All algorithms support the standard policy-sharing model (many agents, one network per group). None implement *centralized* multi-agent coordination (CTDE). If you need cross-agent communication (cooperative teams with joint rewards), consider adding a custom trainer via `TrainerFactory.Register()` — QMIX and MADDPG are natural choices.
+
+---
+
+## Quick selection guide
+
+| Situation | Recommended |
+|-----------|-------------|
+| Discrete actions (menus, movement directions, jump/attack) | **DQN** (simpler) or **PPO** |
+| Complex continuous control (locomotion, robotic arms) | **SAC** |
+| Simple continuous control or mixed discrete+continuous | **PPO** |
+| Fastest-to-converge baseline for a new environment | **A2C** |
+| Limited memory / no replay buffer | **PPO** or **A2C** |
+| Maximum sample efficiency for continuous control | **SAC** |
+| Planning / model-based updates on top of DQN | **DQN** with `DynaModelUpdatesPerStep > 0` |
+| Pure tree-search planning (no neural net, simulable environment) | **MCTS** |
+
+---
+
+## PPO vs A2C
+
+Both are on-policy actor-critic algorithms using the same network architecture. The difference is in the update rule:
+
+- **PPO** clips the policy ratio to prevent large policy updates — more stable but slightly more overhead
+- **A2C** applies vanilla policy gradient without clipping — simpler, faster per-step, but potentially less stable
+
+Start with A2C if you want a quick baseline. Switch to PPO if training is unstable or you want to tune the rollout/epoch count.
+
+## DQN vs SAC
+
+Both are off-policy with replay buffers. The key difference is action space:
+
+- **DQN** supports **discrete actions only**, uses a Q-value table per action, and ε-greedy exploration
+- **SAC** supports **continuous actions only**, uses a stochastic actor and auto-tuned entropy
+
+If your environment has discrete actions and you don't need continuous control, prefer DQN — it is simpler to tune and faster per update. Enable `UseDoubleDqn` (default: true) to reduce overestimation.
+
+### Dyna-Q (planning extension for DQN)
+
+Set `DynaModelUpdatesPerStep > 0` in `RLDQNConfig` to enable Dyna-Q. This trains a small MLP world model alongside the Q-network and uses it to generate *imagined* transitions for additional Q-learning updates — improving sample efficiency without more environment steps. Good values are 5–50 for small/medium environments.
 
 ---
 
@@ -202,3 +240,80 @@ See [configuration.md](configuration.md#rlsacconfig) for full parameter docs.
 - Always normalize observations to approximately `[-1, 1]` using `obs.AddNormalized(value, min, max)`.
 - Use `MaxGradientNorm` (gradient clipping) — the default of 0.5 is usually fine.
 - Watch the **entropy chart** in the dashboard. A steady entropy decline during training is healthy. A sudden drop to near zero means the policy collapsed.
+
+---
+
+## MCTS — Monte Carlo Tree Search
+
+### What it is
+
+MCTS is a **pure planning** algorithm — it does not learn from experience and has no neural network. At each decision point it runs `NumSimulations` simulated rollouts through your environment model to build a search tree, then selects the action with the most visits.
+
+MCTS is best when:
+- The environment is **simulable** (you can implement `IEnvironmentModel` fast enough for hundreds of calls per step).
+- Actions are **discrete**.
+- You want **strong decisions without training time** — MCTS improves with more compute per step, not more experience.
+
+### Setup
+
+1. Implement `IEnvironmentModel` on your scene node (or a helper):
+
+```csharp
+public (float[] nextObservation, float reward, bool done) SimulateStep(float[] obs, int action)
+{
+    // Decode state from obs — no scene changes!
+    var x    = obs[0] * MaxRange;
+    var goal = obs[1] * MaxRange;
+
+    float dx  = action == 0 ? -Speed : Speed;
+    var newX  = Mathf.Clamp(x + dx, -MaxRange, MaxRange);
+
+    var nextObs = new float[] { newX / MaxRange, goal / MaxRange };
+    var reward  = Mathf.Abs(newX - goal) < 0.1f ? 1f : -0.01f;
+    return (nextObs, reward, reward > 0f);
+}
+```
+
+2. Register the model **before training starts** (e.g., `_Ready`):
+
+```csharp
+MctsTrainer.SetEnvironmentModel(this);
+```
+
+3. Assign an `RLMCTSConfig` resource to your policy group's Algorithm field.
+
+### How MCTS works (UCT)
+
+Each simulation follows four phases:
+
+1. **Selection** — walk the existing tree using UCT: `score = Q(s,a) + c × sqrt(ln N(s) / (N(s,a)+1))`
+2. **Expansion** — add one new child node for an unvisited action
+3. **Evaluation** — estimate the leaf value via a random rollout to depth `RolloutDepth`
+4. **Backpropagation** — update visit counts and Q values along the path
+
+After `NumSimulations` simulations, return the action with the **highest visit count** (most robust, not most optimistic).
+
+### MCTS Configuration Quick Reference
+
+See [configuration.md](configuration.md#rlmctsconfig) for full parameter docs.
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `NumSimulations` | 50 | Simulations per action decision — higher = stronger but slower |
+| `MaxSearchDepth` | 20 | Max tree depth during selection phase |
+| `RolloutDepth` | 10 | Random rollout steps for leaf evaluation |
+| `ExplorationConstant` | 1.414 | UCT exploration weight (√2 is the theoretical default) |
+| `Gamma` | 0.99 | Discount factor applied during rollout accumulation |
+
+### Performance tips
+
+- Start with `NumSimulations = 50` and increase if you have CPU budget.
+- Keep `SimulateStep` **allocation-free** — it is called `NumSimulations` times per action.
+- Avoid Godot API calls inside `SimulateStep`; work entirely with floats decoded from the observation.
+- If the environment is stochastic, MCTS still works but needs more simulations to average out noise.
+
+### When not to use MCTS
+
+- Continuous action spaces (not supported).
+- Environments where simulating a step is expensive (physics, RPC calls, etc.) — each action decision runs `NumSimulations` simulations.
+- When you want the agent to **improve over time** — MCTS has no learning. Use DQN with Dyna-Q for a planning+learning hybrid.

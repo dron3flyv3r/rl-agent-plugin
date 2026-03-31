@@ -23,8 +23,11 @@ public abstract partial class RLLayerDef : Resource
     /// <paramref name="optimizer"/> is threaded from <see cref="RLNetworkGraph"/>; add new
     /// <see cref="RLOptimizerKind"/> variants without touching this signature.
     /// Non-parameterised layers (Dropout, Flatten) may ignore it.
+    /// When <paramref name="useNativeLayers"/> is true and the native library is available,
+    /// implementations should return a native-backed layer for better SIMD performance.
     /// </summary>
-    internal abstract NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer);
+    internal abstract NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
+                                               bool useNativeLayers = false);
 
     /// <summary>Returns the output feature size this layer produces for a given input size.</summary>
     public abstract int GetOutputSize(int inputSize);

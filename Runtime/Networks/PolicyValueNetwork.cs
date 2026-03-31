@@ -8,8 +8,8 @@ namespace RlAgentPlugin.Runtime;
 internal sealed class PolicyValueNetwork : IDisposable
 {
     private readonly NetworkLayer[] _trunkLayers;
-    private readonly DenseLayer _policyHead;
-    private readonly DenseLayer _valueHead;
+    private readonly NetworkLayer _policyHead;
+    private readonly NetworkLayer _valueHead;
     private readonly int _continuousActionDims;
 
     // ── Multi-stream support ──────────────────────────────────────────────────
@@ -33,11 +33,16 @@ internal sealed class PolicyValueNetwork : IDisposable
     public PolicyValueNetwork(int observationSize, int actionCount, int continuousActionDims, RLNetworkGraph graph)
     {
         _continuousActionDims = continuousActionDims;
-        _trunkLayers = graph.BuildTrunkLayers(observationSize);
+        var useNativeLayers = graph.ResolveNativeLayerBackend();
+        _trunkLayers = graph.BuildTrunkLayers(observationSize, null, useNativeLayers);
         var lastSize = graph.OutputSize(observationSize);
         var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
-        _policyHead = new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
-        _valueHead  = new DenseLayer(lastSize, 1,             null, graph.Optimizer);
+        _policyHead = useNativeLayers
+            ? new NativeDenseLayer(lastSize, policyOutSize, null, graph.Optimizer)
+            : new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
+        _valueHead = useNativeLayers
+            ? new NativeDenseLayer(lastSize, 1, null, graph.Optimizer)
+            : new DenseLayer(lastSize, 1, null, graph.Optimizer);
     }
 
     /// <summary>
@@ -56,6 +61,7 @@ internal sealed class PolicyValueNetwork : IDisposable
     {
         _continuousActionDims = continuousActionDims;
         _observationSpec = spec;
+        var useNativeLayers = graph.ResolveNativeLayerBackend();
 
         // Build per-stream encoders and compute merged embedding size.
         var encoders = new StreamEncoder[spec.Streams.Count];
@@ -111,11 +117,15 @@ internal sealed class PolicyValueNetwork : IDisposable
         _streamEncoders = encoders;
 
         // Shared trunk and heads take the concatenated embedding as input.
-        _trunkLayers = graph.BuildTrunkLayers(mergedSize);
+        _trunkLayers = graph.BuildTrunkLayers(mergedSize, null, useNativeLayers);
         var lastSize      = graph.OutputSize(mergedSize);
         var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
-        _policyHead = new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
-        _valueHead  = new DenseLayer(lastSize, 1,             null, graph.Optimizer);
+        _policyHead = useNativeLayers
+            ? new NativeDenseLayer(lastSize, policyOutSize, null, graph.Optimizer)
+            : new DenseLayer(lastSize, policyOutSize, null, graph.Optimizer);
+        _valueHead = useNativeLayers
+            ? new NativeDenseLayer(lastSize, 1, null, graph.Optimizer)
+            : new DenseLayer(lastSize, 1, null, graph.Optimizer);
     }
 
     public NetworkInference Infer(float[] observation)

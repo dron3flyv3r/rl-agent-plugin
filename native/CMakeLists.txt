@@ -22,6 +22,8 @@ add_subdirectory(${GODOT_CPP_DIR} godot-cpp)
 add_library(rl_cnn SHARED
     src/register_types.cpp
     src/RlCnnEncoder.cpp
+    src/RlDenseLayer.cpp
+    src/RlLayerNormLayer.cpp
 )
 
 target_include_directories(rl_cnn PRIVATE src/)

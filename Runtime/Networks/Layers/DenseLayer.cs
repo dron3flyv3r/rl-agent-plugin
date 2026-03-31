@@ -8,8 +8,9 @@ namespace RlAgentPlugin.Runtime;
 /// <summary>
 /// Gradient accumulation buffer — weight gradients + bias gradients for one layer.
 /// Used in batch update mode: accumulate across samples, then call ApplyGradients once.
+/// Subclassed by <see cref="NativeGradientBuffer"/> for native-backed layers.
 /// </summary>
-internal sealed class GradientBuffer
+internal class GradientBuffer
 {
     public GradientBuffer(int weightCount, int biasCount)
     {
@@ -20,7 +21,7 @@ internal sealed class GradientBuffer
     public float[] WeightGradients { get; }
     public float[] BiasGradients   { get; }
 
-    public float SumSquares()
+    public virtual float SumSquares()
     {
         var sum = 0f;
         foreach (var g in WeightGradients) sum += g * g;

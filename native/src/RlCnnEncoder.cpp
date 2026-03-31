@@ -1,4 +1,5 @@
 #include "RlCnnEncoder.h"
+#include "rl_simd.h"
 
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/variant/utility_functions.hpp>
@@ -7,73 +8,8 @@
 #include <cassert>
 #include <cmath>
 #include <cstring>
-#include <random>
-
-#ifdef RL_USE_AVX2
-#  include <immintrin.h>
-#endif
 
 using namespace godot;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// SIMD helpers
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Dot product of two float vectors, length K.
-/// Uses AVX2 FMA when available, scalar fallback otherwise.
-static inline float dot_avx(const float* __restrict__ a,
-                             const float* __restrict__ b,
-                             int K)
-{
-    float sum = 0.f;
-    int k = 0;
-
-#ifdef RL_USE_AVX2
-    __m256 acc0 = _mm256_setzero_ps();
-    __m256 acc1 = _mm256_setzero_ps();
-
-    // Unroll ×2 to hide FMA latency
-    for (; k + 16 <= K; k += 16) {
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + k),
-                               _mm256_loadu_ps(b + k), acc0);
-        acc1 = _mm256_fmadd_ps(_mm256_loadu_ps(a + k + 8),
-                               _mm256_loadu_ps(b + k + 8), acc1);
-    }
-    for (; k + 8 <= K; k += 8)
-        acc0 = _mm256_fmadd_ps(_mm256_loadu_ps(a + k),
-                               _mm256_loadu_ps(b + k), acc0);
-
-    // Horizontal reduction
-    __m256 acc = _mm256_add_ps(acc0, acc1);
-    __m128 lo  = _mm256_castps256_ps128(acc);
-    __m128 hi  = _mm256_extractf128_ps(acc, 1);
-    __m128 s4  = _mm_add_ps(lo, hi);
-    __m128 s2  = _mm_add_ps(s4, _mm_movehl_ps(s4, s4));
-    __m128 s1  = _mm_add_ss(s2, _mm_shuffle_ps(s2, s2, 1));
-    sum = _mm_cvtss_f32(s1);
-#endif
-
-    for (; k < K; ++k)
-        sum += a[k] * b[k];
-    return sum;
-}
-
-/// Accumulate: dst[i] += src[i] * scale, length N.
-static inline void axpy(float* __restrict__ dst,
-                        const float* __restrict__ src,
-                        float scale, int N)
-{
-    int i = 0;
-#ifdef RL_USE_AVX2
-    __m256 vs = _mm256_set1_ps(scale);
-    for (; i + 8 <= N; i += 8)
-        _mm256_storeu_ps(dst + i,
-            _mm256_fmadd_ps(_mm256_loadu_ps(src + i), vs,
-                            _mm256_loadu_ps(dst + i)));
-#endif
-    for (; i < N; ++i)
-        dst[i] += src[i] * scale;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // im2col / col2im
@@ -126,79 +62,6 @@ static void col2im(const float* col_grad, float* input_grad,
                     dst[c] += src[c];
             }
         }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Simple PRNG (PCG32) for weight init — avoids std::random overhead
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct Pcg32 {
-    uint64_t state, inc;
-    explicit Pcg32(uint64_t seed, uint64_t seq = 1)
-        : state(0), inc((seq << 1) | 1)
-    { next(); state += seed; next(); }
-
-    uint32_t next() {
-        uint64_t old = state;
-        state = old * 6364136223846793005ULL + inc;
-        uint32_t xsh = (uint32_t)(((old >> 18u) ^ old) >> 27u);
-        uint32_t rot = (uint32_t)(old >> 59u);
-        return (xsh >> rot) | (xsh << ((-rot) & 31));
-    }
-
-    // Box-Muller normal sample
-    float next_gaussian() {
-        // Two uniform [0,1] samples via uint32
-        float u1 = std::max((next() >> 8) * (1.f / (1 << 24)), 1e-7f);
-        float u2  = (next() >> 8) * (1.f / (1 << 24));
-        return std::sqrt(-2.f * std::log(u1)) *
-               std::cos(2.f * 3.14159265358979f * u2);
-    }
-};
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Adam helper
-// ─────────────────────────────────────────────────────────────────────────────
-
-static constexpr float kB1  = 0.9f;
-static constexpr float kB2  = 0.999f;
-static constexpr float kEps = 1e-8f;
-
-static void adam_update(float* params,
-                        float* m, float* v,
-                        const float* grads,
-                        int N, float lr_corrected, float scale)
-{
-    int i = 0;
-#ifdef RL_USE_AVX2
-    __m256 vb1   = _mm256_set1_ps(kB1);
-    __m256 vb1c  = _mm256_set1_ps(1.f - kB1);
-    __m256 vb2   = _mm256_set1_ps(kB2);
-    __m256 vb2c  = _mm256_set1_ps(1.f - kB2);
-    __m256 veps  = _mm256_set1_ps(kEps);
-    __m256 vlr   = _mm256_set1_ps(lr_corrected);
-    __m256 vsc   = _mm256_set1_ps(scale);
-
-    for (; i + 8 <= N; i += 8) {
-        __m256 g  = _mm256_mul_ps(_mm256_loadu_ps(grads + i), vsc);
-        __m256 mi = _mm256_fmadd_ps(vb1c, g, _mm256_mul_ps(vb1, _mm256_loadu_ps(m + i)));
-        __m256 vi = _mm256_fmadd_ps(vb2c, _mm256_mul_ps(g, g),
-                                    _mm256_mul_ps(vb2, _mm256_loadu_ps(v + i)));
-        _mm256_storeu_ps(m + i, mi);
-        _mm256_storeu_ps(v + i, vi);
-        __m256 update = _mm256_div_ps(
-            _mm256_mul_ps(vlr, mi),
-            _mm256_add_ps(_mm256_sqrt_ps(vi), veps));
-        _mm256_storeu_ps(params + i,
-            _mm256_sub_ps(_mm256_loadu_ps(params + i), update));
-    }
-#endif
-    for (; i < N; ++i) {
-        float g  = grads[i] * scale;
-        m[i]     = kB1 * m[i] + (1.f - kB1) * g;
-        v[i]     = kB2 * v[i] + (1.f - kB2) * g * g;
-        params[i] -= lr_corrected * m[i] / (std::sqrt(v[i]) + kEps);
     }
 }
 
@@ -388,9 +251,16 @@ void RlCnnEncoder::initialize(int width, int height, int channels,
                               const PackedInt32Array& strides,
                               int output_size)
 {
+    if (width <= 0 || height <= 0 || channels <= 0 || output_size <= 0) {
+        UtilityFunctions::push_error("[RlCnnEncoder] width, height, channels, and output_size must be > 0.");
+        _ready = false;
+        return;
+    }
+
     int n = filter_counts.size();
     if (n == 0 || n != kernel_sizes.size() || n != strides.size()) {
         UtilityFunctions::push_error("[RlCnnEncoder] filter_counts, kernel_sizes, and strides must be non-empty and equal length.");
+        _ready = false;
         return;
     }
 
@@ -403,9 +273,29 @@ void RlCnnEncoder::initialize(int width, int height, int channels,
         int oc = filter_counts[i];
         int k  = kernel_sizes[i];
         int s  = strides[i];
+        if (oc <= 0 || k <= 0 || s <= 0) {
+            UtilityFunctions::push_error("[RlCnnEncoder] conv layer parameters must be > 0.");
+            _ready = false;
+            _conv.clear();
+            return;
+        }
+        if (prevH < k || prevW < k) {
+            UtilityFunctions::push_error("[RlCnnEncoder] conv kernel larger than current feature map.");
+            _ready = false;
+            _conv.clear();
+            return;
+        }
+
         _conv[i].init(prevH, prevW, prevC, oc, k, s,
                       /*seed=*/uint64_t(42 + i * 137),
                       _grad_buf_size);
+        if (_conv[i].outH <= 0 || _conv[i].outW <= 0) {
+            UtilityFunctions::push_error("[RlCnnEncoder] conv layer produced invalid output shape.");
+            _ready = false;
+            _conv.clear();
+            return;
+        }
+
         _grad_buf_size += oc * k * k * prevC + oc; // filterGrads + biasGrads
         prevH = _conv[i].outH;
         prevW = _conv[i].outW;
@@ -423,6 +313,20 @@ void RlCnnEncoder::initialize(int width, int height, int channels,
 
 PackedFloat32Array RlCnnEncoder::forward(const PackedFloat32Array& input)
 {
+    if (!_ready) {
+        UtilityFunctions::push_error("[RlCnnEncoder] forward called before initialize.");
+        return PackedFloat32Array();
+    }
+    if (_conv.empty()) {
+        UtilityFunctions::push_error("[RlCnnEncoder] forward called with no conv layers configured.");
+        return PackedFloat32Array();
+    }
+    const int expected_input = _conv.front().inH * _conv.front().inW * _conv.front().inC;
+    if (input.size() != expected_input) {
+        UtilityFunctions::push_error("[RlCnnEncoder] forward input size mismatch.");
+        return PackedFloat32Array();
+    }
+
     // Bounce between two temp buffers as activations flow through layers.
     std::vector<float> buf_a(input.ptr(), input.ptr() + input.size());
     std::vector<float> buf_b;
@@ -448,16 +352,34 @@ PackedFloat32Array RlCnnEncoder::forward(const PackedFloat32Array& input)
 
 PackedFloat32Array RlCnnEncoder::create_gradient_buffer() const
 {
+    if (!_ready) {
+        UtilityFunctions::push_error("[RlCnnEncoder] create_gradient_buffer called before initialize.");
+        return PackedFloat32Array();
+    }
+
     PackedFloat32Array buf;
     buf.resize(_grad_buf_size);
     std::memset(buf.ptrw(), 0, _grad_buf_size * sizeof(float));
     return buf;
 }
 
-PackedFloat32Array RlCnnEncoder::accumulate_gradients(
+PackedFloat32Array RlCnnEncoder::accumulate_gradients_impl(
     const PackedFloat32Array& output_grad,
-    PackedFloat32Array        grad_buffer)
+    PackedFloat32Array&       grad_buffer)
 {
+    if (!_ready) {
+        UtilityFunctions::push_error("[RlCnnEncoder] accumulate_gradients called before initialize.");
+        return PackedFloat32Array();
+    }
+    if (output_grad.size() != _proj.outSize) {
+        UtilityFunctions::push_error("[RlCnnEncoder] accumulate_gradients output_grad size mismatch.");
+        return PackedFloat32Array();
+    }
+    if (grad_buffer.size() != _grad_buf_size) {
+        UtilityFunctions::push_error("[RlCnnEncoder] accumulate_gradients grad_buffer size mismatch.");
+        return PackedFloat32Array();
+    }
+
     float*       gb   = grad_buffer.ptrw();
     const float* grad = output_grad.ptr();
 
@@ -470,7 +392,7 @@ PackedFloat32Array RlCnnEncoder::accumulate_gradients(
                      proj_input_grad.data());
 
     // Conv layers backward (reverse order)
-    std::vector<float> cur_grad = proj_input_grad;
+    std::vector<float> cur_grad = std::move(proj_input_grad);
     for (int i = (int)_conv.size() - 1; i >= 0; --i) {
         auto& layer = _conv[i];
         int in_n    = layer.inH * layer.inW * layer.inC;
@@ -490,9 +412,37 @@ PackedFloat32Array RlCnnEncoder::accumulate_gradients(
     return pixel_grad;
 }
 
+PackedFloat32Array RlCnnEncoder::accumulate_gradients(
+    const PackedFloat32Array& output_grad,
+    PackedFloat32Array        grad_buffer)
+{
+    return accumulate_gradients_impl(output_grad, grad_buffer);
+}
+
+Array RlCnnEncoder::accumulate_gradients_with_buffer(
+    const PackedFloat32Array& output_grad,
+    PackedFloat32Array        grad_buffer)
+{
+    PackedFloat32Array input_grad = accumulate_gradients_impl(output_grad, grad_buffer);
+    Array result;
+    result.resize(2);
+    result[0] = input_grad;
+    result[1] = grad_buffer;
+    return result;
+}
+
 void RlCnnEncoder::apply_gradients(const PackedFloat32Array& grad_buffer,
                                    float lr, float grad_scale)
 {
+    if (!_ready) {
+        UtilityFunctions::push_error("[RlCnnEncoder] apply_gradients called before initialize.");
+        return;
+    }
+    if (grad_buffer.size() != _grad_buf_size) {
+        UtilityFunctions::push_error("[RlCnnEncoder] apply_gradients grad_buffer size mismatch.");
+        return;
+    }
+
     const float* gb = grad_buffer.ptr();
 
     for (auto& layer : _conv)
@@ -507,6 +457,9 @@ void RlCnnEncoder::apply_gradients(const PackedFloat32Array& grad_buffer,
 
 float RlCnnEncoder::grad_norm_squared(const PackedFloat32Array& grad_buffer) const
 {
+    if (!_ready || grad_buffer.size() != _grad_buf_size)
+        return 0.f;
+
     const float* gb  = grad_buffer.ptr();
     float        sum = 0.f;
 
@@ -524,6 +477,9 @@ float RlCnnEncoder::grad_norm_squared(const PackedFloat32Array& grad_buffer) con
 
 PackedFloat32Array RlCnnEncoder::get_weights() const
 {
+    if (!_ready)
+        return PackedFloat32Array();
+
     int total = 0;
     for (const auto& l : _conv) total += (int)(l.filters.size() + l.biases.size());
     total += (int)(_proj.weights.size() + _proj.biases.size());
@@ -546,6 +502,9 @@ PackedFloat32Array RlCnnEncoder::get_weights() const
 
 PackedInt32Array RlCnnEncoder::get_shapes() const
 {
+    if (!_ready)
+        return PackedInt32Array();
+
     // Mirrors C# AppendSerialized shape descriptor:
     // [num_conv_layers, outC, kH, kW, inC, stride, ... (per conv), inSize, outSize]
     PackedInt32Array out;
@@ -565,6 +524,19 @@ PackedInt32Array RlCnnEncoder::get_shapes() const
 void RlCnnEncoder::set_weights(const PackedFloat32Array& weights,
                                const PackedInt32Array&   /*shapes*/)
 {
+    if (!_ready) {
+        UtilityFunctions::push_error("[RlCnnEncoder] set_weights called before initialize.");
+        return;
+    }
+
+    int expected = 0;
+    for (const auto& l : _conv) expected += (int)(l.filters.size() + l.biases.size());
+    expected += (int)(_proj.weights.size() + _proj.biases.size());
+    if (weights.size() != expected) {
+        UtilityFunctions::push_error("[RlCnnEncoder] set_weights weight array size mismatch.");
+        return;
+    }
+
     const float* src = weights.ptr();
 
     for (auto& l : _conv) {
@@ -597,6 +569,9 @@ void RlCnnEncoder::_bind_methods()
 
     ClassDB::bind_method(D_METHOD("accumulate_gradients", "output_grad", "grad_buffer"),
         &RlCnnEncoder::accumulate_gradients);
+
+    ClassDB::bind_method(D_METHOD("accumulate_gradients_with_buffer", "output_grad", "grad_buffer"),
+        &RlCnnEncoder::accumulate_gradients_with_buffer);
 
     ClassDB::bind_method(D_METHOD("apply_gradients", "grad_buffer", "lr", "grad_scale"),
         &RlCnnEncoder::apply_gradients);

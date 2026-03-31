@@ -10,7 +10,7 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLPolicyGroupConfig : Resource
 {
-    private Resource? _networkGraph;
+    private Resource? _networkGraph = new RLNetworkGraph();
 
     /// <summary>
     /// Policy group identifier used to match agents via <c>IRLAgent.PolicyGroupId</c>.

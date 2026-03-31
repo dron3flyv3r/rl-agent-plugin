@@ -33,29 +33,40 @@ internal sealed class SacNetwork
     {
         _obsSize   = obsSize;
         _actionDim = actionDim;
+        var useNativeLayers = graph.ResolveNativeLayerBackend();
 
-        _actorTrunk = graph.BuildTrunkLayers(obsSize);
+        _actorTrunk = graph.BuildTrunkLayers(obsSize, null, useNativeLayers);
         var actorTrunkOut = graph.OutputSize(obsSize);
         // Discrete: logits over actions; Continuous: [mean_0..mean_D, log_std_0..log_std_D]
         var actorOutSize = isContinuous ? actionDim * 2 : actionDim;
-        _actorHead = new DenseLayer(actorTrunkOut, actorOutSize, null, graph.Optimizer);
+        _actorHead = useNativeLayers
+            ? new NativeDenseLayer(actorTrunkOut, actorOutSize, null, graph.Optimizer)
+            : new DenseLayer(actorTrunkOut, actorOutSize, null, graph.Optimizer);
 
         var qInputSize = isContinuous ? obsSize + actionDim : obsSize;
         var qOutSize   = isContinuous ? 1 : actionDim;
         var qTrunkOut  = graph.OutputSize(qInputSize);
 
-        _q1Trunk = graph.BuildTrunkLayers(qInputSize);
-        _q1Head  = new DenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer);
+        _q1Trunk = graph.BuildTrunkLayers(qInputSize, null, useNativeLayers);
+        _q1Head = useNativeLayers
+            ? new NativeDenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer)
+            : new DenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer);
 
-        _q2Trunk = graph.BuildTrunkLayers(qInputSize);
-        _q2Head  = new DenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer);
+        _q2Trunk = graph.BuildTrunkLayers(qInputSize, null, useNativeLayers);
+        _q2Head = useNativeLayers
+            ? new NativeDenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer)
+            : new DenseLayer(qTrunkOut, qOutSize, null, graph.Optimizer);
 
         // Target Q-networks — RLOptimizerKind.None: no moment vectors, no weight updates
-        _q1TargetTrunk = graph.BuildTrunkLayers(qInputSize, RLOptimizerKind.None);
-        _q1TargetHead  = new DenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None);
+        _q1TargetTrunk = graph.BuildTrunkLayers(qInputSize, RLOptimizerKind.None, useNativeLayers);
+        _q1TargetHead = useNativeLayers
+            ? new NativeDenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None)
+            : new DenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None);
 
-        _q2TargetTrunk = graph.BuildTrunkLayers(qInputSize, RLOptimizerKind.None);
-        _q2TargetHead  = new DenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None);
+        _q2TargetTrunk = graph.BuildTrunkLayers(qInputSize, RLOptimizerKind.None, useNativeLayers);
+        _q2TargetHead = useNativeLayers
+            ? new NativeDenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None)
+            : new DenseLayer(qTrunkOut, qOutSize, null, RLOptimizerKind.None);
 
         HardCopyToTargets();
     }

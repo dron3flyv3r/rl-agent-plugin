@@ -10,7 +10,8 @@ namespace RlAgentPlugin.Runtime;
 [GlobalClass]
 public partial class RLFlattenLayerDef : RLLayerDef
 {
-    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer)
+    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
+                                               bool useNativeLayers = false)
         => new FlattenLayer(inputSize);
 
     public override int GetOutputSize(int inputSize) => inputSize;

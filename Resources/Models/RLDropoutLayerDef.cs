@@ -13,7 +13,8 @@ public partial class RLDropoutLayerDef : RLLayerDef
 {
     [Export] public float Rate { get; set; } = 0.1f;
 
-    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer)
+    internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
+                                               bool useNativeLayers = false)
         => new DropoutLayer(inputSize, Rate);
 
     public override int GetOutputSize(int inputSize) => inputSize;
