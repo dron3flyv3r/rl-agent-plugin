@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Text.Json;
 using Godot;
 using RlAgentPlugin.Runtime;
 
@@ -23,6 +24,7 @@ public partial class RLDashboard : Control
         public float PolicyLoss;
         public float ValueLoss;
         public float Entropy;
+        public float? SacAlpha;
         public long TotalSteps;
         public long EpisodeCount;
         public string PolicyGroup = "";
@@ -81,6 +83,7 @@ public partial class RLDashboard : Control
     private LineChartPanel? _rewardChart;
     private LineChartPanel? _lossChart;
     private LineChartPanel? _entropyChart;
+    private LineChartPanel? _sacAlphaChart;
     private LineChartPanel? _lengthChart;
     private LineChartPanel? _eloChart;
     private LineChartPanel? _curriculumChart;
@@ -96,6 +99,9 @@ public partial class RLDashboard : Control
     private FileDialog? _checkpointExportDialog;
     private CheckpointHistoryEntry? _pendingExportCheckpointEntry;
 
+    // HPO dashboard panel
+    private HPODashPanel? _hpoPanel;
+
     // ── State ────────────────────────────────────────────────────────────────
     private readonly List<Metric> _metrics = new();
     private readonly List<string> _runIds = new();
@@ -106,6 +112,7 @@ public partial class RLDashboard : Control
     private List<string> _knownPolicyGroups = new();
     private readonly HashSet<string> _rewardSeriesLabels = new();
     private readonly HashSet<string> _entropySeriesLabels = new();
+    private readonly HashSet<string> _sacAlphaSeriesLabels = new();
     private readonly HashSet<string> _lengthSeriesLabels = new();
     private readonly HashSet<string> _lossSeriesLabels = new();
     private double _pollTimer;
@@ -126,6 +133,7 @@ public partial class RLDashboard : Control
     private static readonly Color CValueLoss = new(0.35f, 0.62f, 0.92f);
     private static readonly Color CElo = new(0.92f, 0.42f, 0.78f);
     private static readonly Color CCurriculum = new(0.35f, 0.82f, 0.88f);
+    private static readonly Color CSacAlpha = new(0.90f, 0.78f, 0.28f);
 
     // Palette used to assign one color per policy group (reward / entropy / length charts).
     private static readonly Color[] CPolicyPalette =
@@ -152,26 +160,33 @@ public partial class RLDashboard : Control
 
     public override void _Process(double delta)
     {
-        if (!IsInsideTree() || !Visible) return;
-
-        _pollTimer += delta;
-        if (_pollTimer >= PollInterval)
+        try
         {
-            _pollTimer = 0;
-            PollUpdate();
-        }
+            if (!IsInsideTree() || !Visible) return;
 
-        // Live badge pulse
-        if (_isLive && _liveBadge is not null)
-        {
-            _livePulseAccum += delta;
-            if (_livePulseAccum >= LivePulseInterval)
+            _pollTimer += delta;
+            if (_pollTimer >= PollInterval)
             {
-                _livePulseAccum = 0;
-                _liveBadge.Modulate = _liveBadge.Modulate.A > 0.5f
-                    ? new Color(1, 1, 1, 0.15f)
-                    : new Color(1, 1, 1, 1.0f);
+                _pollTimer = 0;
+                PollUpdate();
             }
+
+            // Live badge pulse
+            if (_isLive && _liveBadge is not null)
+            {
+                _livePulseAccum += delta;
+                if (_livePulseAccum >= LivePulseInterval)
+                {
+                    _livePulseAccum = 0;
+                    _liveBadge.Modulate = _liveBadge.Modulate.A > 0.5f
+                        ? new Color(1, 1, 1, 0.15f)
+                        : new Color(1, 1, 1, 1.0f);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.PushError($"[RLDashboard] Unhandled dashboard update error: {ex.Message}");
         }
     }
 
@@ -215,15 +230,23 @@ public partial class RLDashboard : Control
     // ── UI construction ──────────────────────────────────────────────────────
     private void BuildUi()
     {
+        var scroll = new ScrollContainer();
+        scroll.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        scroll.HorizontalScrollMode = ScrollContainer.ScrollMode.Disabled;
+        scroll.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        scroll.SizeFlagsVertical = SizeFlags.ExpandFill;
+        AddChild(scroll);
+
         var margin = new MarginContainer();
-        margin.SetAnchorsAndOffsetsPreset(LayoutPreset.FullRect);
+        margin.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         margin.AddThemeConstantOverride("margin_left", 10);
         margin.AddThemeConstantOverride("margin_right", 10);
         margin.AddThemeConstantOverride("margin_top", 8);
         margin.AddThemeConstantOverride("margin_bottom", 8);
-        AddChild(margin);
+        scroll.AddChild(margin);
 
         var vbox = new VBoxContainer();
+        vbox.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         vbox.AddThemeConstantOverride("separation", 6);
         margin.AddChild(vbox);
 
@@ -233,6 +256,8 @@ public partial class RLDashboard : Control
         vbox.AddChild(BuildChartGrid());
         vbox.AddChild(new HSeparator());
         vbox.AddChild(BuildCheckpointHistorySection());
+        vbox.AddChild(new HSeparator());
+        vbox.AddChild(BuildHpoSection());
     }
 
     private Control BuildHeader()
@@ -436,22 +461,26 @@ public partial class RLDashboard : Control
     {
         var grid = new GridContainer { Columns = 2 };
         grid.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        grid.SizeFlagsVertical = SizeFlags.ExpandFill;
+        grid.SizeFlagsVertical = SizeFlags.ShrinkBegin;
+        grid.CustomMinimumSize = new Vector2(0, 340);
         grid.AddThemeConstantOverride("h_separation", 4);
         grid.AddThemeConstantOverride("v_separation", 4);
 
         _rewardChart = MakeChart("Episode Reward");
         _lossChart = MakeChart("Policy Loss  /  Value Loss");
         _entropyChart = MakeChart("Entropy");
+        _sacAlphaChart = MakeChart("SAC Alpha");
         _lengthChart = MakeChart("Episode Length");
         _eloChart = MakeChart("Learner Elo");
         _curriculumChart = MakeChart("Curriculum Progress");
+        _sacAlphaChart.Visible = false;  // shown only when SAC alpha metrics are present
         _eloChart.Visible = false;  // shown only during self-play
         _curriculumChart.Visible = false;  // shown only when curriculum is configured
 
         grid.AddChild(_rewardChart);
         grid.AddChild(_lossChart);
         grid.AddChild(_entropyChart);
+        grid.AddChild(_sacAlphaChart);
         grid.AddChild(_lengthChart);
         grid.AddChild(_eloChart);
         grid.AddChild(_curriculumChart);
@@ -464,7 +493,7 @@ public partial class RLDashboard : Control
         var chart = new LineChartPanel { ChartTitle = title };
         chart.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         chart.SizeFlagsVertical = SizeFlags.ExpandFill;
-        chart.CustomMinimumSize = new Vector2(0, 60);
+        chart.CustomMinimumSize = new Vector2(0, 140);
         return chart;
     }
 
@@ -547,6 +576,11 @@ public partial class RLDashboard : Control
         _selectedRunMeta = ReadMeta(ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{runId}"));
         _metricsFileOffsets.Clear();
         _metrics.Clear();
+        if (_hpoPanel is not null)
+        {
+            _hpoPanel.RunIdFilter = runId;
+            _hpoPanel.PollUpdate();
+        }
 
         var idx = _runIds.IndexOf(runId);
         if (idx >= 0) _runDropdown?.Select(idx);
@@ -589,43 +623,61 @@ public partial class RLDashboard : Control
     // ── Polling & data ────────────────────────────────────────────────────────
     private void PollUpdate()
     {
-        // Passive new-run detection.
-        var absDir = ProjectSettings.GlobalizePath("res://RL-Agent-Training/runs");
-        if (System.IO.Directory.Exists(absDir))
+        try
         {
-            var currentCount = System.IO.Directory.GetDirectories(absDir).Length;
-            if (_lastKnownRunCount >= 0 && currentCount != _lastKnownRunCount)
+            // Passive new-run detection.
+            var absDir = ProjectSettings.GlobalizePath("res://RL-Agent-Training/runs");
+            if (System.IO.Directory.Exists(absDir))
             {
-                _lastKnownRunCount = currentCount;
-                DiscoverAndSelectLatestRun();
-                return; // DiscoverAndSelectLatestRun → SelectRun → PollUpdate handles the rest.
+                var currentCount = System.IO.Directory.GetDirectories(absDir).Length;
+                if (_lastKnownRunCount >= 0 && currentCount != _lastKnownRunCount)
+                {
+                    _lastKnownRunCount = currentCount;
+                    DiscoverAndSelectLatestRun();
+                    return; // DiscoverAndSelectLatestRun → SelectRun → PollUpdate handles the rest.
+                }
             }
+
+            if (string.IsNullOrEmpty(_selectedRunId)) return;
+
+            var runDir = $"res://RL-Agent-Training/runs/{_selectedRunId}";
+            var runDirAbs = ProjectSettings.GlobalizePath(runDir);
+            var hasDirectMetrics = false;
+            if (System.IO.Directory.Exists(runDirAbs))
+            {
+                var metricFiles = System.IO.Directory.GetFiles(runDirAbs, "metrics__*.jsonl");
+                hasDirectMetrics = metricFiles.Length > 0;
+                foreach (var file in metricFiles)
+                    ReadNewMetrics(file, absolute: true);
+            }
+            var status = NormalizeStatus(ReadStatusFile($"{runDir}/status.json"));
+            if (!hasDirectMetrics)
+            {
+                var hpoStatus = TryLoadHpoOverviewMetrics(_selectedRunId);
+                if (hpoStatus is not null)
+                    status = NormalizeStatus(hpoStatus);
+            }
+            SetStatusUi(status);
+            RefreshPolicyFilterDropdown();
+            RefreshCharts();
+            RefreshStats(status);
+
+            // Clear live badge once training explicitly finishes.
+            if (_isLive && status.Status is "done" or "stopped")
+            {
+                _isLive = false;
+                HideLiveBadge();
+            }
+
+            if (_checkpointHistoryPanel?.Visible ?? false)
+                RefreshCheckpointHistory();
+
+            _hpoPanel?.PollUpdate();
         }
-
-        if (string.IsNullOrEmpty(_selectedRunId)) return;
-
-        var runDir = $"res://RL-Agent-Training/runs/{_selectedRunId}";
-        var runDirAbs = ProjectSettings.GlobalizePath(runDir);
-        if (System.IO.Directory.Exists(runDirAbs))
+        catch (Exception ex)
         {
-            foreach (var file in System.IO.Directory.GetFiles(runDirAbs, "metrics__*.jsonl"))
-                ReadNewMetrics(file, absolute: true);
+            GD.PushError($"[RLDashboard] PollUpdate failed: {ex.Message}");
         }
-        var status = NormalizeStatus(ReadStatusFile($"{runDir}/status.json"));
-        SetStatusUi(status);
-        RefreshPolicyFilterDropdown();
-        RefreshCharts();
-        RefreshStats(status);
-
-        // Clear live badge once training explicitly finishes.
-        if (_isLive && status.Status is "done" or "stopped")
-        {
-            _isLive = false;
-            HideLiveBadge();
-        }
-
-        if (_checkpointHistoryPanel?.Visible ?? false)
-            RefreshCheckpointHistory();
     }
 
     private void ReadNewMetrics(string path, bool absolute = false)
@@ -669,11 +721,10 @@ public partial class RLDashboard : Control
 
         try
         {
-            var content = System.IO.File.ReadAllText(absPath);
-            var variant = Json.ParseString(content);
-            if (variant.VariantType != Variant.Type.Dictionary) return new RunStatus();
+            using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(absPath));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return new RunStatus();
 
-            var d = variant.AsGodotDictionary();
+            var d = doc.RootElement;
             return new RunStatus
             {
                 Status = GetString(d, "status", "unknown"),
@@ -694,9 +745,10 @@ public partial class RLDashboard : Control
     {
         try
         {
-            var variant = Json.ParseString(line);
-            if (variant.VariantType != Variant.Type.Dictionary) return null;
-            var d = variant.AsGodotDictionary();
+            using var doc = JsonDocument.Parse(line);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object) return null;
+
+            var d = doc.RootElement;
             return new Metric
             {
                 EpisodeReward = GetFloat(d, "episode_reward"),
@@ -704,27 +756,164 @@ public partial class RLDashboard : Control
                 PolicyLoss = GetFloat(d, "policy_loss"),
                 ValueLoss = GetFloat(d, "value_loss"),
                 Entropy = GetFloat(d, "entropy"),
+                SacAlpha = d.TryGetProperty("sac_alpha", out _) ? GetFloat(d, "sac_alpha") : null,
                 TotalSteps = GetLong(d, "total_steps"),
                 EpisodeCount = GetLong(d, "episode_count"),
                 PolicyGroup = GetString(d, "policy_group", ""),
                 OpponentGroup = GetString(d, "opponent_group", ""),
                 OpponentSource = GetString(d, "opponent_source", ""),
                 OpponentCheckpointPath = GetString(d, "opponent_checkpoint_path", ""),
-                OpponentUpdateCount = d.ContainsKey("opponent_update_count")
+                OpponentUpdateCount = d.TryGetProperty("opponent_update_count", out _)
                     ? GetLong(d, "opponent_update_count")
                     : null,
-                LearnerElo = d.ContainsKey("learner_elo") ? GetFloat(d, "learner_elo") : null,
-                PoolWinRate = d.ContainsKey("pool_avg_win_rate") ? GetFloat(d, "pool_avg_win_rate") : null,
-                CurriculumProgress = d.ContainsKey("curriculum_progress") ? GetFloat(d, "curriculum_progress") : null,
-                IsEval = d.ContainsKey("is_eval") && (bool)d["is_eval"],
-                EvalMeanReward = d.ContainsKey("eval_mean_reward") ? GetFloat(d, "eval_mean_reward") : 0f,
-                EvalEpisodes = d.ContainsKey("eval_episodes") ? (int)GetLong(d, "eval_episodes") : 0,
+                LearnerElo = d.TryGetProperty("learner_elo", out _) ? GetFloat(d, "learner_elo") : null,
+                PoolWinRate = d.TryGetProperty("pool_avg_win_rate", out _) ? GetFloat(d, "pool_avg_win_rate") : null,
+                CurriculumProgress = d.TryGetProperty("curriculum_progress", out _) ? GetFloat(d, "curriculum_progress") : null,
+                IsEval = GetBool(d, "is_eval"),
+                EvalMeanReward = d.TryGetProperty("eval_mean_reward", out _) ? GetFloat(d, "eval_mean_reward") : 0f,
+                EvalEpisodes = d.TryGetProperty("eval_episodes", out _) ? (int)GetLong(d, "eval_episodes") : 0,
             };
         }
         catch
         {
             return null;
         }
+    }
+
+    private RunStatus? TryLoadHpoOverviewMetrics(string ownerRunId)
+    {
+        var hpoDirAbs = ProjectSettings.GlobalizePath($"res://RL-Agent-Training/hpo/{ownerRunId}");
+        if (!System.IO.Directory.Exists(hpoDirAbs))
+            return null;
+
+        var stateFiles = System.IO.Directory
+            .GetFiles(hpoDirAbs, "study_state.json", System.IO.SearchOption.AllDirectories)
+            .OrderBy(path => path, StringComparer.Ordinal)
+            .ToArray();
+        if (stateFiles.Length == 0)
+            return null;
+
+        _metrics.Clear();
+        _metricsFileOffsets.Clear();
+
+        int totalTrials = 0;
+        int completeTrials = 0;
+        int runningTrials = 0;
+
+        foreach (var stateFile in stateFiles)
+        {
+            try
+            {
+                var parsed = StudyState.ParseSanitizedJson(System.IO.File.ReadAllText(stateFile));
+                if (parsed.VariantType != Variant.Type.Dictionary)
+                    continue;
+
+                var data = parsed.AsGodotDictionary();
+                var studyName = GetString(data, "study_name", System.IO.Path.GetFileName(System.IO.Path.GetDirectoryName(stateFile) ?? stateFile));
+                if (!data.ContainsKey("trials") || data["trials"].VariantType != Variant.Type.Array)
+                    continue;
+
+                var trialDicts = data["trials"]
+                    .AsGodotArray()
+                    .Where(v => v.VariantType == Variant.Type.Dictionary)
+                    .Select(v => v.AsGodotDictionary())
+                    .OrderBy(d => (int)GetLong(d, "trial_id"))
+                    .ToList();
+
+                foreach (var trial in trialDicts)
+                {
+                    totalTrials++;
+                    var state = GetString(trial, "state", "Pending");
+                    if (string.Equals(state, "Complete", StringComparison.Ordinal))
+                        completeTrials++;
+                    else if (string.Equals(state, "Running", StringComparison.Ordinal)
+                             || string.Equals(state, "Pending", StringComparison.Ordinal))
+                        runningTrials++;
+
+                    var runDir = GetString(trial, "run_dir", "");
+                    if (string.IsNullOrWhiteSpace(runDir))
+                        continue;
+
+                    var trialRunAbs = ProjectSettings.GlobalizePath(runDir);
+                    if (!System.IO.Directory.Exists(trialRunAbs))
+                        continue;
+
+                    var metricFiles = System.IO.Directory
+                        .GetFiles(trialRunAbs, "metrics__*.jsonl", System.IO.SearchOption.TopDirectoryOnly)
+                        .OrderBy(path => path, StringComparer.Ordinal);
+
+                    foreach (var metricFile in metricFiles)
+                    {
+                        var lastLine = ReadLastNonEmptyLine(metricFile);
+                        if (string.IsNullOrWhiteSpace(lastLine))
+                            continue;
+
+                        var metric = ParseMetricLine(lastLine);
+                        if (metric is null)
+                            continue;
+
+                        metric.PolicyGroup = string.IsNullOrWhiteSpace(metric.PolicyGroup)
+                            ? studyName
+                            : stateFiles.Length > 1
+                                ? $"{studyName}:{metric.PolicyGroup}"
+                                : metric.PolicyGroup;
+
+                        _metrics.Add(metric);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                GD.PushWarning($"[RLDashboard] Failed to read HPO study overview from '{stateFile}': {ex.Message}");
+            }
+        }
+
+        if (totalTrials == 0)
+            return null;
+
+        return new RunStatus
+        {
+            Status = runningTrials > 0 ? "running" : "done",
+            EpisodeCount = completeTrials,
+            TotalSteps = _metrics.Count > 0 ? _metrics.Max(m => m.TotalSteps) : 0,
+            Message = $"HPO study overview: {completeTrials}/{totalTrials} trial(s) complete.",
+        };
+    }
+
+    private static string? ReadLastNonEmptyLine(string absPath)
+    {
+        using var stream = new System.IO.FileStream(
+            absPath, System.IO.FileMode.Open, System.IO.FileAccess.Read, System.IO.FileShare.ReadWrite);
+        if (stream.Length == 0)
+            return null;
+
+        var chars = new List<char>();
+        for (long pos = stream.Length - 1; pos >= 0; pos--)
+        {
+            stream.Seek(pos, System.IO.SeekOrigin.Begin);
+            var value = stream.ReadByte();
+            if (value < 0)
+                break;
+
+            var ch = (char)value;
+            if (ch == '\n')
+            {
+                if (chars.Count > 0)
+                    break;
+                continue;
+            }
+
+            if (ch == '\r')
+                continue;
+
+            chars.Add(ch);
+        }
+
+        if (chars.Count == 0)
+            return null;
+
+        chars.Reverse();
+        return new string(chars.ToArray());
     }
 
     // ── Export ────────────────────────────────────────────────────────────────
@@ -841,16 +1030,15 @@ public partial class RLDashboard : Control
 
         try
         {
-            var variant = Json.ParseString(System.IO.File.ReadAllText(metaPath));
-            if (variant.VariantType != Variant.Type.Dictionary) return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
+            using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(metaPath));
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
 
-            var d = variant.AsGodotDictionary();
+            var d = doc.RootElement;
             var displayName = GetString(d, "display_name", "");
-            var agentArr = d.ContainsKey("agent_names") ? d["agent_names"].AsGodotArray() : new Godot.Collections.Array();
-            var groupArr = d.ContainsKey("agent_groups") ? d["agent_groups"].AsGodotArray() : new Godot.Collections.Array();
-            var agentNames = agentArr.Select(v => v.AsString()).ToArray();
-            var agentGroups = groupArr.Select(v => v.AsString()).ToArray();
-            var hasCurriculum = d.ContainsKey("has_curriculum") && d["has_curriculum"].AsBool();
+            var agentNames = GetStringArray(d, "agent_names");
+            var agentGroups = GetStringArray(d, "agent_groups");
+            var hasCurriculum = GetBool(d, "has_curriculum");
 
             return new RunMeta(displayName, agentNames, agentGroups, hasCurriculum);
         }
@@ -1009,8 +1197,10 @@ public partial class RLDashboard : Control
 
         var newRewardLabels = new HashSet<string>();
         var newEntropyLabels = new HashSet<string>();
+        var newSacAlphaLabels = new HashSet<string>();
         var newLengthLabels = new HashSet<string>();
         var newLossLabels = new HashSet<string>();
+        var hasSacAlphaData = false;
 
         for (int i = 0; i < activeGroups.Count; i++)
         {
@@ -1029,6 +1219,16 @@ public partial class RLDashboard : Control
             newRewardLabels.Add(rewardLabel);
             newEntropyLabels.Add(entropyLabel);
             newLengthLabels.Add(lengthLabel);
+
+            var alphaMetrics = groupMetrics.Where(m => m.SacAlpha.HasValue).ToList();
+            if (alphaMetrics.Count > 0)
+            {
+                hasSacAlphaData = true;
+                var alphaLabel = multi ? group : "Alpha";
+                var alphaColor = multi ? color : CSacAlpha;
+                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor, alphaMetrics.Select(m => m.SacAlpha!.Value));
+                newSacAlphaLabels.Add(alphaLabel);
+            }
 
             // Eval series on the reward chart — lighter tint to visually separate from training.
             var evalMetrics = _metrics.Where(m => m.PolicyGroup == group && m.IsEval).ToList();
@@ -1059,6 +1259,8 @@ public partial class RLDashboard : Control
             _rewardChart?.RemoveSeries(stale);
         foreach (var stale in _entropySeriesLabels.Except(newEntropyLabels))
             _entropyChart?.RemoveSeries(stale);
+        foreach (var stale in _sacAlphaSeriesLabels.Except(newSacAlphaLabels))
+            _sacAlphaChart?.RemoveSeries(stale);
         foreach (var stale in _lengthSeriesLabels.Except(newLengthLabels))
             _lengthChart?.RemoveSeries(stale);
         foreach (var stale in _lossSeriesLabels.Except(newLossLabels))
@@ -1066,8 +1268,12 @@ public partial class RLDashboard : Control
 
         _rewardSeriesLabels.Clear(); _rewardSeriesLabels.UnionWith(newRewardLabels);
         _entropySeriesLabels.Clear(); _entropySeriesLabels.UnionWith(newEntropyLabels);
+        _sacAlphaSeriesLabels.Clear(); _sacAlphaSeriesLabels.UnionWith(newSacAlphaLabels);
         _lengthSeriesLabels.Clear(); _lengthSeriesLabels.UnionWith(newLengthLabels);
         _lossSeriesLabels.Clear(); _lossSeriesLabels.UnionWith(newLossLabels);
+
+        if (_sacAlphaChart is not null)
+            _sacAlphaChart.Visible = hasSacAlphaData;
 
         // Elo and curriculum are not split by policy (self-play learner has a single Elo).
         bool hasFilter = !string.IsNullOrEmpty(_selectedPolicyGroupFilter);
@@ -1258,10 +1464,90 @@ public partial class RLDashboard : Control
         return v.VariantType == Variant.Type.String ? v.AsString() : fallback;
     }
 
+    private static float GetFloat(JsonElement d, string key, float fallback = 0f)
+    {
+        if (!d.TryGetProperty(key, out var value))
+            return fallback;
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetDouble(out var n) => (float)n,
+            JsonValueKind.String when float.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var n) => n,
+            JsonValueKind.True => 1f,
+            JsonValueKind.False => 0f,
+            _ => fallback,
+        };
+    }
+
+    private static long GetLong(JsonElement d, string key, long fallback = 0)
+    {
+        if (!d.TryGetProperty(key, out var value))
+            return fallback;
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetInt64(out var n) => n,
+            JsonValueKind.String when long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) => n,
+            JsonValueKind.True => 1L,
+            JsonValueKind.False => 0L,
+            _ => fallback,
+        };
+    }
+
+    private static string GetString(JsonElement d, string key, string fallback)
+    {
+        if (!d.TryGetProperty(key, out var value))
+            return fallback;
+
+        return value.ValueKind == JsonValueKind.String
+            ? value.GetString() ?? fallback
+            : fallback;
+    }
+
+    private static bool GetBool(JsonElement d, string key, bool fallback = false)
+    {
+        if (!d.TryGetProperty(key, out var value))
+            return fallback;
+
+        return value.ValueKind switch
+        {
+            JsonValueKind.True => true,
+            JsonValueKind.False => false,
+            JsonValueKind.Number when value.TryGetInt64(out var n) => n != 0,
+            JsonValueKind.String when bool.TryParse(value.GetString(), out var parsed) => parsed,
+            JsonValueKind.String when long.TryParse(value.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) => n != 0,
+            _ => fallback,
+        };
+    }
+
+    private static string[] GetStringArray(JsonElement d, string key)
+    {
+        if (!d.TryGetProperty(key, out var value) || value.ValueKind != JsonValueKind.Array)
+            return Array.Empty<string>();
+
+        var items = new List<string>();
+        foreach (var entry in value.EnumerateArray())
+        {
+            if (entry.ValueKind == JsonValueKind.String)
+                items.Add(entry.GetString() ?? string.Empty);
+        }
+
+        return items.ToArray();
+    }
+
     private static string FormatSteps(long n) =>
         n >= 1_000_000 ? $"{n / 1_000_000.0:F2}M"
         : n >= 1_000 ? $"{n / 1_000.0:F1}K"
         : n.ToString();
+
+    // ── HPO dashboard panel ───────────────────────────────────────────────────
+
+    private HPODashPanel BuildHpoSection()
+    {
+        _hpoPanel = new HPODashPanel();
+        _hpoPanel.SizeFlagsHorizontal = SizeFlags.ExpandFill;
+        return _hpoPanel;
+    }
 
     // ── Checkpoint history panel ──────────────────────────────────────────────
 

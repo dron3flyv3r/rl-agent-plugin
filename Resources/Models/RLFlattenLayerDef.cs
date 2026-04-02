@@ -8,6 +8,7 @@ namespace RlAgentPlugin.Runtime;
 /// Stage 2: will reshape [C, H, W] image tensors to a 1-D feature vector.
 /// </summary>
 [GlobalClass]
+[Tool]
 public partial class RLFlattenLayerDef : RLLayerDef
 {
     internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,

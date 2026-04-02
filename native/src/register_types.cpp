@@ -1,7 +1,9 @@
 #include "register_types.h"
 #include "RlCnnEncoder.h"
 #include "RlDenseLayer.h"
+#include "RlGruLayer.h"
 #include "RlLayerNormLayer.h"
+#include "RlLstmLayer.h"
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
@@ -13,7 +15,9 @@ void initialize_rl_cnn_module(ModuleInitializationLevel p_level)
         return;
     ClassDB::register_class<RlCnnEncoder>();
     ClassDB::register_class<RlDenseLayer>();
+    ClassDB::register_class<RlGruLayer>();
     ClassDB::register_class<RlLayerNormLayer>();
+    ClassDB::register_class<RlLstmLayer>();
 }
 
 void uninitialize_rl_cnn_module(ModuleInitializationLevel p_level)

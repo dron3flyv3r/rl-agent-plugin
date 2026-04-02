@@ -6,15 +6,17 @@ The plugin ships five built-in algorithms. Choosing the right one is the first d
 
 ## Capability matrix
 
-Algorithm | Config resource | Action space | On/Off policy | Multi-agent | Sample efficiency | Exploration
----|---|---|---|---|---|---
-**PPO** | `RLPPOConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | Moderate | Entropy bonus
-**SAC** | `RLSACConfig` | Continuous only | Off-policy | ✓ (policy sharing) | High | Auto-tuned entropy (α)
-**DQN / DDQN** | `RLDQNConfig` | **Discrete only** | Off-policy | ✓ (policy sharing) | Moderate-High | ε-greedy (decaying)
-**A2C** | `RLA2CConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | Low-Moderate | Entropy bonus
-**MCTS** | `RLMCTSConfig` | **Discrete only** | Planning (no replay) | ✓ (independent) | N/A (no learning) | UCT exploration term
+Algorithm | Config resource | Action space | On/Off policy | Multi-agent | Recurrent LSTM/GRU | Sample efficiency | Exploration
+---|---|---|---|---|---|---|---
+**PPO** | `RLPPOConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | ✓ | Moderate | Entropy bonus
+**SAC** | `RLSACConfig` | Continuous only | Off-policy | ✓ (policy sharing) | No | High | Auto-tuned entropy (α)
+**DQN / DDQN** | `RLDQNConfig` | **Discrete only** | Off-policy | ✓ (policy sharing) | No | Moderate-High | ε-greedy (decaying)
+**A2C** | `RLA2CConfig` | Discrete **or** Continuous | On-policy | ✓ (policy sharing) | ✓ | Low-Moderate | Entropy bonus
+**MCTS** | `RLMCTSConfig` | **Discrete only** | Planning (no replay) | ✓ (independent) | N/A | N/A (no learning) | UCT exploration term
 
 > **Multi-agent note:** All algorithms support the standard policy-sharing model (many agents, one network per group). None implement *centralized* multi-agent coordination (CTDE). If you need cross-agent communication (cooperative teams with joint rewards), consider adding a custom trainer via `TrainerFactory.Register()` — QMIX and MADDPG are natural choices.
+
+> **Recurrent note:** Recurrent state is per agent, not per group. In a shared-policy setup with 10 agents, all 10 agents share weights but each agent keeps its own hidden state.
 
 ---
 
@@ -42,6 +44,8 @@ Both are on-policy actor-critic algorithms using the same network architecture. 
 
 Start with A2C if you want a quick baseline. Switch to PPO if training is unstable or you want to tune the rollout/epoch count.
 
+Both PPO and A2C are also the plugin's recurrent-capable built-in trainers.
+
 ## DQN vs SAC
 
 Both are off-policy with replay buffers. The key difference is action space:
@@ -56,6 +60,40 @@ If your environment has discrete actions and you don't need continuous control, 
 Set `DynaModelUpdatesPerStep > 0` in `RLDQNConfig` to enable Dyna-Q. This trains a small MLP world model alongside the Q-network and uses it to generate *imagined* transitions for additional Q-learning updates — improving sample efficiency without more environment steps. Good values are 5–50 for small/medium environments.
 
 ---
+
+## Recurrent Policies (LSTM / GRU)
+
+The plugin supports recurrent policy trunks through `RLLstmLayerDef` and `RLGruLayerDef`.
+
+What is supported:
+
+- PPO with one recurrent trunk layer
+- A2C with one recurrent trunk layer
+- shared-policy multi-agent rollouts, where each agent has its own hidden state
+- recurrent inference from checkpoints and frozen/self-play policies
+
+What is not supported:
+
+- more than one recurrent layer in the same trunk
+- recurrent DQN
+- recurrent SAC
+
+Why the DQN/SAC limit exists:
+
+- PPO and A2C train directly from fresh on-policy sequences, so truncated BPTT is straightforward.
+- DQN and SAC are off-policy and would need sequence replay, stored hidden states, burn-in, and target-network handling for recurrent updates. That is a different training design, not just a missing forward call.
+
+How to think about shared-policy multi-agent recurrence:
+
+- one policy group = one shared set of weights
+- each agent in that group = its own `h` / `c` state
+- episode reset clears only that agent's recurrent state
+
+Practical recommendation:
+
+- start with one recurrent layer and a hidden size of `32` or `64`
+- use PPO or A2C
+- keep `BpttLength` modest at first, such as `16` or `32`
 
 ## PPO — Proximal Policy Optimization
 
@@ -121,12 +159,15 @@ Key parameters:
 | Parameter | Typical Range | Effect |
 |-----------|--------------|--------|
 | `RolloutLength` | 128–2048 | More data per update = more stable, but slower |
+| `BpttLength` | 8–64 | Truncated sequence length for recurrent PPO/A2C |
 | `EpochsPerUpdate` | 3–10 | More epochs = use data more, risk instability |
 | `LearningRate` | 1e-4 – 3e-3 | Step size for gradient updates |
 | `ClipEpsilon` | 0.1–0.3 | How much policy is allowed to change per update |
 | `EntropyCoefficient` | 0.001–0.05 | Exploration bonus strength |
 | `Gamma` | 0.95–0.999 | How much future rewards are discounted |
 | `GaeLambda` | 0.9–0.99 | GAE advantage blend (higher = more bias, less variance) |
+
+BpttLength applies to recurrent PPO and recurrent A2C, with the same 8–64 practical range.
 
 ---
 

@@ -99,7 +99,8 @@ public static class DistributedProtocol
 
     /// <summary>
     /// Per-transition layout:
-    /// obs_len, obs[], discrete_action, cont_len, cont[], reward, done, next_obs_len, next_obs[], log_prob, value, next_value
+    /// obs_len, obs[], discrete_action, cont_len, cont[], reward, done, next_obs_len, next_obs[],
+    /// log_prob, value, next_value, group_agent_slot, hidden_len, hidden[], cell_len, cell[]
     /// </summary>
     public static byte[] SerializeRollout(IReadOnlyList<DistributedTransition> transitions)
     {
@@ -120,6 +121,13 @@ public static class DistributedProtocol
             bw.Write(t.OldLogProbability);
             bw.Write(t.Value);
             bw.Write(t.NextValue);
+            bw.Write(t.GroupAgentSlot);
+            bw.Write(t.HiddenState?.Length ?? 0);
+            if (t.HiddenState is not null)
+                foreach (var f in t.HiddenState) bw.Write(f);
+            bw.Write(t.CellState?.Length ?? 0);
+            if (t.CellState is not null)
+                foreach (var f in t.CellState) bw.Write(f);
         }
         bw.Flush();
         return ms.ToArray();
@@ -147,6 +155,11 @@ public static class DistributedProtocol
             var nextObsLen = br.ReadInt32();
             ms.Seek(nextObsLen * sizeof(float), SeekOrigin.Current); // skip next_obs
             ms.Seek(sizeof(float) * 3, SeekOrigin.Current);       // skip log_prob, value, next_value
+            ms.Seek(sizeof(int), SeekOrigin.Current);             // skip group_agent_slot
+            var hiddenLen = br.ReadInt32();
+            ms.Seek(hiddenLen * sizeof(float), SeekOrigin.Current);
+            var cellLen = br.ReadInt32();
+            ms.Seek(cellLen * sizeof(float), SeekOrigin.Current);
         }
         return episodes;
     }
@@ -231,9 +244,24 @@ public static class DistributedProtocol
                 OldLogProbability  = br.ReadSingle(),
                 Value              = br.ReadSingle(),
                 NextValue          = br.ReadSingle(),
+                GroupAgentSlot     = br.ReadInt32(),
+                HiddenState        = ReadFloatArray(br),
+                CellState          = ReadFloatArray(br),
             });
         }
         return result;
+    }
+
+    private static float[]? ReadFloatArray(BinaryReader reader)
+    {
+        var len = reader.ReadInt32();
+        if (len <= 0)
+            return null;
+
+        var data = new float[len];
+        for (var i = 0; i < len; i++)
+            data[i] = reader.ReadSingle();
+        return data;
     }
 }
 
@@ -264,4 +292,7 @@ public struct DistributedTransition
     public float   OldLogProbability;
     public float   Value;
     public float   NextValue;
+    public int     GroupAgentSlot;
+    public float[]? HiddenState;
+    public float[]? CellState;
 }

@@ -10,7 +10,7 @@ namespace RlAgentPlugin.Runtime;
 [Tool]
 public partial class RLPolicyGroupConfig : Resource
 {
-    private Resource? _networkGraph = new RLNetworkGraph();
+    private RLNetworkGraph? _networkGraph = new RLNetworkGraph();
 
     /// <summary>
     /// Policy group identifier used to match agents via <c>IRLAgent.PolicyGroupId</c>.
@@ -38,8 +38,8 @@ public partial class RLPolicyGroupConfig : Resource
     /// <summary>
     /// Network architecture resource used when creating a trainable policy.
     /// </summary>
-    [Export(PropertyHint.ResourceType, nameof(RLNetworkGraph))]
-    public Resource? NetworkGraph
+    [Export]
+    public RLNetworkGraph? NetworkGraph
     {
         get => _networkGraph;
         set => _networkGraph = value;

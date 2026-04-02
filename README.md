@@ -4,8 +4,9 @@ Reinforcement learning plugin for Godot 4 with in-editor training, live metrics,
 
 ## Features
 
-- PPO and SAC trainers
+- PPO, A2C, SAC, DQN, and MCTS trainers
 - Shared policy groups across multiple agents
+- Recurrent LSTM and GRU trunk layers for PPO/A2C
 - RL editor tooling: `RLDash` and `RL Setup` dock
 - Curriculum and self-play configuration resources
 - Distributed rollout collection with headless workers
@@ -80,8 +81,8 @@ git -C addons/rl-agent-plugin tag --list
 - Configuration reference: `docs/configuration.md`
 - Architecture: `docs/architecture.md`
 - Algorithms: `docs/algorithms.md`
+- Native build + validation: `docs/build-native.md`
 - Tuning: `docs/tuning.md`
-- Building the native C++ GDExtension: `docs/build-native.md`
 
 ## Companion demo project
 

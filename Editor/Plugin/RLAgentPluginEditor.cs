@@ -14,10 +14,13 @@ public partial class RLAgentPluginEditor : EditorPlugin
     private const string AgentScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent2D.cs";
     private const string Agent3DScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent3D.cs";
     private const string AcademyScriptPath = "res://addons/rl-agent-plugin/Runtime/Core/RLAcademy.cs";
+    private const string HpoOrchestratorScriptPath = "res://addons/rl-agent-plugin/Runtime/HPO/RLHPOOrchestrator.cs";
     private const string DenseLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDenseLayerDef.cs";
     private const string DropoutLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDropoutLayerDef.cs";
     private const string FlattenLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLFlattenLayerDef.cs";
     private const string LayerNormDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLLayerNormDef.cs";
+    private const string LstmLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLLstmLayerDef.cs";
+    private const string GruLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLGruLayerDef.cs";
     private const int QuickTestEpisodeLimit = 5;
     private static readonly string[] RequiredGlobalScriptClasses =
     {
@@ -27,6 +30,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
         nameof(RLDropoutLayerDef),
         nameof(RLFlattenLayerDef),
         nameof(RLLayerNormDef),
+        nameof(RLLstmLayerDef),
+        nameof(RLGruLayerDef),
         nameof(RLConstantSchedule),
         nameof(RLLinearSchedule),
         nameof(RLExponentialSchedule),
@@ -41,6 +46,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
     private Button? _startTrainingButton;
     private Button? _stopTrainingButton;
     private Button? _runInferenceButton;
+    private RLHPOParameterInspectorPlugin? _hpoInspectorPlugin;
+    private RLNetworkGraphInspectorPlugin? _networkGraphInspectorPlugin;
     private TrainingSceneValidation? _lastValidation;
     private bool _launchedTrainingRun;
     private bool _launchedQuickTestRun;
@@ -84,6 +91,12 @@ public partial class RLAgentPluginEditor : EditorPlugin
         EditorInterface.Singleton.GetEditorMainScreen().AddChild(_dashboard);
         _MakeVisible(false);
 
+        _hpoInspectorPlugin = new RLHPOParameterInspectorPlugin();
+        AddInspectorPlugin(_hpoInspectorPlugin);
+
+        _networkGraphInspectorPlugin = new RLNetworkGraphInspectorPlugin();
+        AddInspectorPlugin(_networkGraphInspectorPlugin);
+
         RegisterCustomTypes();
         CallDeferred(nameof(EnsureProjectScriptClassesAreFresh));
         SetProcess(true);
@@ -95,6 +108,18 @@ public partial class RLAgentPluginEditor : EditorPlugin
         SetProcess(false);
         UnregisterCustomTypes();
 
+        if (_hpoInspectorPlugin is not null)
+        {
+            RemoveInspectorPlugin(_hpoInspectorPlugin);
+            _hpoInspectorPlugin = null;
+        }
+
+        if (_networkGraphInspectorPlugin is not null)
+        {
+            RemoveInspectorPlugin(_networkGraphInspectorPlugin);
+            _networkGraphInspectorPlugin = null;
+        }
+
         if (_rlModelFormatLoader is not null)
         {
             ResourceLoader.RemoveResourceFormatLoader(_rlModelFormatLoader);
@@ -103,24 +128,34 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         if (_startTrainingButton is not null)
         {
+            _startTrainingButton.Pressed -= OnStartTrainingRequested;
             RemoveControlFromContainer(CustomControlContainer.Toolbar, _startTrainingButton);
             _startTrainingButton.QueueFree();
+            _startTrainingButton = null;
         }
 
         if (_stopTrainingButton is not null)
         {
+            _stopTrainingButton.Pressed -= OnStopTrainingRequested;
             RemoveControlFromContainer(CustomControlContainer.Toolbar, _stopTrainingButton);
             _stopTrainingButton.QueueFree();
+            _stopTrainingButton = null;
         }
 
         if (_runInferenceButton is not null)
         {
+            _runInferenceButton.Pressed -= OnRunInferenceRequested;
             RemoveControlFromContainer(CustomControlContainer.Toolbar, _runInferenceButton);
             _runInferenceButton.QueueFree();
+            _runInferenceButton = null;
         }
 
         if (_setupDock is not null)
         {
+            _setupDock.StartTrainingRequested -= OnStartTrainingRequested;
+            _setupDock.StopTrainingRequested -= OnStopTrainingRequested;
+            _setupDock.QuickTestRequested -= OnQuickTestRequested;
+            _setupDock.ValidateSceneRequested -= OnValidateSceneRequested;
             _setupDock = null;
         }
 
@@ -128,6 +163,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         {
             RemoveDock(_setupEditorDock);
             _setupEditorDock.QueueFree();
+            _setupEditorDock = null;
         }
 
         if (_dashboard is not null)
@@ -229,6 +265,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
             canValidateScene: hasScenePath && !isPlaying,
             validateSceneTooltip: validateTooltip);
 
+        if (isPlaying)
+        {
+            return;
+        }
+
         // Auto-refresh validation when the edited scene changes.
         if (currentScenePath != _lastAutoScenePath)
         {
@@ -278,10 +319,13 @@ public partial class RLAgentPluginEditor : EditorPlugin
         var agentScript = GD.Load<Script>(AgentScriptPath);
         var agent3DScript = GD.Load<Script>(Agent3DScriptPath);
         var academyScript = GD.Load<Script>(AcademyScriptPath);
+        var hpoOrchestratorScript = GD.Load<Script>(HpoOrchestratorScriptPath);
         var denseLayerDefScript = GD.Load<Script>(DenseLayerDefScriptPath);
         var dropoutLayerDefScript = GD.Load<Script>(DropoutLayerDefScriptPath);
         var flattenLayerDefScript = GD.Load<Script>(FlattenLayerDefScriptPath);
         var layerNormDefScript = GD.Load<Script>(LayerNormDefScriptPath);
+        var lstmLayerDefScript = GD.Load<Script>(LstmLayerDefScriptPath);
+        var gruLayerDefScript = GD.Load<Script>(GruLayerDefScriptPath);
         if (agentScript is not null)
         {
             AddCustomType(nameof(RLAgent2D), nameof(Node2D), agentScript, null);
@@ -295,6 +339,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
         if (academyScript is not null)
         {
             AddCustomType(nameof(RLAcademy), nameof(Node), academyScript, null);
+        }
+
+        if (hpoOrchestratorScript is not null)
+        {
+            AddCustomType(nameof(RLHPOOrchestrator), nameof(Node), hpoOrchestratorScript, null);
         }
 
         if (denseLayerDefScript is not null)
@@ -316,6 +365,16 @@ public partial class RLAgentPluginEditor : EditorPlugin
         {
             AddCustomType(nameof(RLLayerNormDef), nameof(Resource), layerNormDefScript, null);
         }
+
+        if (lstmLayerDefScript is not null)
+        {
+            AddCustomType(nameof(RLLstmLayerDef), nameof(Resource), lstmLayerDefScript, null);
+        }
+
+        if (gruLayerDefScript is not null)
+        {
+            AddCustomType(nameof(RLGruLayerDef), nameof(Resource), gruLayerDefScript, null);
+        }
     }
 
     private void UnregisterCustomTypes()
@@ -323,10 +382,13 @@ public partial class RLAgentPluginEditor : EditorPlugin
         RemoveCustomType(nameof(RLAgent2D));
         RemoveCustomType(nameof(RLAgent3D));
         RemoveCustomType(nameof(RLAcademy));
+        RemoveCustomType(nameof(RLHPOOrchestrator));
         RemoveCustomType(nameof(RLDenseLayerDef));
         RemoveCustomType(nameof(RLDropoutLayerDef));
         RemoveCustomType(nameof(RLFlattenLayerDef));
         RemoveCustomType(nameof(RLLayerNormDef));
+        RemoveCustomType(nameof(RLLstmLayerDef));
+        RemoveCustomType(nameof(RLGruLayerDef));
     }
 
     private void RefreshValidationFromActiveScene()
@@ -411,8 +473,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
         _launchedQuickTestRun = false;
         _activeStatusPath = manifest.StatusPath;
 
-        // Notify dashboard immediately so it can auto-select the run and show LIVE badge.
-        _dashboard?.OnTrainingStarted(manifest.RunId);
+        // Defer the dashboard handoff until after the editor finishes switching scenes.
+        CallDeferred(nameof(NotifyDashboardTrainingStartedDeferred), manifest.RunId);
     }
 
     private void OnQuickTestRequested()
@@ -649,6 +711,16 @@ public partial class RLAgentPluginEditor : EditorPlugin
             validation.InferenceAgentCount > 0 ? $"{validation.InferenceAgentCount} agent(s) configured" : string.Empty);
     }
 
+    private void NotifyDashboardTrainingStartedDeferred(string runId)
+    {
+        if (string.IsNullOrWhiteSpace(runId))
+        {
+            return;
+        }
+
+        _dashboard?.OnTrainingStarted(runId);
+    }
+
     private static string ResolveTrainingScenePath()
     {
         // Prefer the currently open/edited scene.
@@ -857,12 +929,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
                     validation.ExportNames.Add(ResolvePolicyExportName(binding));
                     validation.ExportGroups.Add(binding.SafeGroupId);
 
-                    // PPO: discrete only
-                    if (algorithm == RLAlgorithmKind.PPO && !firstIsDiscrete)
-                    {
-                        validation.Errors.Add($"Group '{groupSummary.GroupId}': PPO requires discrete-only actions.");
-                    }
-
                     if (algorithm == RLAlgorithmKind.PPO && firstActionCount == 0 && firstIsDiscrete)
                     {
                         validation.Errors.Add($"Group '{groupSummary.GroupId}': define at least one discrete action.");
@@ -874,10 +940,51 @@ public partial class RLAgentPluginEditor : EditorPlugin
                         validation.Errors.Add($"Group '{groupSummary.GroupId}': could not infer a non-zero observation size.");
                     }
 
-                    // SAC: no mixing discrete + continuous
-                    if (algorithm == RLAlgorithmKind.SAC && firstActionCount > 0 && firstContinuousDims > 0)
+                    if (algorithm == RLAlgorithmKind.DQN && firstContinuousDims > 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': DQN supports discrete actions only; this group has continuous action dimensions.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.DQN && firstActionCount <= 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': DQN requires at least one discrete action.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.SAC
+                        && firstActionCount >= 0
+                        && firstContinuousDims >= 0
+                        && firstActionCount > 0
+                        && firstContinuousDims > 0)
                     {
                         validation.Errors.Add($"Group '{groupSummary.GroupId}': SAC does not support mixing discrete and continuous actions.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.SAC
+                        && firstActionCount >= 0
+                        && firstContinuousDims >= 0
+                        && firstActionCount > 0
+                        && firstContinuousDims <= 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': SAC currently supports continuous-only actions; this group is discrete.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.SAC
+                        && firstActionCount >= 0
+                        && firstContinuousDims >= 0
+                        && firstActionCount <= 0
+                        && firstContinuousDims <= 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': SAC requires at least one continuous action dimension.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.MCTS && firstContinuousDims > 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': MCTS supports discrete actions only; this group has continuous action dimensions.");
+                    }
+
+                    if (algorithm == RLAlgorithmKind.MCTS && firstActionCount <= 0)
+                    {
+                        validation.Errors.Add($"Group '{groupSummary.GroupId}': MCTS requires at least one discrete action.");
                     }
 
                     // Custom: id must be provided (action-space validation is the trainer's responsibility)
@@ -887,6 +994,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
                         if (string.IsNullOrWhiteSpace(customId))
                             validation.Errors.Add($"Group '{groupSummary.GroupId}': Algorithm is Custom but CustomTrainerId is not set.");
                     }
+
+                    ValidateRecurrentSupport(binding, groupSummary, algorithm, validation);
 
                     // All agents in group must be consistent
                     foreach (var node in groupNodes)
@@ -998,7 +1107,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     private static int ReadAgentContinuousDims(Node node)
     {
-        return node is IRLAgent agent ? agent.GetContinuousActionDimensions() : 0;
+        if (node is IRLAgent agent)
+            return agent.GetContinuousActionDimensions();
+        // C# cast unavailable in editor context (e.g. assembly not yet fully loaded).
+        // Return -1 so callers can skip checks rather than produce false-positive errors.
+        return -1;
     }
 
     private static int ReadAgentObservationSize(Node node, Node root, TrainingSceneValidation validation)
@@ -1111,12 +1224,6 @@ public partial class RLAgentPluginEditor : EditorPlugin
             validation.Errors.Add(
                 $"Agent '{nodePath}': model observation size {checkpoint.ObservationSize} " +
                 $"does not match agent observation size {observationSize}.");
-        }
-
-        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.PpoAlgorithm, StringComparison.OrdinalIgnoreCase)
-            && continuousDims > 0)
-        {
-            validation.Errors.Add($"Agent '{nodePath}': PPO models cannot drive continuous actions.");
         }
 
         if (discreteCount >= 0 && checkpoint.DiscreteActionCount > 0 && checkpoint.DiscreteActionCount != discreteCount)
@@ -1248,6 +1355,52 @@ public partial class RLAgentPluginEditor : EditorPlugin
         }
 
         return learnerCountsByPair.Count == 0 ? 1 : learnerCountsByPair.Values.Max();
+    }
+
+    private static void ValidateRecurrentSupport(
+        ResolvedPolicyGroupBinding binding,
+        PolicyGroupSummary groupSummary,
+        RLAlgorithmKind algorithm,
+        TrainingSceneValidation validation)
+    {
+        var graph = binding.Config?.ResolvedNetworkGraph;
+        if (graph is null)
+            return;
+
+        var recurrentLayerCount = CountRecurrentLayers(graph);
+        if (recurrentLayerCount == 0)
+            return;
+
+        if (!NativeLayerSupport.IsAvailable)
+        {
+            validation.Errors.Add(
+                $"Group '{groupSummary.GroupId}': LSTM/GRU layers require the native GDExtension library, but native layers are not available in the current editor/runtime.");
+        }
+
+        if (recurrentLayerCount > 1)
+        {
+            validation.Errors.Add(
+                $"Group '{groupSummary.GroupId}': only one recurrent trunk layer is currently supported end-to-end. " +
+                $"This network config contains {recurrentLayerCount} recurrent layers.");
+        }
+
+        if (algorithm is RLAlgorithmKind.DQN or RLAlgorithmKind.SAC)
+        {
+            validation.Errors.Add(
+                $"Group '{groupSummary.GroupId}': {algorithm} does not support recurrent LSTM/GRU trunk layers. Use PPO or A2C for recurrent policies.");
+        }
+    }
+
+    private static int CountRecurrentLayers(RLNetworkGraph graph)
+    {
+        var count = 0;
+        foreach (var resource in graph.TrunkLayers)
+        {
+            if (resource is RLLstmLayerDef or RLGruLayerDef)
+                count++;
+        }
+
+        return count;
     }
 
     private static string ResolvePairingDisplayName(RLPolicyPairingConfig pairing)

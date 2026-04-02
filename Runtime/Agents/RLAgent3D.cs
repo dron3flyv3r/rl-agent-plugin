@@ -39,6 +39,12 @@ public partial class RLAgent3D : Node3D, IRLAgent
     public float[] CurrentContinuousActions { get; private set; } = Array.Empty<float>();
     public IReadOnlyList<ObservationSegment> LastObservationSegments => _lastObservationSegments;
 
+    /// <summary>
+    /// Per-agent recurrent hidden state. Managed by the training bootstrap.
+    /// Null for feedforward policies; reset to null on episode end.
+    /// </summary>
+    public RecurrentState? RecurrentHiddenState { get; set; }
+
     /// <summary>Reward accumulated since the last ConsumePendingReward call.</summary>
     public float PendingReward => _pendingReward;
 
@@ -225,6 +231,7 @@ public partial class RLAgent3D : Node3D, IRLAgent
         EpisodeSteps = 0;
         EpisodeReward = 0.0f;
         _episodeRewardComponents.Clear();
+        RecurrentHiddenState = null;
         CurrentActionIndex = GetDiscreteActionCount() > 0 ? 0 : -1;
         CurrentContinuousActions = Array.Empty<float>();
         _pendingReward = 0f;

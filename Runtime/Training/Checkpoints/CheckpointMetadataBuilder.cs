@@ -47,6 +47,22 @@ internal static class CheckpointMetadataBuilder
                 case RLDropoutLayerDef dropout:
                     layers.Add(new RLCheckpointLayer { Type = "dropout", Rate = dropout.Rate });
                     break;
+                case RLLstmLayerDef lstm:
+                    layers.Add(new RLCheckpointLayer
+                    {
+                        Type         = "lstm",
+                        HiddenSize   = lstm.HiddenSize,
+                        GradClipNorm = lstm.GradClipNorm,
+                    });
+                    break;
+                case RLGruLayerDef gru:
+                    layers.Add(new RLCheckpointLayer
+                    {
+                        Type         = "gru",
+                        HiddenSize   = gru.HiddenSize,
+                        GradClipNorm = gru.GradClipNorm,
+                    });
+                    break;
                 case RLLayerNormDef:
                     layers.Add(new RLCheckpointLayer { Type = "layer_norm" });
                     break;

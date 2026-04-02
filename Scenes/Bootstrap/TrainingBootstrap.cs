@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using Godot;
 
@@ -27,6 +28,7 @@ public partial class TrainingBootstrap : Node
     private readonly Dictionary<string, float> _lastValueLossByGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float> _lastEntropyByGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float?> _lastClipFractionByGroup = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, float?> _lastSacAlphaByGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, string> _selfPlayOpponentByGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, float> _historicalOpponentRateByLearnerGroup = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _frozenCheckpointIntervalByGroup = new(StringComparer.Ordinal);
@@ -48,6 +50,8 @@ public partial class TrainingBootstrap : Node
 
     // Per-agent state
     private readonly Dictionary<IRLAgent, AgentRuntimeState> _agentStates = new();
+    private readonly Dictionary<IRLAgent, int> _groupAgentSlotByAgent = new();
+    private readonly Dictionary<string, int> _nextGroupAgentSlotByGroup = new(StringComparer.Ordinal);
 
     private long _totalSteps;
     private RLStoppingConfig? _stoppingConfig;
@@ -88,8 +92,16 @@ public partial class TrainingBootstrap : Node
     private bool _quickTestShowSpyOverlay;
     private string _finalStatus = "stopped";
     private string _finalStatusMessage = "Training ended.";
+    private string _processHeartbeatPath = string.Empty;
+    private double _heartbeatWriteAccum;
+    private bool _exceptionHooksRegistered;
     private readonly List<SubViewport> _viewports = new();
     private int _curriculumSuccessCount;
+    private readonly List<IRLAgent> _hpoPreviewAgents = new();
+    private readonly Dictionary<IRLAgent, int> _hpoPreviewActionCounters = new();
+    private readonly HashSet<IRLAgent> _hpoPreviewPendingResets = new();
+    private readonly RandomNumberGenerator _hpoPreviewRng = new();
+    private int _hpoPreviewActionRepeat = 1;
 
     // Resume-from-checkpoint
     private bool  _resumeFromCheckpoint;
@@ -101,11 +113,25 @@ public partial class TrainingBootstrap : Node
     private bool _isWorkerMode;
     private int  _workerId;
     private int  _masterPort = 7890;
+    private bool _isHpoTrialMode;
+    private int  _hpoMasterPid;
+    private string _hpoMasterHeartbeatPath = string.Empty;
+    private string _hpoMasterHeartbeatToken = string.Empty;
+    private Thread? _hpoMasterHeartbeatThread;
+    private volatile bool _hpoMasterHeartbeatRunning;
+    private volatile bool _hpoMasterPauseRequested;
+    private volatile bool _hpoMasterQuitRequested;
+    private volatile int _hpoMasterMissedChecks;
+    private bool _hpoMasterPauseApplied;
+    private bool _hpoMasterShutdownInitiated;
     private DistributedMaster?    _distributedMaster;
     private DistributedWorker?    _distributedWorker;
     private CanvasLayer?          _trainingOverlay;
     private RLDistributedConfig?  _distributedConfig;
     private int                   _nextWorkerId;
+    private const int HpoMasterCheckIntervalMs = 2_000;
+    private const int HpoMasterMaxMissedChecks = 5;
+    private const long HpoMasterHeartbeatMaxAgeMs = 3_500;
 
     // Self-play bank rescan (workers only): rate-limit disk scans to once per N steps.
     private long _lastSelfPlayBankScanStep = long.MinValue;
@@ -191,12 +217,15 @@ public partial class TrainingBootstrap : Node
     public override void _Ready()
     {
         _selfPlayRng.Randomize();
+        ProcessMode = ProcessModeEnum.Always;
 
-        // Detect distributed worker mode via custom command-line args (passed after --).
+        // Detect distributed worker mode and HPO trial mode via custom command-line args (passed after --).
         var userArgs = OS.GetCmdlineUserArgs();
-        _isWorkerMode = System.Array.Exists(userArgs, a => a == "--rl-worker");
-        _workerId     = ParseDistributedIntArg(userArgs, "--worker-id", 0);
-        _masterPort   = ParseDistributedIntArg(userArgs, "--master-port", 7890);
+        _isWorkerMode  = System.Array.Exists(userArgs, a => a == "--rl-worker");
+        _workerId      = ParseDistributedIntArg(userArgs, "--worker-id", 0);
+        _masterPort    = ParseDistributedIntArg(userArgs, "--master-port", 7890);
+        _isHpoTrialMode = System.Array.Exists(userArgs, a => a == "--rl-hpo-trial");
+        _hpoMasterPid   = ParseDistributedIntArg(userArgs, "--hpo-master-pid", 0);
 
         _manifest = TrainingLaunchManifest.LoadFromUserStorage();
         if (_manifest is null)
@@ -205,6 +234,12 @@ public partial class TrainingBootstrap : Node
             GetTree().Quit(1);
             return;
         }
+
+        _processHeartbeatPath = $"{_manifest.RunDirectory}/process_heartbeat.json";
+        RegisterExceptionHooks();
+
+        _hpoMasterHeartbeatPath = _manifest.HpoMasterHeartbeatPath;
+        _hpoMasterHeartbeatToken = _manifest.HpoMasterHeartbeatToken;
 
         var packedScene = GD.Load<PackedScene>(_manifest.ScenePath);
         if (packedScene is null)
@@ -222,6 +257,26 @@ public partial class TrainingBootstrap : Node
             firstSceneInstance.QueueFree();
             GetTree().Quit(1);
             return;
+        }
+
+        // HPO: if an RLHPOOrchestrator is a direct child of the academy and this is
+        // not a trial subprocess, hand control over to it and exit normal training setup.
+        if (!_isHpoTrialMode)
+        {
+            RLHPOOrchestrator? hpoOrchestrator = null;
+            foreach (var child in firstAcademy.GetChildren())
+            {
+                if (child is RLHPOOrchestrator o) { hpoOrchestrator = o; break; }
+            }
+            if (hpoOrchestrator is not null)
+            {
+                AddChild(firstSceneInstance);
+                InitializeHpoPreview(firstAcademy);
+                firstAcademy.RemoveChild(hpoOrchestrator);
+                AddChild(hpoOrchestrator);
+                hpoOrchestrator.Activate(_manifest, this);
+                return;
+            }
         }
 
         _quickTestMode = _manifest.QuickTestMode;
@@ -320,6 +375,10 @@ public partial class TrainingBootstrap : Node
                 }
 
                 trainerConfig = trainingConfig?.ToTrainerConfig();
+
+                // HPO: apply per-trial overrides written by RLHPOOrchestrator
+                if (trainerConfig is not null && !string.IsNullOrWhiteSpace(_manifest.HpoOverridePath))
+                    HPOConfigApplicator.ApplyOverrides(_manifest.HpoOverridePath, trainerConfig);
 
                 _trainingConfig = trainingConfig;
                 _trainerConfig  = trainerConfig;
@@ -560,6 +619,8 @@ public partial class TrainingBootstrap : Node
 
             _groupConfigsByGroup[groupId] = groupConfig;
             _trainersByGroup[groupId] = TrainerFactory.Create(groupConfig);
+            if (_isWorkerMode && _trainersByGroup[groupId] is SacTrainer workerSacTrainer)
+                workerSacTrainer.StoreTransitionsInReplayBuffer = false;
             _metricsWritersByGroup[groupId] = new RunMetricsWriter(metricsPath, _manifest.StatusPath);
             _episodeCountByGroup[groupId] = 0;
             _workerEpisodeCountByGroup[groupId] = 0;
@@ -568,6 +629,7 @@ public partial class TrainingBootstrap : Node
             _lastValueLossByGroup[groupId] = 0f;
             _lastEntropyByGroup[groupId] = 0f;
             _lastClipFractionByGroup[groupId] = algorithm == RLAlgorithmKind.PPO ? 0f : null;
+            _lastSacAlphaByGroup[groupId] = algorithm == RLAlgorithmKind.SAC ? trainerConfig.SacInitAlpha : null;
 
             // Evaluation state.
             _evalInProgressByGroup[groupId]        = false;
@@ -644,8 +706,6 @@ public partial class TrainingBootstrap : Node
 
                 if (DisplayServer.GetName() != "headless")
                 {
-                    DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
-                    DisplayServer.WindowSetFlag(DisplayServer.WindowFlags.NoFocus, true);
                     Engine.MaxPhysicsStepsPerFrame = 1;  // 1 physics tick per render frame = zero staleness
                     if (firstAcademy.DistributedConfig is { } wCfg)
                     {
@@ -653,6 +713,7 @@ public partial class TrainingBootstrap : Node
                         Engine.MaxFps = Engine.PhysicsTicksPerSecond;
                         Engine.TimeScale = wCfg.WorkerSimulationSpeed;
                     }
+                    ConfigureRendererWorkerWindowAsync();
                     GD.Print($"[RL Distributed] Worker: renderer mode — {Engine.PhysicsTicksPerSecond} physics steps/sec, render capped to match.");
                 }
                 else if (firstAcademy.DistributedConfig is { } wCfg)
@@ -749,6 +810,8 @@ public partial class TrainingBootstrap : Node
                     : string.IsNullOrEmpty(_resumedFromFilename) ? "Training started." : $"Resumed from {_resumedFromFilename}.",
                 resumedFrom: _resumedFromFilename);
         }
+
+        StartHpoMasterHeartbeatIfNeeded();
         GD.Print($"[RL] Run: {_manifest.RunId}");
         if (_quickTestMode)
         {
@@ -762,6 +825,11 @@ public partial class TrainingBootstrap : Node
 
     public override void _PhysicsProcess(double delta)
     {
+        if (_hpoPreviewAgents.Count > 0)
+        {
+            TickHpoPreview();
+        }
+
         if (_academies.Count == 0 || _manifest is null || _statusWriter is null)
         {
             return;
@@ -800,6 +868,7 @@ public partial class TrainingBootstrap : Node
                         _lastValueLossByGroup.GetValueOrDefault(groupId),
                         _lastEntropyByGroup.GetValueOrDefault(groupId),
                         _lastClipFractionByGroup.GetValueOrDefault(groupId),
+                        _lastSacAlphaByGroup.GetValueOrDefault(groupId),
                         metricSteps,
                         localEpisodes + workerEpisodes,
                         s.RewardBreakdown,
@@ -947,6 +1016,7 @@ public partial class TrainingBootstrap : Node
             _lastValueLossByGroup[groupId] = updateStats.ValueLoss;
             _lastEntropyByGroup[groupId] = updateStats.Entropy;
             _lastClipFractionByGroup[groupId] = updateStats.ClipFraction;
+            _lastSacAlphaByGroup[groupId] = updateStats.SacAlpha;
 
             var currentCheckpoint = HasUsableCheckpoint(updateStats.Checkpoint)
                 ? updateStats.Checkpoint
@@ -1010,6 +1080,122 @@ public partial class TrainingBootstrap : Node
         }
     }
 
+    private async void ConfigureRendererWorkerWindowAsync()
+    {
+        // On X11, mutating window flags during _Ready can race native window creation and
+        // trigger BadWindow errors. Wait a couple of frames before touching the worker window.
+        var tree = GetTree();
+        if (tree is null)
+            return;
+
+        await ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+        await ToSignal(tree, SceneTree.SignalName.ProcessFrame);
+
+        if (!IsInsideTree() || DisplayServer.GetName() == "headless")
+            return;
+
+        try
+        {
+            DisplayServer.WindowSetVsyncMode(DisplayServer.VSyncMode.Disabled);
+        }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RL Distributed] Could not disable worker VSync: {ex.Message}");
+        }
+
+        // Skipping NoFocus on X11 is harmless and avoids an intermittent invalid-window error.
+        if (!string.Equals(DisplayServer.GetName(), "x11", StringComparison.OrdinalIgnoreCase))
+        {
+            try
+            {
+                DisplayServer.WindowSetFlag(DisplayServer.WindowFlags.NoFocus, true);
+            }
+            catch (Exception ex)
+            {
+                GD.PushWarning($"[RL Distributed] Could not set worker NoFocus flag: {ex.Message}");
+            }
+        }
+    }
+
+    private void RegisterExceptionHooks()
+    {
+        if (_exceptionHooksRegistered)
+            return;
+
+        AppDomain.CurrentDomain.UnhandledException += OnUnhandledException;
+        TaskScheduler.UnobservedTaskException += OnUnobservedTaskException;
+        _exceptionHooksRegistered = true;
+    }
+
+    private void UnregisterExceptionHooks()
+    {
+        if (!_exceptionHooksRegistered)
+            return;
+
+        AppDomain.CurrentDomain.UnhandledException -= OnUnhandledException;
+        TaskScheduler.UnobservedTaskException -= OnUnobservedTaskException;
+        _exceptionHooksRegistered = false;
+    }
+
+    private void OnUnhandledException(object sender, UnhandledExceptionEventArgs args)
+    {
+        var ex = args.ExceptionObject as Exception;
+        var message = ex?.GetBaseException().Message ?? args.ExceptionObject?.ToString() ?? "unknown";
+        GD.PushError($"[RL] Unhandled exception: {message}");
+        WriteFailureStatus($"Unhandled exception: {message}");
+    }
+
+    private void OnUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs args)
+    {
+        var message = args.Exception.GetBaseException().Message;
+        GD.PushError($"[RL] Unobserved task exception: {message}");
+        WriteFailureStatus($"Unobserved task exception: {message}");
+        args.SetObserved();
+    }
+
+    private void WriteFailureStatus(string message)
+    {
+        if (_isWorkerMode || _manifest is null)
+            return;
+
+        _finalStatus = "failed";
+        _finalStatusMessage = message;
+        try
+        {
+            (_statusWriter ?? new RunMetricsWriter(string.Empty, _manifest.StatusPath))
+                .WriteStatus("failed", _manifest.ScenePath, GetCombinedTotalSteps(), GetCombinedTotalEpisodes(), message,
+                    _distributedMaster?.TotalWorkerEpisodes ?? 0L);
+        }
+        catch
+        {
+            // Best-effort diagnostic path only.
+        }
+    }
+
+    private void WriteProcessHeartbeat(string state)
+    {
+        if (string.IsNullOrWhiteSpace(_processHeartbeatPath))
+            return;
+
+        try
+        {
+            var writer = new RunMetricsWriter(string.Empty, _processHeartbeatPath);
+            var role = _isWorkerMode ? "worker" : "master";
+            var scene = _manifest?.ScenePath ?? string.Empty;
+            var updates = _updateCountByGroup.Values.Sum();
+            writer.WriteStatus(
+                state,
+                scene,
+                GetCombinedTotalSteps(),
+                GetCombinedTotalEpisodes(),
+                $"role={role}; pid={System.Environment.ProcessId}; updates={updates}");
+        }
+        catch
+        {
+            // Best-effort diagnostic path only.
+        }
+    }
+
     // ── Evaluation helpers ────────────────────────────────────────────────────
 
     private List<IRLAgent> GetGroupTrainAgents(string groupId)
@@ -1035,7 +1221,10 @@ public partial class TrainingBootstrap : Node
 
         // Reset all agents in this group to start fresh episodes for evaluation.
         foreach (var agent in GetGroupTrainAgents(groupId))
+        {
             agent.ResetEpisode();
+            agent.RecurrentHiddenState = null;
+        }
 
         GD.Print($"[RL] [{groupId}] Starting evaluation ({_evaluationConfig!.EvaluationEpisodes} episodes).");
     }
@@ -1055,7 +1244,7 @@ public partial class TrainingBootstrap : Node
 
             var done = agent.ConsumeDonePending() || agent.HasReachedEpisodeLimit();
             var obs  = agent.CollectObservationArray();
-            var decision = policy.Predict(obs);
+            var decision = PredictInferencePolicy(policy, agent, obs);
 
             if (decision.DiscreteAction >= 0)
                 agent.ApplyAction(decision.DiscreteAction);
@@ -1067,6 +1256,7 @@ public partial class TrainingBootstrap : Node
                 _evalRewardAccumByGroup[groupId]       += agent.EpisodeReward;
                 _evalLengthAccumByGroup[groupId]       += agent.EpisodeSteps;
                 _evalEpisodesCompletedByGroup[groupId] += 1;
+                agent.RecurrentHiddenState = null;
                 agent.ResetEpisode();
 
                 if (_evalEpisodesCompletedByGroup[groupId] >= evalCfg.EvaluationEpisodes)
@@ -1111,6 +1301,8 @@ public partial class TrainingBootstrap : Node
 
     public override void _ExitTree()
     {
+        UnregisterExceptionHooks();
+        _hpoMasterHeartbeatRunning = false;
         Engine.TimeScale = _previousTimeScale;
         Engine.PhysicsTicksPerSecond = _previousPhysicsTicksPerSecond;
         Engine.MaxPhysicsStepsPerFrame = _previousMaxPhysicsStepsPerFrame;
@@ -1148,6 +1340,165 @@ public partial class TrainingBootstrap : Node
             var workerEpisodes     = _distributedMaster?.TotalWorkerEpisodes ?? 0L;
             _statusWriter?.WriteStatus(_finalStatus, _manifest.ScenePath, finalReportedSteps, totalEpisodes,
                 _finalStatusMessage, workerEpisodes);
+            WriteProcessHeartbeat(_finalStatus);
+        }
+    }
+
+    private void InitializeHpoPreview(RLAcademy previewAcademy)
+    {
+        _hpoPreviewRng.Randomize();
+        _hpoPreviewActionRepeat = Math.Max(1, previewAcademy.ActionRepeat);
+        _hpoPreviewAgents.Clear();
+        _hpoPreviewActionCounters.Clear();
+        _hpoPreviewPendingResets.Clear();
+
+        foreach (var agent in previewAcademy.GetAgents(RLAgentControlMode.Train))
+        {
+            _hpoPreviewAgents.Add(agent);
+            _hpoPreviewActionCounters[agent] = 0;
+            agent.ResetEpisode();
+            SamplePreviewAction(agent);
+        }
+    }
+
+    private void StartHpoMasterHeartbeatIfNeeded()
+    {
+        bool hasPidWatch = _hpoMasterPid > 0;
+        bool hasSessionWatch = !string.IsNullOrWhiteSpace(_hpoMasterHeartbeatPath)
+            && !string.IsNullOrWhiteSpace(_hpoMasterHeartbeatToken);
+        if (!_isHpoTrialMode || (!hasPidWatch && !hasSessionWatch) || _hpoMasterHeartbeatThread is not null)
+            return;
+
+        _hpoMasterHeartbeatRunning = true;
+        _hpoMasterHeartbeatThread = new Thread(HpoMasterHeartbeatLoop)
+        {
+            IsBackground = true,
+            Name = "HpoTrial-Heartbeat",
+        };
+        _hpoMasterHeartbeatThread.Start();
+    }
+
+    private void HpoMasterHeartbeatLoop()
+    {
+        while (_hpoMasterHeartbeatRunning && !_hpoMasterQuitRequested)
+        {
+            Thread.Sleep(HpoMasterCheckIntervalMs);
+
+            bool pidAlive = _hpoMasterPid <= 0 || OS.IsProcessRunning(_hpoMasterPid);
+            bool sessionAlive = IsHpoMasterSessionAlive();
+            if (pidAlive && sessionAlive)
+            {
+                _hpoMasterMissedChecks = 0;
+                continue;
+            }
+
+            _hpoMasterPauseRequested = true;
+            _hpoMasterMissedChecks++;
+            GD.Print($"[HPO] Master unreachable — missed check {_hpoMasterMissedChecks}/{HpoMasterMaxMissedChecks} for PID {_hpoMasterPid}.");
+
+            if (_hpoMasterMissedChecks >= HpoMasterMaxMissedChecks)
+            {
+                _hpoMasterQuitRequested = true;
+                return;
+            }
+        }
+    }
+
+    private bool IsHpoMasterSessionAlive()
+    {
+        if (string.IsNullOrWhiteSpace(_hpoMasterHeartbeatPath)
+            || string.IsNullOrWhiteSpace(_hpoMasterHeartbeatToken))
+            return true;
+
+        if (!FileAccess.FileExists(_hpoMasterHeartbeatPath))
+            return false;
+
+        using var file = FileAccess.Open(_hpoMasterHeartbeatPath, FileAccess.ModeFlags.Read);
+        if (file is null)
+            return false;
+
+        var parsed = Json.ParseString(file.GetAsText());
+        if (parsed.VariantType != Variant.Type.Dictionary)
+            return false;
+
+        var data = parsed.AsGodotDictionary();
+        if (!data.ContainsKey("token") || !string.Equals(data["token"].ToString(), _hpoMasterHeartbeatToken, StringComparison.Ordinal))
+            return false;
+
+        long updatedAtUnixMs = ReadUnixMillis(data, "updated_at_unix_ms");
+        if (updatedAtUnixMs <= 0)
+            return false;
+
+        long ageMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - updatedAtUnixMs;
+        return ageMs <= HpoMasterHeartbeatMaxAgeMs;
+    }
+
+    private void TickHpoPreview()
+    {
+        foreach (var agent in _hpoPreviewAgents)
+        {
+            if (_hpoPreviewPendingResets.Remove(agent))
+            {
+                agent.ResetEpisode();
+                _hpoPreviewActionCounters[agent] = 0;
+                SamplePreviewAction(agent);
+                continue;
+            }
+
+            agent.TickStep();
+            var reward = agent.ConsumePendingReward();
+            var rewardBreakdown = agent.ConsumePendingRewardBreakdown();
+            agent.AccumulateReward(reward, rewardBreakdown);
+
+            var done = agent.ConsumeDonePending() || agent.HasReachedEpisodeLimit();
+            if (done)
+            {
+                _hpoPreviewPendingResets.Add(agent);
+                continue;
+            }
+
+            var nextCount = _hpoPreviewActionCounters.GetValueOrDefault(agent) + 1;
+            if (nextCount >= _hpoPreviewActionRepeat)
+            {
+                _hpoPreviewActionCounters[agent] = 0;
+                SamplePreviewAction(agent);
+            }
+            else
+            {
+                _hpoPreviewActionCounters[agent] = nextCount;
+                ReapplyPreviewAction(agent);
+            }
+        }
+    }
+
+    private void SamplePreviewAction(IRLAgent agent)
+    {
+        var discreteCount = agent.GetDiscreteActionCount();
+        if (discreteCount > 0)
+        {
+            agent.ApplyAction(_hpoPreviewRng.RandiRange(0, discreteCount - 1));
+            return;
+        }
+
+        var continuousDims = agent.GetContinuousActionDimensions();
+        if (continuousDims <= 0)
+            return;
+
+        var actions = new float[continuousDims];
+        for (var i = 0; i < continuousDims; i++)
+            actions[i] = _hpoPreviewRng.RandfRange(-1f, 1f);
+        agent.ApplyAction(actions);
+    }
+
+    private static void ReapplyPreviewAction(IRLAgent agent)
+    {
+        if (agent.CurrentActionIndex >= 0)
+        {
+            agent.ApplyAction(agent.CurrentActionIndex);
+        }
+        else if (agent.CurrentContinuousActions.Length > 0)
+        {
+            agent.ApplyAction(agent.CurrentContinuousActions);
         }
     }
 
@@ -1585,6 +1936,7 @@ public partial class TrainingBootstrap : Node
         {
             foreach (var agent in groupAgents)
             {
+                agent.RecurrentHiddenState = null;
                 agent.ResetEpisode();
             }
         }
@@ -1618,8 +1970,14 @@ public partial class TrainingBootstrap : Node
                 {
                     var agent = groupAgents[index];
                     var observation = observations[index];
-                    var decision = role.FrozenPolicy.Predict(observation);
-                    _agentStates[agent] = CreateAgentState(groupId, environment.Index, observation, decision, isLearningEnabled: false);
+                    var decision = PredictInferencePolicy(role.FrozenPolicy, agent, observation);
+                    _agentStates[agent] = CreateAgentState(
+                        groupId,
+                        environment.Index,
+                        GetOrAssignGroupAgentSlot(groupId, agent),
+                        observation,
+                        decision,
+                        isLearningEnabled: false);
                     ApplyDecision(agent, decision);
                 }
 
@@ -1632,15 +1990,22 @@ public partial class TrainingBootstrap : Node
                 return false;
             }
 
-            var decisions = trainer.SampleActions(VectorBatch.FromRows(observations));
             var entropySum = 0f;
             for (var index = 0; index < groupAgents.Count; index++)
             {
                 var agent = groupAgents[index];
                 var observation = observations[index];
-                var decision = decisions[index];
+                var decision = SampleInitialDecision(trainer, agent, observation, out var hiddenState, out var cellState);
                 entropySum += decision.Entropy;
-                _agentStates[agent] = CreateAgentState(groupId, environment.Index, observation, decision, isLearningEnabled: true);
+                _agentStates[agent] = CreateAgentState(
+                    groupId,
+                    environment.Index,
+                    GetOrAssignGroupAgentSlot(groupId, agent),
+                    observation,
+                    decision,
+                    isLearningEnabled: true,
+                    hiddenState,
+                    cellState);
                 ApplyDecision(agent, decision);
             }
 
@@ -1674,7 +2039,7 @@ public partial class TrainingBootstrap : Node
     {
         var nextValues = EstimateNextValues(trainer, pendingDecisions);
         var decisionObservations = RecordTransitionsAndResetEpisodes(groupId, trainer, pendingDecisions, nextValues);
-        var decisions = trainer.SampleActions(VectorBatch.FromRows(decisionObservations));
+        var decisions = SampleGroupDecisions(trainer, pendingDecisions, decisionObservations);
         ApplyGroupDecisions(groupId, pendingDecisions, decisions, decisionObservations);
     }
 
@@ -1685,6 +2050,16 @@ public partial class TrainingBootstrap : Node
     private void RunParallelGroupDecisions(Dictionary<string, List<PendingDecisionContext>> pendingByGroup)
     {
         var groups = pendingByGroup.ToList();
+        if (groups.Any(group => _trainersByGroup.TryGetValue(group.Key, out var trainer) && trainer.HasRecurrentPolicy))
+        {
+            foreach (var (groupId, pendingDecisions) in groups)
+            {
+                if (_trainersByGroup.TryGetValue(groupId, out var trainer))
+                    ProcessLearningDecisions(groupId, trainer, pendingDecisions);
+            }
+            return;
+        }
+
         var nextValuesPerGroup      = new float[groups.Count][];
         var decisionObsPerGroup     = new List<float[]>[groups.Count];
         var decisionsPerGroup       = new PolicyDecision[groups.Count][];
@@ -1728,9 +2103,24 @@ public partial class TrainingBootstrap : Node
     /// Pure-math: calls <c>EstimateValues</c> for non-terminal agents to obtain bootstrap
     /// values for GAE. Safe to call from any thread; each group has its own trainer instance.
     /// </summary>
-    private static float[] EstimateNextValues(ITrainer trainer, IReadOnlyList<PendingDecisionContext> pendingDecisions)
+    private float[] EstimateNextValues(ITrainer trainer, IReadOnlyList<PendingDecisionContext> pendingDecisions)
     {
         var nextValues = new float[pendingDecisions.Count];
+        if (trainer.HasRecurrentPolicy)
+        {
+            for (var index = 0; index < pendingDecisions.Count; index++)
+            {
+                var pending = pendingDecisions[index];
+                if (pending.Done)
+                    continue;
+
+                pending.Agent.RecurrentHiddenState ??= trainer.CreateZeroRecurrentState();
+                if (pending.Agent.RecurrentHiddenState is { } state)
+                    nextValues[index] = trainer.EstimateValueRecurrent(pending.TransitionObservation, state);
+            }
+            return nextValues;
+        }
+
         var nonTerminalObservations = new List<float[]>();
         var nonTerminalIndices = new List<int>();
 
@@ -1782,6 +2172,9 @@ public partial class TrainingBootstrap : Node
                 OldLogProbability = state.LastLogProbability,
                 Value = state.LastValue,
                 NextValue = pending.Done ? 0f : nextValues[index],
+                HiddenState = state.LastHiddenState is { } h ? (float[])h.Clone() : null,
+                CellState = state.LastCellState is { } c ? (float[])c.Clone() : null,
+                GroupAgentSlot = state.GroupAgentSlot,
             };
             trainer.RecordTransition(transition);
             _totalSteps += 1;
@@ -1822,6 +2215,7 @@ public partial class TrainingBootstrap : Node
                         _lastValueLossByGroup[groupId],
                         _lastEntropyByGroup[groupId],
                         _lastClipFractionByGroup[groupId],
+                        _lastSacAlphaByGroup[groupId],
                         metricSteps,
                         totalEpisodeCount,
                         pending.Agent.GetEpisodeRewardBreakdown(),
@@ -1877,6 +2271,8 @@ public partial class TrainingBootstrap : Node
                 if (!EnsureEnvironmentMatchupsReady(state.EnvironmentIndex))
                     GD.PushWarning($"[RL] Could not refresh self-play matchup for environment {state.EnvironmentIndex}; reusing the previous opponent policy.");
 
+                // Reset recurrent state on episode end so the next episode starts with zeros.
+                pending.Agent.RecurrentHiddenState = null;
                 pending.Agent.ResetEpisode();
                 decisionObservations.Add(pending.Agent.CollectObservationArray());
             }
@@ -1935,6 +2331,7 @@ public partial class TrainingBootstrap : Node
                     GD.PushWarning($"[RL] Could not refresh self-play matchup for environment {state.EnvironmentIndex}; reusing the previous opponent policy.");
                 }
 
+                pending.Agent.RecurrentHiddenState = null;
                 pending.Agent.ResetEpisode();
             }
 
@@ -1948,7 +2345,7 @@ public partial class TrainingBootstrap : Node
             var decisionObservation = pending.Done
                 ? pending.Agent.CollectObservationArray()
                 : pending.TransitionObservation;
-            var decision = role.FrozenPolicy.Predict(decisionObservation);
+            var decision = PredictInferencePolicy(role.FrozenPolicy, pending.Agent, decisionObservation);
             state.LastObservation = decisionObservation;
             state.PendingAction = decision.DiscreteAction;
             state.PendingContinuousActions = decision.ContinuousActions;
@@ -2164,6 +2561,8 @@ public partial class TrainingBootstrap : Node
                 Size = layer.Size,
                 Activation = layer.Activation,
                 Rate = layer.Rate,
+                HiddenSize = layer.HiddenSize,
+                GradClipNorm = layer.GradClipNorm,
             })
             .ToList();
 
@@ -2536,6 +2935,19 @@ public partial class TrainingBootstrap : Node
         }
     }
 
+    private static PolicyDecision PredictInferencePolicy(IInferencePolicy policy, IRLAgent agent, float[] observation)
+    {
+        var zeroState = policy.CreateZeroRecurrentState();
+        if (zeroState is null)
+            return policy.Predict(observation);
+
+        agent.RecurrentHiddenState ??= zeroState;
+        var decision = policy.PredictRecurrent(observation, agent.RecurrentHiddenState);
+        if (decision.RecurrentState is not null)
+            agent.RecurrentHiddenState = decision.RecurrentState;
+        return decision;
+    }
+
     private static void ReapplyAction(IRLAgent agent, AgentRuntimeState state)
     {
         if (state.PendingAction >= 0)
@@ -2548,18 +2960,81 @@ public partial class TrainingBootstrap : Node
         }
     }
 
-    private static AgentRuntimeState CreateAgentState(string groupId, int environmentIndex, float[] observation, PolicyDecision decision, bool isLearningEnabled)
+    private PolicyDecision SampleInitialDecision(
+        ITrainer trainer,
+        IRLAgent agent,
+        float[] observation,
+        out float[]? hiddenState,
+        out float[]? cellState)
+    {
+        hiddenState = null;
+        cellState = null;
+        if (!trainer.HasRecurrentPolicy)
+            return trainer.SampleAction(observation);
+
+        agent.RecurrentHiddenState ??= trainer.CreateZeroRecurrentState();
+        var state = agent.RecurrentHiddenState!;
+        hiddenState = (float[])state.H.Clone();
+        cellState = state.C is { } c ? (float[])c.Clone() : null;
+        return trainer.SampleActionRecurrent(observation, state);
+    }
+
+    private PolicyDecision[] SampleGroupDecisions(
+        ITrainer trainer,
+        IReadOnlyList<PendingDecisionContext> pendingDecisions,
+        IReadOnlyList<float[]> observations)
+    {
+        if (!trainer.HasRecurrentPolicy)
+            return trainer.SampleActions(VectorBatch.FromRows(observations));
+
+        var decisions = new PolicyDecision[observations.Count];
+        for (var index = 0; index < observations.Count; index++)
+        {
+            var pending = pendingDecisions[index];
+            pending.Agent.RecurrentHiddenState ??= trainer.CreateZeroRecurrentState();
+            var recurrentState = pending.Agent.RecurrentHiddenState!;
+            pending.State.LastHiddenState = (float[])recurrentState.H.Clone();
+            pending.State.LastCellState = recurrentState.C is { } c ? (float[])c.Clone() : null;
+            decisions[index] = trainer.SampleActionRecurrent(observations[index], recurrentState);
+        }
+
+        return decisions;
+    }
+
+    private int GetOrAssignGroupAgentSlot(string groupId, IRLAgent agent)
+    {
+        if (_groupAgentSlotByAgent.TryGetValue(agent, out var slot))
+            return slot;
+
+        slot = _nextGroupAgentSlotByGroup.GetValueOrDefault(groupId);
+        _groupAgentSlotByAgent[agent] = slot;
+        _nextGroupAgentSlotByGroup[groupId] = slot + 1;
+        return slot;
+    }
+
+    private static AgentRuntimeState CreateAgentState(
+        string groupId,
+        int environmentIndex,
+        int groupAgentSlot,
+        float[] observation,
+        PolicyDecision decision,
+        bool isLearningEnabled,
+        float[]? hiddenState = null,
+        float[]? cellState = null)
     {
         return new AgentRuntimeState
         {
             GroupId = groupId,
             EnvironmentIndex = environmentIndex,
+            GroupAgentSlot = groupAgentSlot,
             IsLearningEnabled = isLearningEnabled,
             LastObservation = observation,
             PendingAction = decision.DiscreteAction,
             PendingContinuousActions = decision.ContinuousActions,
             LastLogProbability = decision.LogProbability,
             LastValue = decision.Value,
+            LastHiddenState = hiddenState,
+            LastCellState = cellState,
         };
     }
 
@@ -2640,12 +3115,15 @@ public partial class TrainingBootstrap : Node
     {
         public string GroupId { get; init; } = string.Empty;
         public int EnvironmentIndex { get; init; }
+        public int GroupAgentSlot { get; init; }
         public bool IsLearningEnabled { get; init; }
         public float[] LastObservation { get; set; } = Array.Empty<float>();
         public int PendingAction { get; set; } = -1;
         public float[] PendingContinuousActions { get; set; } = Array.Empty<float>();
         public float LastLogProbability { get; set; }
         public float LastValue { get; set; }
+        public float[]? LastHiddenState { get; set; }
+        public float[]? LastCellState { get; set; }
         public float WindowReward { get; set; }
         public int StepsSinceDecision { get; set; }
     }
@@ -2804,6 +3282,27 @@ public partial class TrainingBootstrap : Node
 
     public override void _Process(double delta)
     {
+        if (_hpoMasterPauseRequested && !_hpoMasterPauseApplied)
+        {
+            GetTree().Paused = true;
+            _hpoMasterPauseApplied = true;
+            GD.PushWarning($"[HPO] Master process {_hpoMasterPid} is unreachable. Trial paused while heartbeat retries continue.");
+        }
+
+        if (_hpoMasterQuitRequested)
+        {
+            if (!_hpoMasterShutdownInitiated)
+            {
+                _hpoMasterShutdownInitiated = true;
+                _finalStatus = "failed";
+                _finalStatusMessage =
+                    $"HPO trial lost contact with master process {_hpoMasterPid} after {_hpoMasterMissedChecks} failed heartbeat checks.";
+                GD.PushWarning($"[HPO] {_finalStatusMessage}");
+                GetTree().Quit();
+            }
+            return;
+        }
+
         // Worker self-destruct: master is gone.
         if (_distributedWorker?.ShouldQuit == true)
         {
@@ -2823,16 +3322,21 @@ public partial class TrainingBootstrap : Node
             }
         }
 
+        _heartbeatWriteAccum += delta;
+        if (_heartbeatWriteAccum >= 2.0)
+        {
+            _heartbeatWriteAccum = 0;
+            WriteProcessHeartbeat("running");
+        }
+
         if (_trainingOverlay is null || _distributedMaster is null) return;
 
         var s = _distributedMaster.GetStats(_totalSteps);
 
         // ── Smooth steps counter (rate-only PLL) ─────────────────────────────
-        // The display position is NEVER directly snapped — only the rate is
-        // adjusted.  This means the counter always ticks upward monotonically;
-        // it just runs slightly faster when behind reality and slightly slower
-        // when ahead.  Workers deliver steps in rollout-sized chunks, but those
-        // arrivals only influence the rate, so the display stays perfectly smooth.
+        // The display is intentionally smoothed so worker step arrivals do not appear as big
+        // jumps. But it must never overstate the true total, so after integrating the smoothed
+        // rate we clamp the visible value back to the real cumulative step count.
         var realSteps  = (double)s.TotalSteps;
         var targetRate = (double)s.StepsPerSec;
 
@@ -2864,6 +3368,11 @@ public partial class TrainingBootstrap : Node
             _smoothDisplaySteps  = Math.Max(0.0, _smoothDisplaySteps);
         }
 
+        // Never display more steps than actually exist. Since realSteps is cumulative and
+        // non-decreasing, this clamp cannot make the visible counter move backward below a
+        // previously valid real total.
+        _smoothDisplaySteps = Math.Min(_smoothDisplaySteps, realSteps);
+
         var displaySteps = (long)_smoothDisplaySteps;
 
         // Overlay is always visible when enabled; only the text changes.
@@ -2881,6 +3390,17 @@ public partial class TrainingBootstrap : Node
         // All lines are always present so the panel never reflowsof jumps.
         // Use "---" placeholders for values not yet available.
         var sb = new System.Text.StringBuilder();
+        var rolloutText = "---";
+
+        if (s.ConnectedWorkers > 0)
+        {
+            // Only synchronous on-policy groups have a meaningful "received / expected"
+            // rollout barrier. Off-policy trainers like SAC stream rollout packets freely,
+            // so counts can legitimately exceed the worker count.
+            rolloutText = s.HasOffPolicyTrainers
+                ? $"{s.RolloutsThisRound} msgs"
+                : $"{s.RolloutsThisRound} / {s.ConnectedWorkers * Math.Max(1, s.OnPolicyGroupCount)}";
+        }
 
         // ── Title / status (fixed 1 line) ─────────────────────────────────────
         string status;
@@ -2895,7 +3415,7 @@ public partial class TrainingBootstrap : Node
 
         // ── Connection (fixed 2 lines) ────────────────────────────────────────
         sb.AppendLine($"  Workers         {s.ConnectedWorkers,2} / {s.ExpectedWorkers,-2}");
-        sb.AppendLine($"  Rollouts recv   {(s.ConnectedWorkers > 0 ? $"{s.RolloutsThisRound} / {s.ConnectedWorkers}" : "---")}");
+        sb.AppendLine($"  Rollouts recv   {rolloutText}");
         sb.AppendLine();
 
         // ── Progress (fixed 3 lines) ──────────────────────────────────────────
@@ -2990,5 +3510,19 @@ public partial class TrainingBootstrap : Node
                 return v;
         }
         return defaultValue;
+    }
+
+    private static long ReadUnixMillis(Godot.Collections.Dictionary dictionary, string key)
+    {
+        if (!dictionary.ContainsKey(key))
+            return 0L;
+
+        var value = dictionary[key];
+        return value.VariantType switch
+        {
+            Variant.Type.Int => value.AsInt64(),
+            Variant.Type.Float => (long)value.AsDouble(),
+            _ => 0L,
+        };
     }
 }

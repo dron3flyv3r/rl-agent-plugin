@@ -7,8 +7,15 @@ If you need to rebuild it â€” or produce a binary for **Windows** or **macOS** â
 
 ## What This Extension Does
 
-`rl_cnn` is the CPU-side CNN encoder used for image observations.
-When Vulkan is available, a Godot-native GPU path takes over during PPO training, but the CPU encoder (this library) is always required for rollout inference.
+`rl_cnn` contains the native layers exposed through GDExtension:
+
+- `RlDenseLayer`
+- `RlLayerNormLayer`
+- `RlCnnEncoder`
+- `RlLstmLayer`
+- `RlGruLayer`
+
+When Vulkan is available, a Godot-native GPU path can take over for PPO image-encoder training, but this native library is still the source of the CPU-side CNN and recurrent layers.
 
 ---
 
@@ -198,6 +205,22 @@ For most users, building natively on the target OS is simpler.
 1. Confirm `native/bin/` contains the correct library for your OS.
 2. Open Godot and rebuild the project once (`Alt+B`) so the editor reloads the extension.
 3. If the extension fails to load, check the Godot console for `GDExtension` error messages and confirm your platform and architecture match what the `.gdextension` file declares.
+
+### Optional runtime validation
+
+The companion demo project includes a native layer validation scene at:
+
+```text
+demo/00 test/TestScene.tscn
+```
+
+From the game-project root you can run it headlessly with:
+
+```bash
+godot-mono --headless --path . demo/00\ test/TestScene.tscn
+```
+
+That scene validates native class availability plus Dense, LayerNorm, CNN, LSTM, and GRU behavior, then exits with a non-zero code on failure.
 
 ---
 

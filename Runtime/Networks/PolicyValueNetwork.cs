@@ -11,6 +11,7 @@ internal sealed class PolicyValueNetwork : IDisposable
     private readonly NetworkLayer _policyHead;
     private readonly NetworkLayer _valueHead;
     private readonly int _continuousActionDims;
+    private readonly int _recurrentLayerIndex;
 
     // ── Multi-stream support ──────────────────────────────────────────────────
     // Non-null when constructed with an ObservationSpec that has >1 streams or
@@ -35,6 +36,7 @@ internal sealed class PolicyValueNetwork : IDisposable
         _continuousActionDims = continuousActionDims;
         var useNativeLayers = graph.ResolveNativeLayerBackend();
         _trunkLayers = graph.BuildTrunkLayers(observationSize, null, useNativeLayers);
+        _recurrentLayerIndex = FindRecurrentLayerIndex(_trunkLayers);
         var lastSize = graph.OutputSize(observationSize);
         var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
         _policyHead = useNativeLayers
@@ -118,6 +120,7 @@ internal sealed class PolicyValueNetwork : IDisposable
 
         // Shared trunk and heads take the concatenated embedding as input.
         _trunkLayers = graph.BuildTrunkLayers(mergedSize, null, useNativeLayers);
+        _recurrentLayerIndex = FindRecurrentLayerIndex(_trunkLayers);
         var lastSize      = graph.OutputSize(mergedSize);
         var policyOutSize = continuousActionDims > 0 ? continuousActionDims * 2 : actionCount;
         _policyHead = useNativeLayers
@@ -126,6 +129,21 @@ internal sealed class PolicyValueNetwork : IDisposable
         _valueHead = useNativeLayers
             ? new NativeDenseLayer(lastSize, 1, null, graph.Optimizer)
             : new DenseLayer(lastSize, 1, null, graph.Optimizer);
+    }
+
+    public bool HasRecurrentTrunk => _recurrentLayerIndex >= 0;
+
+    public RecurrentState CreateZeroRecurrentState()
+    {
+        if (!HasRecurrentTrunk)
+            throw new InvalidOperationException("[PolicyValueNetwork] CreateZeroRecurrentState requires a recurrent trunk layer.");
+
+        return _trunkLayers[_recurrentLayerIndex] switch
+        {
+            NativeLstmLayer lstm => RecurrentState.ZerosLstm(lstm.OutputSize),
+            NativeGruLayer gru   => RecurrentState.ZerosGru(gru.OutputSize),
+            _ => throw new InvalidOperationException("[PolicyValueNetwork] Recurrent trunk layer is not backed by a supported native implementation."),
+        };
     }
 
     public NetworkInference Infer(float[] observation)
@@ -140,6 +158,35 @@ internal sealed class PolicyValueNetwork : IDisposable
         RLProfiler.End("Infer", t);
 
         return new NetworkInference { Logits = logits, Value = value[0] };
+    }
+
+    public NetworkInference InferRecurrent(float[] observation, RecurrentState state)
+    {
+        if (!HasRecurrentTrunk)
+        {
+            var inference = Infer(observation);
+            return new NetworkInference
+            {
+                Logits = inference.Logits,
+                Value = inference.Value,
+                State = state,
+            };
+        }
+
+        var t = RLProfiler.Begin();
+        var x = _streamEncoders is not null ? EncodeStreams(observation) : observation;
+        for (var layerIndex = 0; layerIndex < _trunkLayers.Length; layerIndex++)
+        {
+            var layer = _trunkLayers[layerIndex];
+            x = layerIndex == _recurrentLayerIndex
+                ? layer.ForwardRecurrent(x, state)
+                : layer.Forward(x);
+        }
+
+        var logits = _policyHead.Forward(x);
+        var value  = _valueHead.Forward(x);
+        RLProfiler.End("InferRecurrent", t);
+        return new NetworkInference { Logits = logits, Value = value[0], State = state };
     }
 
     /// <summary>Routes a flat observation through per-stream encoders and concatenates embeddings.</summary>
@@ -251,6 +298,11 @@ internal sealed class PolicyValueNetwork : IDisposable
         if (samples.Count == 0)
             return new PpoBatchUpdateStats();
 
+        if (HasRecurrentTrunk)
+            throw new InvalidOperationException(
+                "[PolicyValueNetwork] ApplyGradients cannot train recurrent trunks. " +
+                "Use ApplyGradientsRecurrent with grouped sequences.");
+
         var tGrad = RLProfiler.Begin();
 
         var trunkGradients = new GradientBuffer[_trunkLayers.Length];
@@ -327,132 +379,16 @@ internal sealed class PolicyValueNetwork : IDisposable
             var inference = _streamEncoders is not null
                 ? InferPrepared(sample.Observation, sampleIndex, batchedCnnOutputs)
                 : Infer(sample.Observation);
-            float[] logitsGradient;
-
-            if (_continuousActionDims > 0)
-            {
-                // ── Continuous Gaussian policy (tanh-squashed) ─────────────────────
-                var D = _continuousActionDims;
-                var actorOut = inference.Logits; // [mean_0..D-1, logStd_0..D-1]
-                var newLogProb = 0f;
-                var entropy = 0f;
-
-                // Pre-compute per-dimension values; reused for both loss and gradient.
-                var eps = new float[D];
-                var std = new float[D];
-                for (var d = 0; d < D; d++)
-                {
-                    var a      = sample.ContinuousActions[d];
-                    var u      = Atanh(a);
-                    var lStd   = Math.Clamp(actorOut[D + d], -20f, 2f);
-                    std[d]     = MathF.Exp(lStd);
-                    eps[d]     = (u - actorOut[d]) / std[d];
-                    newLogProb += -0.5f * eps[d] * eps[d] - lStd
-                                  - 0.5f * MathF.Log(2f * MathF.PI)
-                                  - MathF.Log(1f - a * a + 1e-6f);
-                    // Gaussian entropy per dim: 0.5*(1+log(2π)) + logStd
-                    entropy += 0.5f * (1f + MathF.Log(2f * MathF.PI)) + lStd;
-                }
-
-                totalEntropy += entropy;
-
-                var ratio          = MathF.Exp(newLogProb - sample.OldLogProbability);
-                var clippedRatio   = Math.Clamp(ratio, 1f - config.ClipEpsilon, 1f + config.ClipEpsilon);
-                var unclipped      = ratio * sample.Advantage;
-                var clipped        = clippedRatio * sample.Advantage;
-                totalPolicyLoss   += -Math.Min(unclipped, clipped);
-                if (MathF.Abs(ratio - 1f) > config.ClipEpsilon) clipCount++;
-
-                logitsGradient = new float[D * 2];
-                if (unclipped <= clipped) // unclipped objective is smaller → gradient is non-zero
-                {
-                    // Gradient of -(L_PPO + α*H) w.r.t. [mean_d, logStd_d]:
-                    //   ∂(-L_PPO)/∂mean_d    = -ratio*A * (eps_d / std_d)
-                    //   ∂(-L_PPO)/∂logStd_d  = -ratio*A * (eps_d² - 1)
-                    //   ∂(-α*H) /∂logStd_d   = -α               (H = Σ[logStd + const])
-                    var policyScale = ratio * sample.Advantage;
-                    for (var d = 0; d < D; d++)
-                    {
-                        logitsGradient[d]     = -policyScale * (eps[d] / std[d]);
-                        logitsGradient[D + d] = -policyScale * (eps[d] * eps[d] - 1f)
-                                                - config.EntropyCoefficient;
-                    }
-                }
-                else if (config.EntropyCoefficient > 0f)
-                {
-                    // Clipped: only entropy gradient applies.
-                    for (var d = 0; d < D; d++)
-                        logitsGradient[D + d] = -config.EntropyCoefficient;
-                }
-            }
-            else
-            {
-                // ── Discrete softmax policy (existing path) ────────────────────────
-                var probs = Softmax(inference.Logits);
-                var actionProbability = Math.Clamp(probs[sample.Action], 1e-6f, 1.0f);
-                var logProbability = Mathf.Log(actionProbability);
-                var ratio = Mathf.Exp(logProbability - sample.OldLogProbability);
-                var clippedRatio = Math.Clamp(ratio, 1.0f - config.ClipEpsilon, 1.0f + config.ClipEpsilon);
-                var unclippedObjective = ratio * sample.Advantage;
-                var clippedObjective = clippedRatio * sample.Advantage;
-                totalPolicyLoss += -Math.Min(unclippedObjective, clippedObjective);
-
-                if (Mathf.Abs(ratio - 1.0f) > config.ClipEpsilon) clipCount++;
-
-                logitsGradient = new float[probs.Length];
-                if (unclippedObjective <= clippedObjective)
-                {
-                    for (var index = 0; index < probs.Length; index++)
-                        logitsGradient[index] = ratio * probs[index] * sample.Advantage;
-                    logitsGradient[sample.Action] -= ratio * sample.Advantage;
-                }
-
-                var entropy = 0f;
-                foreach (var probability in probs)
-                {
-                    if (probability > 1e-6f) entropy -= probability * Mathf.Log(probability);
-                }
-
-                totalEntropy += entropy;
-                if (config.EntropyCoefficient > 0f)
-                {
-                    for (var j = 0; j < logitsGradient.Length; j++)
-                    {
-                        var logPj = probs[j] > 1e-6f ? Mathf.Log(probs[j]) : Mathf.Log(1e-6f);
-                        logitsGradient[j] += config.EntropyCoefficient * probs[j] * (entropy + logPj);
-                    }
-                }
-            }
-
-            var valuePrediction = inference.Value;
-            var valueError = valuePrediction - sample.Return;
-            var valueLoss = valueError * valueError;
-            var valueGradientScalar = valueError;
-
-            if (config.UseValueClipping && config.ValueClipEpsilon > 0f)
-            {
-                var clippedValue = sample.ValueEstimate
-                    + Math.Clamp(valuePrediction - sample.ValueEstimate, -config.ValueClipEpsilon, config.ValueClipEpsilon);
-                var clippedError = clippedValue - sample.Return;
-                var clippedValueLoss = clippedError * clippedError;
-                if (clippedValueLoss > valueLoss)
-                {
-                    valueLoss = clippedValueLoss;
-                    if (Mathf.Abs(valuePrediction - sample.ValueEstimate) > config.ValueClipEpsilon)
-                        valueGradientScalar = 0f;
-                }
-            }
-
-            totalValueLoss += valueLoss;
-            var valueGradient = new[] { config.ValueLossCoefficient * valueGradientScalar };
-
-            // Infer() already cached state in each layer; AccumulateGradients uses it.
-            var trunkGradientFromPolicy = _policyHead.AccumulateGradients(logitsGradient, policyGradients);
-            var trunkGradientFromValue  = _valueHead.AccumulateGradients(valueGradient,   valueGradients);
-
-            var trunkGradient = new float[trunkGradientFromPolicy.Length];
-            for (var index = 0; index < trunkGradient.Length; index++)
-                trunkGradient[index] = trunkGradientFromPolicy[index] + trunkGradientFromValue[index];
+            var trunkGradient = AccumulateActorCriticSampleGradients(
+                sample,
+                inference,
+                policyGradients,
+                valueGradients,
+                config,
+                ref totalPolicyLoss,
+                ref totalValueLoss,
+                ref totalEntropy,
+                ref clipCount);
 
             for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
                 trunkGradient = _trunkLayers[layerIndex].AccumulateGradients(trunkGradient, trunkGradients[layerIndex]);
@@ -561,6 +497,151 @@ internal sealed class PolicyValueNetwork : IDisposable
         };
     }
 
+    public PpoBatchUpdateStats ApplyGradientsRecurrent(
+        IReadOnlyList<RecurrentTrainingSequence> sequences,
+        RLTrainerConfig config)
+    {
+        if (sequences.Count == 0)
+            return new PpoBatchUpdateStats();
+        if (!HasRecurrentTrunk)
+            return ApplyGradients(FlattenSequences(sequences), config);
+
+        var recurrentLayer = _trunkLayers[_recurrentLayerIndex];
+        var tGrad = RLProfiler.Begin();
+
+        var trunkGradients = new GradientBuffer[_trunkLayers.Length];
+        for (var i = 0; i < _trunkLayers.Length; i++)
+            trunkGradients[i] = _trunkLayers[i].CreateGradientBuffer();
+
+        ICnnGradientToken[]? cnnGrads      = null;
+        GradientBuffer[][]?  vecLayerGrads = null;
+        if (_streamEncoders is not null)
+        {
+            cnnGrads      = new ICnnGradientToken[_streamEncoders.Length];
+            vecLayerGrads = new GradientBuffer[_streamEncoders.Length][];
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                if (_streamEncoders[ei].Cnn is not null)
+                    cnnGrads[ei] = _streamEncoders[ei].Cnn!.CreateGradientToken();
+                vecLayerGrads[ei] = _streamEncoders[ei].CreateVectorGradBuffers() ?? System.Array.Empty<GradientBuffer>();
+            }
+        }
+
+        var policyGradients = _policyHead.CreateGradientBuffer();
+        var valueGradients  = _valueHead.CreateGradientBuffer();
+
+        var totalPolicyLoss = 0f;
+        var totalValueLoss  = 0f;
+        var totalEntropy    = 0f;
+        var clipCount       = 0;
+        var totalSteps      = 0;
+
+        foreach (var sequence in sequences)
+        {
+            var seqLen = sequence.Steps.Count;
+            if (seqLen == 0)
+                continue;
+
+            totalSteps += seqLen;
+            var recurrentInputSize = recurrentLayer.InputSize;
+            var recurrentOutputSize = recurrentLayer.OutputSize;
+            var flatInputs = new float[seqLen * recurrentInputSize];
+
+            for (var t = 0; t < seqLen; t++)
+            {
+                var recurrentInput = ForwardPrefix(sequence.Steps[t].Observation);
+                Array.Copy(recurrentInput, 0, flatInputs, t * recurrentInputSize, recurrentInput.Length);
+            }
+
+            var recurrentOutputs = ForwardRecurrentSequence(flatInputs, seqLen, sequence);
+            var seqOutputGrads   = new float[seqLen * recurrentOutputSize];
+
+            for (var t = 0; t < seqLen; t++)
+            {
+                var sample = sequence.Steps[t];
+                var trunkInput = recurrentOutputs.AsSpan(t * recurrentOutputSize, recurrentOutputSize).ToArray();
+                for (var layerIndex = _recurrentLayerIndex + 1; layerIndex < _trunkLayers.Length; layerIndex++)
+                    trunkInput = _trunkLayers[layerIndex].Forward(trunkInput);
+
+                var inference = new NetworkInference
+                {
+                    Logits = _policyHead.Forward(trunkInput),
+                    Value  = _valueHead.Forward(trunkInput)[0],
+                };
+
+                var trunkGradient = AccumulateActorCriticSampleGradients(
+                    sample,
+                    inference,
+                    policyGradients,
+                    valueGradients,
+                    config,
+                    ref totalPolicyLoss,
+                    ref totalValueLoss,
+                    ref totalEntropy,
+                    ref clipCount);
+
+                for (var layerIndex = _trunkLayers.Length - 1; layerIndex > _recurrentLayerIndex; layerIndex--)
+                    trunkGradient = _trunkLayers[layerIndex].AccumulateGradients(trunkGradient, trunkGradients[layerIndex]);
+
+                Array.Copy(trunkGradient, 0, seqOutputGrads, t * recurrentOutputSize, recurrentOutputSize);
+            }
+
+            var seqInputGrads = AccumulateRecurrentSequenceGradients(sequence, seqOutputGrads, trunkGradients[_recurrentLayerIndex]);
+            for (var t = 0; t < seqLen; t++)
+            {
+                var upstreamGrad = seqInputGrads.AsSpan(t * recurrentInputSize, recurrentInputSize).ToArray();
+                AccumulatePrefixGradients(
+                    sequence.Steps[t].Observation,
+                    upstreamGrad,
+                    trunkGradients,
+                    vecLayerGrads,
+                    cnnGrads);
+            }
+        }
+
+        var globalNormSquared = policyGradients.SumSquares() + valueGradients.SumSquares();
+        foreach (var g in trunkGradients) globalNormSquared += g.SumSquares();
+        if (cnnGrads is not null && _streamEncoders is not null)
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+                if (_streamEncoders[ei].Cnn is not null)
+                    globalNormSquared += _streamEncoders[ei].Cnn!.GradNormSquared(cnnGrads[ei]);
+
+        var gradientScale = 1f / Math.Max(1, totalSteps);
+        if (config.MaxGradientNorm > 0f)
+        {
+            var averageNorm = Mathf.Sqrt(globalNormSquared) * gradientScale;
+            if (averageNorm > config.MaxGradientNorm)
+                gradientScale *= config.MaxGradientNorm / averageNorm;
+        }
+
+        _policyHead.ApplyGradients(policyGradients, config.LearningRate, gradientScale);
+        _valueHead.ApplyGradients(valueGradients,   config.LearningRate, gradientScale);
+        for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
+            _trunkLayers[layerIndex].ApplyGradients(trunkGradients[layerIndex], config.LearningRate, gradientScale);
+
+        if (cnnGrads is not null && _streamEncoders is not null)
+        {
+            for (var ei = 0; ei < _streamEncoders.Length; ei++)
+            {
+                var enc = _streamEncoders[ei];
+                if (enc.Cnn is not null)
+                    enc.Cnn.ApplyGradients(cnnGrads[ei], config.LearningRate, gradientScale);
+                if (enc.VectorLayers is not null)
+                    for (var li = 0; li < enc.VectorLayers.Length; li++)
+                        enc.VectorLayers[li].ApplyGradients(vecLayerGrads![ei][li], config.LearningRate, gradientScale);
+            }
+        }
+
+        RLProfiler.End("ApplyGradientsRecurrent", tGrad);
+        return new PpoBatchUpdateStats
+        {
+            PolicyLoss   = totalPolicyLoss / Math.Max(1, totalSteps),
+            ValueLoss    = totalValueLoss  / Math.Max(1, totalSteps),
+            Entropy      = totalEntropy    / Math.Max(1, totalSteps),
+            ClipFraction = (float)clipCount / Math.Max(1, totalSteps),
+        };
+    }
+
     public RLCheckpoint SaveCheckpoint(string runId, long totalSteps, long episodeCount, long updateCount)
     {
         var weights = new List<float>();
@@ -666,6 +747,277 @@ internal sealed class PolicyValueNetwork : IDisposable
 
         _policyHead.LoadSerialized(checkpoint.WeightBuffer, ref wi, checkpoint.LayerShapeBuffer, ref si, isLegacy);
         _valueHead.LoadSerialized(checkpoint.WeightBuffer,  ref wi, checkpoint.LayerShapeBuffer, ref si, isLegacy);
+    }
+
+    private static int FindRecurrentLayerIndex(NetworkLayer[] trunkLayers)
+    {
+        var recurrentIndex = -1;
+        for (var i = 0; i < trunkLayers.Length; i++)
+        {
+            if (!trunkLayers[i].IsRecurrent)
+                continue;
+
+            if (recurrentIndex >= 0)
+            {
+                throw new InvalidOperationException(
+                    "[PolicyValueNetwork] Only one recurrent trunk layer is currently supported end-to-end.");
+            }
+
+            recurrentIndex = i;
+        }
+
+        return recurrentIndex;
+    }
+
+    private float[] ForwardPrefix(float[] observation)
+    {
+        var x = _streamEncoders is not null ? EncodeStreams(observation) : observation;
+        for (var layerIndex = 0; layerIndex < _recurrentLayerIndex; layerIndex++)
+            x = _trunkLayers[layerIndex].Forward(x);
+        return x;
+    }
+
+    private float[] ForwardRecurrentSequence(float[] flatInputs, int seqLen, RecurrentTrainingSequence sequence)
+    {
+        return _trunkLayers[_recurrentLayerIndex] switch
+        {
+            NativeLstmLayer lstm => lstm.ForwardSequence(
+                flatInputs,
+                seqLen,
+                sequence.InitialHiddenState,
+                sequence.InitialCellState ?? throw new InvalidOperationException(
+                    "[PolicyValueNetwork] LSTM sequence is missing an initial cell state.")),
+            NativeGruLayer gru => gru.ForwardSequence(flatInputs, seqLen, sequence.InitialHiddenState),
+            _ => throw new InvalidOperationException(
+                "[PolicyValueNetwork] Recurrent trunk layer is not backed by a supported native implementation."),
+        };
+    }
+
+    private float[] AccumulateRecurrentSequenceGradients(
+        RecurrentTrainingSequence sequence,
+        float[] seqOutputGrads,
+        GradientBuffer recurrentGradientBuffer)
+    {
+        var nativeBuffer = (NativeGradientBuffer)recurrentGradientBuffer;
+        return _trunkLayers[_recurrentLayerIndex] switch
+        {
+            NativeLstmLayer lstm => lstm.AccumulateSequenceGradients(
+                seqOutputGrads,
+                sequence.Steps.Count,
+                nativeBuffer,
+                sequence.InitialHiddenState,
+                sequence.InitialCellState ?? throw new InvalidOperationException(
+                    "[PolicyValueNetwork] LSTM sequence is missing an initial cell state.")),
+            NativeGruLayer gru => gru.AccumulateSequenceGradients(
+                seqOutputGrads,
+                sequence.Steps.Count,
+                nativeBuffer,
+                sequence.InitialHiddenState),
+            _ => throw new InvalidOperationException(
+                "[PolicyValueNetwork] Recurrent trunk layer is not backed by a supported native implementation."),
+        };
+    }
+
+    private void AccumulatePrefixGradients(
+        float[] observation,
+        float[] upstreamGrad,
+        GradientBuffer[] trunkGradients,
+        GradientBuffer[][]? vecLayerGrads,
+        ICnnGradientToken[]? cnnGrads)
+    {
+        if (_recurrentLayerIndex > 0)
+        {
+            var x = _streamEncoders is not null ? EncodeStreams(observation) : observation;
+            for (var layerIndex = 0; layerIndex < _recurrentLayerIndex; layerIndex++)
+                x = _trunkLayers[layerIndex].Forward(x);
+
+            for (var layerIndex = _recurrentLayerIndex - 1; layerIndex >= 0; layerIndex--)
+                upstreamGrad = _trunkLayers[layerIndex].AccumulateGradients(upstreamGrad, trunkGradients[layerIndex]);
+        }
+
+        if (_streamEncoders is not null)
+            AccumulateStreamEncoderGradients(observation, upstreamGrad, vecLayerGrads!, cnnGrads!);
+    }
+
+    private void AccumulateStreamEncoderGradients(
+        float[] observation,
+        float[] trunkGradient,
+        GradientBuffer[][] vecLayerGrads,
+        ICnnGradientToken[] cnnGrads)
+    {
+        var encoders = _streamEncoders!;
+        var spec     = _observationSpec!;
+        var offset   = 0;
+        var outIdx   = 0;
+
+        for (var i = 0; i < encoders.Length; i++)
+        {
+            var enc    = encoders[i];
+            var stream = spec.Streams[i];
+            var slice  = observation.AsSpan(offset, stream.FlatSize).ToArray();
+            offset += stream.FlatSize;
+
+            float[] embedding;
+            if (enc.Cnn is not null)
+                embedding = enc.Cnn.Forward(slice);
+            else
+                embedding = slice;
+
+            if (enc.VectorLayers is not null)
+            {
+                foreach (var layer in enc.VectorLayers)
+                    embedding = layer.Forward(embedding);
+            }
+
+            var encGrad = trunkGradient.AsSpan(outIdx, enc.OutputSize).ToArray();
+            outIdx += enc.OutputSize;
+
+            if (enc.VectorLayers is not null)
+            {
+                for (var li = enc.VectorLayers.Length - 1; li >= 0; li--)
+                    encGrad = enc.VectorLayers[li].AccumulateGradients(encGrad, vecLayerGrads[i][li]);
+            }
+
+            if (enc.Cnn is not null)
+                enc.Cnn.AccumulateGradients(encGrad, cnnGrads[i]);
+        }
+    }
+
+    private float[] AccumulateActorCriticSampleGradients(
+        TrainingSample sample,
+        NetworkInference inference,
+        GradientBuffer policyGradients,
+        GradientBuffer valueGradients,
+        RLTrainerConfig config,
+        ref float totalPolicyLoss,
+        ref float totalValueLoss,
+        ref float totalEntropy,
+        ref int clipCount)
+    {
+        float[] logitsGradient;
+
+        if (_continuousActionDims > 0)
+        {
+            var D = _continuousActionDims;
+            var actorOut = inference.Logits;
+            var newLogProb = 0f;
+            var entropy = 0f;
+            var eps = new float[D];
+            var std = new float[D];
+            for (var d = 0; d < D; d++)
+            {
+                var a      = sample.ContinuousActions[d];
+                var u      = Atanh(a);
+                var lStd   = Math.Clamp(actorOut[D + d], -20f, 2f);
+                std[d]     = MathF.Exp(lStd);
+                eps[d]     = (u - actorOut[d]) / std[d];
+                newLogProb += -0.5f * eps[d] * eps[d] - lStd
+                              - 0.5f * MathF.Log(2f * MathF.PI)
+                              - MathF.Log(1f - a * a + 1e-6f);
+                entropy += 0.5f * (1f + MathF.Log(2f * MathF.PI)) + lStd;
+            }
+
+            totalEntropy += entropy;
+
+            var ratio        = MathF.Exp(newLogProb - sample.OldLogProbability);
+            var clippedRatio = Math.Clamp(ratio, 1f - config.ClipEpsilon, 1f + config.ClipEpsilon);
+            var unclipped    = ratio * sample.Advantage;
+            var clipped      = clippedRatio * sample.Advantage;
+            totalPolicyLoss += -Math.Min(unclipped, clipped);
+            if (MathF.Abs(ratio - 1f) > config.ClipEpsilon) clipCount++;
+
+            logitsGradient = new float[D * 2];
+            if (unclipped <= clipped)
+            {
+                var policyScale = ratio * sample.Advantage;
+                for (var d = 0; d < D; d++)
+                {
+                    logitsGradient[d]     = -policyScale * (eps[d] / std[d]);
+                    logitsGradient[D + d] = -policyScale * (eps[d] * eps[d] - 1f)
+                                            - config.EntropyCoefficient;
+                }
+            }
+            else if (config.EntropyCoefficient > 0f)
+            {
+                for (var d = 0; d < D; d++)
+                    logitsGradient[D + d] = -config.EntropyCoefficient;
+            }
+        }
+        else
+        {
+            var probs              = Softmax(inference.Logits);
+            var actionProbability  = Math.Clamp(probs[sample.Action], 1e-6f, 1.0f);
+            var logProbability     = Mathf.Log(actionProbability);
+            var ratio              = Mathf.Exp(logProbability - sample.OldLogProbability);
+            var clippedRatio       = Math.Clamp(ratio, 1.0f - config.ClipEpsilon, 1.0f + config.ClipEpsilon);
+            var unclippedObjective = ratio * sample.Advantage;
+            var clippedObjective   = clippedRatio * sample.Advantage;
+            totalPolicyLoss += -Math.Min(unclippedObjective, clippedObjective);
+
+            if (Mathf.Abs(ratio - 1.0f) > config.ClipEpsilon) clipCount++;
+
+            logitsGradient = new float[probs.Length];
+            if (unclippedObjective <= clippedObjective)
+            {
+                for (var index = 0; index < probs.Length; index++)
+                    logitsGradient[index] = ratio * probs[index] * sample.Advantage;
+                logitsGradient[sample.Action] -= ratio * sample.Advantage;
+            }
+
+            var entropy = 0f;
+            foreach (var probability in probs)
+            {
+                if (probability > 1e-6f)
+                    entropy -= probability * Mathf.Log(probability);
+            }
+
+            totalEntropy += entropy;
+            if (config.EntropyCoefficient > 0f)
+            {
+                for (var j = 0; j < logitsGradient.Length; j++)
+                {
+                    var logPj = probs[j] > 1e-6f ? Mathf.Log(probs[j]) : Mathf.Log(1e-6f);
+                    logitsGradient[j] += config.EntropyCoefficient * probs[j] * (entropy + logPj);
+                }
+            }
+        }
+
+        var valuePrediction     = inference.Value;
+        var valueError          = valuePrediction - sample.Return;
+        var valueLoss           = valueError * valueError;
+        var valueGradientScalar = valueError;
+
+        if (config.UseValueClipping && config.ValueClipEpsilon > 0f)
+        {
+            var clippedValue = sample.ValueEstimate
+                + Math.Clamp(valuePrediction - sample.ValueEstimate, -config.ValueClipEpsilon, config.ValueClipEpsilon);
+            var clippedError = clippedValue - sample.Return;
+            var clippedValueLoss = clippedError * clippedError;
+            if (clippedValueLoss > valueLoss)
+            {
+                valueLoss = clippedValueLoss;
+                if (Mathf.Abs(valuePrediction - sample.ValueEstimate) > config.ValueClipEpsilon)
+                    valueGradientScalar = 0f;
+            }
+        }
+
+        totalValueLoss += valueLoss;
+        var valueGradient = new[] { config.ValueLossCoefficient * valueGradientScalar };
+
+        var trunkGradientFromPolicy = _policyHead.AccumulateGradients(logitsGradient, policyGradients);
+        var trunkGradientFromValue  = _valueHead.AccumulateGradients(valueGradient,   valueGradients);
+        var trunkGradient = new float[trunkGradientFromPolicy.Length];
+        for (var index = 0; index < trunkGradient.Length; index++)
+            trunkGradient[index] = trunkGradientFromPolicy[index] + trunkGradientFromValue[index];
+        return trunkGradient;
+    }
+
+    private static List<TrainingSample> FlattenSequences(IReadOnlyList<RecurrentTrainingSequence> sequences)
+    {
+        var result = new List<TrainingSample>();
+        foreach (var sequence in sequences)
+            result.AddRange(sequence.Steps);
+        return result;
     }
 
     /// <summary>
@@ -864,6 +1216,7 @@ internal sealed class PolicyValueNetwork : IDisposable
     {
         public float[] Logits { get; init; } = Array.Empty<float>();
         public float Value { get; init; }
+        public RecurrentState? State { get; init; }
     }
 
     internal sealed class BatchNetworkInference
@@ -878,5 +1231,12 @@ internal sealed class PolicyValueNetwork : IDisposable
         public float ValueLoss    { get; init; }
         public float Entropy      { get; init; }
         public float ClipFraction { get; init; }
+    }
+
+    internal sealed class RecurrentTrainingSequence
+    {
+        public List<TrainingSample> Steps { get; init; } = new();
+        public float[] InitialHiddenState { get; init; } = Array.Empty<float>();
+        public float[]? InitialCellState { get; init; }
     }
 }

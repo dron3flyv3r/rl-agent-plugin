@@ -58,6 +58,9 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     // Transitions accumulated since last worker send.
     // Capped at 2 × SacBatchSize to bound memory when not consumed by a master.
     private readonly Queue<Transition> _stagingTransitions = new();
+    // Distributed workers never train locally, so retaining a full replay buffer there is pure
+    // memory waste. The master still keeps its replay buffer and receives streamed rollouts.
+    public bool StoreTransitionsInReplayBuffer { get; set; } = true;
 
     public SacTrainer(PolicyGroupConfig config)
     {
@@ -87,12 +90,12 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         _logAlpha = MathF.Log(Math.Max(config.TrainerConfig.SacInitAlpha, 1e-8f));
 
         // Target entropy:
-        //   continuous → -action_dims (standard SAC)
+        //   continuous → action_dims when using entropy = -log_prob
         //   discrete   → fraction × log(|A|)  where fraction ∈ (0,1]
         //     fraction=1.0 = uniform random (max entropy); fraction=0.5 = half of max.
         //     Using log(|A|) directly (fraction=1) keeps the policy fully random forever.
         _targetEntropy = _isContinuous
-            ? -config.ContinuousActionDimensions
+            ? config.ContinuousActionDimensions
             : config.TrainerConfig.SacTargetEntropyFraction * MathF.Log(config.DiscreteActionCount);
     }
 
@@ -170,8 +173,11 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         // Guard against NaN/infinity from physics explosions corrupting the replay buffer.
         if (!IsFiniteTransition(transition)) return;
 
-        _buffer.Add(transition);
-        _totalStepsSeen++;
+        if (StoreTransitionsInReplayBuffer)
+        {
+            _buffer.Add(transition);
+            _totalStepsSeen++;
+        }
         _stagingTransitions.Enqueue(transition);
         // Cap staging buffer so it doesn't grow forever in standalone mode
         while (_stagingTransitions.Count > _trainerConfig.SacBatchSize * 2)
@@ -230,6 +236,7 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             ValueLoss    = totalValueLoss  / utd,
             Entropy      = totalEntropy    / utd,
             ClipFraction = 0f,
+            SacAlpha     = MathF.Exp(_logAlpha),
             Checkpoint   = CreateCheckpoint(groupId, totalSteps, episodeCount, 0),
         };
     }
@@ -317,6 +324,7 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             ValueLoss = result.ValueLoss,
             Entropy = result.Entropy,
             ClipFraction = 0f,
+            SacAlpha = MathF.Exp(_logAlpha),
             Checkpoint = CreateCheckpoint(groupId, totalSteps, episodeCount, 0),
         };
     }

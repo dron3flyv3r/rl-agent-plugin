@@ -63,6 +63,14 @@ public interface IRLAgent
     string GetInferenceModelPath();
     string GetPolicyAgentId();
 
+    // ── Recurrent state (optional) ────────────────────────────────────────────
+    /// <summary>
+    /// Per-agent recurrent hidden state, maintained by the training bootstrap.
+    /// Null for feedforward agents. Reset to null (zeroed on next inference) when
+    /// the episode ends (IsDone == true).
+    /// </summary>
+    RecurrentState? RecurrentHiddenState { get; set; }
+
     // ── Framework-internal ────────────────────────────────────────────────────
     float[] CollectObservationArray();
     void TickStep();

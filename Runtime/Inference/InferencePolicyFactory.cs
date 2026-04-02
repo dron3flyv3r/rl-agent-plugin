@@ -115,6 +115,20 @@ public static class InferencePolicyFactory
                     case "dropout":
                         layers.Add(new RLDropoutLayerDef { Rate = layer.Rate });
                         break;
+                    case "lstm":
+                        layers.Add(new RLLstmLayerDef
+                        {
+                            HiddenSize   = layer.HiddenSize,
+                            GradClipNorm = layer.GradClipNorm,
+                        });
+                        break;
+                    case "gru":
+                        layers.Add(new RLGruLayerDef
+                        {
+                            HiddenSize   = layer.HiddenSize,
+                            GradClipNorm = layer.GradClipNorm,
+                        });
+                        break;
                     case "layer_norm":
                         layers.Add(new RLLayerNormDef());
                         break;

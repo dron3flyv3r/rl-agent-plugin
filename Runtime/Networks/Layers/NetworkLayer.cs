@@ -1,6 +1,33 @@
+using System;
 using System.Collections.Generic;
 
 namespace RlAgentPlugin.Runtime;
+
+/// <summary>
+/// Holds the recurrent hidden state for LSTM or GRU layers.
+/// For GRU: only <see cref="H"/> is used; <see cref="C"/> is null.
+/// For LSTM: both <see cref="H"/> and <see cref="C"/> are populated.
+/// </summary>
+public sealed class RecurrentState
+{
+    public float[] H { get; }
+    public float[]? C { get; set; }   // null for GRU
+
+    public RecurrentState(float[] h, float[]? c = null)
+    {
+        ArgumentNullException.ThrowIfNull(h);
+        H = h;
+        C = c;
+    }
+
+    /// <summary>Creates a zeroed LSTM state of the given hidden size.</summary>
+    public static RecurrentState ZerosLstm(int hiddenSize)
+        => new RecurrentState(new float[hiddenSize], new float[hiddenSize]);
+
+    /// <summary>Creates a zeroed GRU state of the given hidden size.</summary>
+    public static RecurrentState ZerosGru(int hiddenSize)
+        => new RecurrentState(new float[hiddenSize]);
+}
 
 /// <summary>
 /// Abstract base for all neural-network layers.
@@ -18,6 +45,22 @@ internal abstract class NetworkLayer
 {
     public abstract int InputSize  { get; }
     public abstract int OutputSize { get; }
+
+    // ── Recurrent interface (optional) ──────────────────────────────────────
+
+    /// <summary>True for LSTM / GRU layers that carry hidden state between steps.</summary>
+    public virtual bool IsRecurrent => false;
+
+    /// <summary>
+    /// Single-step forward pass for recurrent layers.
+    /// Reads the current hidden state from <paramref name="state"/> and updates it in-place.
+    /// Default implementation delegates to <see cref="Forward"/> (for non-recurrent layers).
+    /// </summary>
+    public virtual float[] ForwardRecurrent(float[] input, RecurrentState state)
+        => Forward(input);
+
+    /// <summary>Resets hidden state to zeros. No-op for non-recurrent layers.</summary>
+    public virtual void ResetState(RecurrentState state) { }
 
     // ── Forward ─────────────────────────────────────────────────────────────
 

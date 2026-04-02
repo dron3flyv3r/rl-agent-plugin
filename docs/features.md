@@ -12,11 +12,11 @@ If you are new to the plugin, read [get-started.md](get-started.md) first, then 
 
 | Area | Included features |
 | --- | --- |
-| Core training | PPO, SAC, shared policy groups, custom network graph |
+| Core training | PPO and SAC fully documented here; A2C, DQN, and MCTS are referenced elsewhere in the docs |
 | Runtime modes | Training mode + inference mode with `.rlmodel` |
 | Editor workflow | Start/Stop/Run toolbar, RL Setup dock, RLDash charts |
 | Observations | Vector observations, built-in sensors, image observations |
-| Advanced training | Curriculum, self-play + PFSP, distributed workers |
+| Advanced training | Curriculum, self-play + PFSP, distributed workers, recurrent PPO/A2C |
 | Performance | Async gradient updates, PPO GPU CNN path for image streams |
 | Debugging | Spy/training overlay, camera debug overlay, live metrics |
 
@@ -103,7 +103,39 @@ See also: [configuration.md](configuration.md#rlpolicygroupconfig)
 
 ---
 
-## 4) In-editor training workflow
+## 4) Recurrent policy layers (LSTM / GRU)
+
+### What it is
+
+- `RLNetworkGraph` can include `RLLstmLayerDef` or `RLGruLayerDef` in the shared trunk.
+- End-to-end recurrent rollout, checkpointing, inference, and BPTT are implemented for PPO and A2C.
+
+### Why use it
+
+- Good fit for partially observable environments where one frame is not enough.
+- Works with shared-policy multi-agent setups: each agent keeps its own hidden state even when weights are shared.
+
+### Show me
+
+```text
+RLNetworkGraph
+- Dense(64, Tanh)
+- LSTM(HiddenSize=64)
+- Dense(64, Tanh)
+```
+
+Current limits:
+
+- Requires the native C++ GDExtension.
+- Only one recurrent trunk layer is supported per network.
+- Supported end-to-end for PPO and A2C only.
+- DQN and SAC do not support recurrent trunks.
+
+See also: [configuration.md](configuration.md#rlnetworkgraph), [algorithms.md](algorithms.md#recurrent-policies-lstm--gru), [architecture.md](architecture.md#neural-network-architecture)
+
+---
+
+## 5) In-editor training workflow
 
 ### What it is
 
@@ -125,7 +157,7 @@ See also: [get-started.md](get-started.md)
 
 ---
 
-## 5) Live dashboard metrics (RLDash)
+## 6) Live dashboard metrics (RLDash)
 
 ### What it is
 
@@ -145,7 +177,7 @@ See also: [tuning.md](tuning.md), [architecture.md](architecture.md#metrics--das
 
 ---
 
-## 6) Model export/import (`.rlmodel`) for deployment
+## 7) Model export/import (`.rlmodel`) for deployment
 
 ### What it is
 
@@ -166,7 +198,7 @@ See also: [README.md](../README.md), [architecture.md](architecture.md#inference
 
 ---
 
-## 7) Training and inference modes
+## 8) Training and inference modes
 
 ### What it is
 
@@ -186,7 +218,7 @@ See also: [architecture.md](architecture.md#inference)
 
 ---
 
-## 8) Rich observation system
+## 9) Rich observation system
 
 ### What it is
 
@@ -212,7 +244,7 @@ See also: [configuration.md](configuration.md#observationbuffer-methods), [senso
 
 ---
 
-## 9) Built-in sensors
+## 10) Built-in sensors
 
 ### What it is
 
@@ -242,7 +274,7 @@ See also: [sensors.md](sensors.md), [configuration.md](configuration.md#built-in
 
 ---
 
-## 10) Camera observations with optional GPU CNN training path (PPO)
+## 11) Camera observations with optional GPU CNN training path (PPO)
 
 ### What it is
 
@@ -269,7 +301,7 @@ See also: [gpu-cnn.md](gpu-cnn.md), [sensors.md](sensors.md#rlcamerasensor2d)
 
 ---
 
-## 11) Curriculum learning
+## 12) Curriculum learning
 
 ### What it is
 
@@ -296,7 +328,7 @@ See also: [configuration.md](configuration.md#rlcurriculumconfig)
 
 ---
 
-## 12) Self-play with historical opponents and PFSP
+## 13) Self-play with historical opponents and PFSP
 
 ### What it is
 
@@ -321,7 +353,7 @@ See also: [configuration.md](configuration.md#rlselfplayconfig)
 
 ---
 
-## 13) Distributed rollout workers
+## 14) Distributed rollout workers
 
 ### What it is
 

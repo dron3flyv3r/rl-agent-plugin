@@ -35,10 +35,12 @@ public enum RLOptimizerKind
 
 public enum RLLayerKind
 {
-    Dense    = 0,
-    Dropout  = 1,
+    Dense     = 0,
+    Dropout   = 1,
     LayerNorm = 2,
-    Flatten  = 3,
+    Flatten   = 3,
+    Lstm      = 4,
+    Gru       = 5,
 }
 
 public enum RLStoppingCombineMode

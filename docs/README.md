@@ -8,7 +8,8 @@
 5. [Get Started Tips & Tricks](get-started.md#tips--tricks)
 
 ## Deep dives
-- [Algorithms (PPO & SAC)](algorithms.md)
+- [Algorithms](algorithms.md)
+- [Hyperparameter Optimization (HPO)](hpo.md)
 - [Tuning Guide](tuning.md)
 - [Architecture Overview](architecture.md)
 - [GPU CNN Training](gpu-cnn.md)
@@ -64,8 +65,10 @@
 - **First agent structure**: player node owns physics; `RLAgent2D/3D` is a child; sensors are children of the agent — see [get-started.md](get-started.md)
 - **Add a camera sensor**: add `RLCameraSensor2D` as a child of the agent node, then call `obs.AddImage("name", _camera)` — see [sensors.md](sensors.md)
 - **Understand GPU CNN activation**: see [gpu-cnn.md](gpu-cnn.md)
+- **Understand recurrent LSTM/GRU support and limits**: see [algorithms.md](algorithms.md), [configuration.md](configuration.md#rlnetworkgraph), and [architecture.md](architecture.md#neural-network-architecture)
 - **Debug camera during training**: tick **Enable Camera Debug** on `RLAcademy` → live preview panel appears top-right
 - **Start training**: top toolbar **Start Training** or right-side **RL Setup** dock
 - **Watch metrics**: open **RLDash**
+- **Run hyperparameter search**: add an `RLHPOOrchestrator` under `RLAcademy` and follow [hpo.md](hpo.md)
 - **Export model**: in RLDash, use **Export Run** (or checkpoint-row **Export**) to create `.rlmodel`
 - **Run inference**: set `PolicyGroupConfig.InferenceModelPath` and click **Run Inference**

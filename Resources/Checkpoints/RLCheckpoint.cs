@@ -461,6 +461,11 @@ public partial class RLCheckpoint : Resource
                 case "dropout":
                     layerDict["rate"] = layer.Rate;
                     break;
+                case "lstm":
+                case "gru":
+                    layerDict["hidden_size"]    = layer.HiddenSize;
+                    layerDict["grad_clip_norm"] = layer.GradClipNorm;
+                    break;
                 // layer_norm and flatten carry no extra properties
             }
             layersArray.Add(layerDict);
@@ -577,6 +582,11 @@ public partial class RLCheckpoint : Resource
                             break;
                         case "dropout":
                             layer.Rate = ld.ContainsKey("rate") ? ld["rate"].AsSingle() : 0.1f;
+                            break;
+                        case "lstm":
+                        case "gru":
+                            layer.HiddenSize   = ld.ContainsKey("hidden_size") ? (int)ld["hidden_size"].AsInt64() : 0;
+                            layer.GradClipNorm = ld.ContainsKey("grad_clip_norm") ? ld["grad_clip_norm"].AsSingle() : 1.0f;
                             break;
                     }
 

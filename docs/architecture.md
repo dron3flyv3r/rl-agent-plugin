@@ -81,9 +81,10 @@ You configure training entirely through the Inspector on this node.
 
 `TrainingBootstrap` is the main training loop. It runs as a separate Godot scene, instantiating your training scene N times. Each physics frame:
 
-1. **Value estimation** — call `EstimateValue()` on each agent's policy (needed for PPO's GAE advantage calculation).
+1. **Value estimation** — call `EstimateValue()` on each agent's policy (or the recurrent value path when the policy has LSTM/GRU).
 2. **Episode resets** — call `OnEpisodeBegin()` on done agents; write episode metrics.
 3. **Action sampling** — call `SampleAction()` to get the policy's stochastic action + log-probability.
+   Recurrent PPO/A2C groups instead sample one agent at a time so each agent's hidden state can be advanced independently.
 4. **Apply decisions** — call `OnActionsReceived()` so the agent moves in the simulation.
 5. **Step** — call `OnStep()` so the agent accumulates rewards and calls `EndEpisode()` when done.
 6. **Record transitions** — store `(obs, action, reward, done, next_obs)` in the trainer's buffer.
@@ -181,9 +182,9 @@ RLAcademy (Inference mode)
 
 ### Neural Network Architecture
 
-Both PPO and SAC use feed-forward networks defined by `RLNetworkGraph`.
+All trainable policies are defined by `RLNetworkGraph`. PPO and A2C can use either feed-forward trunks or a single recurrent trunk layer. SAC and DQN are currently feed-forward only.
 
-**PPO — PolicyValueNetwork:**
+**PPO / A2C — PolicyValueNetwork:**
 
 ```
 Observations (flat float[])
@@ -195,10 +196,43 @@ Trunk (shared layers)
     ├─► Policy Head
     │     Discrete:   Linear → Softmax → sample action
     │     Continuous: Linear → [mean, logStd] → Gaussian sample + tanh squash
-    │
-    └─► Value Head
-          Linear → scalar (state value V(s))
+        │
+        └─► Value Head
+            Linear → scalar (state value V(s))
 ```
+
+**Recurrent PPO / A2C trunk:**
+
+```
+Observations
+    │
+    ▼
+Prefix layers (optional Dense / LayerNorm / CNN encoder output)
+    │
+    ▼
+LSTM or GRU  ← one recurrent layer only
+    │
+    ▼
+Suffix layers (optional Dense / LayerNorm)
+    │
+    ├─► Policy Head
+    └─► Value Head
+```
+
+How recurrent state works:
+
+- each agent owns its own recurrent state
+- shared-policy groups share weights, not hidden state
+- rollout stores the hidden-state snapshot from the start of each step
+- PPO/A2C regroup those transitions into per-agent sequences and run truncated BPTT during updates
+- episode reset clears that agent's recurrent state back to zero
+
+Current recurrent limits:
+
+- requires the native `rl_cnn` GDExtension
+- one recurrent trunk layer per network
+- supported end-to-end for PPO and A2C
+- DQN and SAC reject recurrent trunks
 
 **SAC — SacNetwork:**
 

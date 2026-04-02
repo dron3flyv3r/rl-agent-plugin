@@ -52,6 +52,7 @@ public sealed class RunMetricsWriter
         float valueLoss,
         float entropy,
         float? clipFraction,
+        float? sacAlpha,
         long totalSteps,
         long episodeCount,
         IReadOnlyDictionary<string, float>? rewardComponents = null,
@@ -94,6 +95,11 @@ public sealed class RunMetricsWriter
         if (clipFraction.HasValue)
         {
             payload["clip_fraction"] = clipFraction.Value;
+        }
+
+        if (sacAlpha.HasValue)
+        {
+            payload["sac_alpha"] = sacAlpha.Value;
         }
 
         if (rewardComponents is not null && rewardComponents.Count > 0)

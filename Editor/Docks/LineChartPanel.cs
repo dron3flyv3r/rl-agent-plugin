@@ -32,10 +32,10 @@ public partial class LineChartPanel : Control
     private const int GridLines = 5;
 
     // ── View / scroll state ─────────────────────────────────────────────────
-    private int _viewWindow = 150;   // number of data points in the visible window
+    private const int DefaultWindow = 2500;
+    private int _viewWindow = DefaultWindow;   // number of data points in the visible window
     private int _viewOffset = 0;     // points scrolled back from the right edge (0 = live tail)
     private const int MinWindow = 20;
-    private const int DefaultWindow = 150;
 
     // ── Colours ─────────────────────────────────────────────────────────────
     private static readonly Color CBg = new(0.12f, 0.12f, 0.12f);
@@ -230,224 +230,214 @@ public partial class LineChartPanel : Control
     // ── Drawing ─────────────────────────────────────────────────────────────
     public override void _Draw()
     {
-        var size = Size;
-        if (size.X < 12 || size.Y < 12) return;
-
-        DrawRect(new Rect2(Vector2.Zero, size), CBg, filled: true);
-        DrawRect(new Rect2(Vector2.Zero, size), CBorder, filled: false, width: 1f);
-
-        var font = GetThemeDefaultFont();
-        var fs = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 15);
-
-        DrawString(font, new Vector2(LeftMargin, TitleH - 7f), ChartTitle,
-            HorizontalAlignment.Left, -1, fs, CTitle);
-
-        var plot = new Rect2(
-            LeftMargin,
-            TitleH + TopPad,
-            size.X - LeftMargin - RightMargin,
-            size.Y - TitleH - TopPad - BottomMargin);
-
-        if (plot.Size.X < 4 || plot.Size.Y < 4) return;
-
-        DrawRect(plot, CPlotBg, filled: true);
-
-        // ── Compute value range across visible window of all series ────────
-        float gMin = float.MaxValue, gMax = float.MinValue;
-        foreach (var s in _series)
+        try
         {
-            if (s.Points.Count == 0) continue;
-            var (slice, _) = GetViewSlice(s.Points);
-            if (slice.Count == 0) continue;
-            gMin = Math.Min(gMin, slice.Min());
-            gMax = Math.Max(gMax, slice.Max());
-        }
+            var size = Size;
+            if (size.X < 12 || size.Y < 12) return;
 
-        if (gMin == float.MaxValue)
-        {
-            var cx = plot.Position.X + plot.Size.X * 0.5f;
-            var cy = plot.Position.Y + plot.Size.Y * 0.5f;
-            DrawString(font, new Vector2(cx - 32f, cy + fs * 0.4f), "No data yet",
-                HorizontalAlignment.Left, -1, fs - 1, CNoData);
-            return;
-        }
+            DrawRect(new Rect2(Vector2.Zero, size), CBg, filled: true);
+            DrawRect(new Rect2(Vector2.Zero, size), CBorder, filled: false, width: 1f);
 
-        if (Math.Abs(gMax - gMin) < 1e-6f) { gMin -= 0.5f; gMax += 0.5f; }
-        float range = gMax - gMin;
-        gMin -= range * 0.06f;
-        gMax += range * 0.06f;
-        range = gMax - gMin;
+            var font = GetThemeDefaultFont();
+            var fs = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 15);
 
-        // ── Grid & Y-axis labels ───────────────────────────────────────────
-        for (int gi = 0; gi <= GridLines; gi++)
-        {
-            float t = (float)gi / GridLines;
-            float gy = plot.Position.Y + plot.Size.Y * (1f - t);
-            DrawLine(new Vector2(plot.Position.X, gy),
-                     new Vector2(plot.Position.X + plot.Size.X, gy),
-                     CGrid, 1f);
-            float axVal = gMin + range * t;
-            DrawString(font, new Vector2(2f, gy + fs * 0.38f),
-                FormatAxisValue(axVal),
-                HorizontalAlignment.Left, LeftMargin - 6f, fs - 3, CAxisLabel);
-        }
+            DrawString(font, new Vector2(LeftMargin, TitleH - 7f), ChartTitle,
+                HorizontalAlignment.Left, -1, fs, CTitle);
 
-        // ── Series: gradient fill + line (windowed view) ──────────────────
-        // When smoothing is active, dim the raw line so the EMA overlay stands out.
-        float rawAlpha = ShowSmoothed ? 0.18f : 1.0f;
-        float rawWidth = ShowSmoothed ? 0.9f : 1.7f;
+            var plot = new Rect2(
+                LeftMargin,
+                TitleH + TopPad,
+                size.X - LeftMargin - RightMargin,
+                size.Y - TitleH - TopPad - BottomMargin);
 
-        int viewStart = 0, viewEnd = 0;
-        foreach (var s in _series)
-        {
-            if (s.Points.Count < 2) continue;
-            var (slice, startIdx) = GetViewSlice(s.Points);
-            viewStart = startIdx;
-            viewEnd = startIdx + slice.Count;
-            var pts = BuildPoints(plot, Downsample(slice, MaxDrawPoints), gMin, range);
-            DrawFill(plot, pts, s.LineColor, ShowSmoothed ? 0.08f : 0.20f);
-            var lineColor = new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha);
-            DrawPolyline(pts, lineColor, rawWidth, antialiased: true);
-        }
+            if (plot.Size.X < 4 || plot.Size.Y < 4) return;
 
-        // ── EMA smoothed overlay ───────────────────────────────────────────
-        if (ShowSmoothed)
-        {
+            DrawRect(plot, CPlotBg, filled: true);
+
+            float gMin = float.MaxValue, gMax = float.MinValue;
             foreach (var s in _series)
             {
-                if (s.Points.Count < 12) continue;
+                if (s.Points.Count == 0) continue;
                 var (slice, _) = GetViewSlice(s.Points);
-                if (slice.Count < 12) continue;
-                var smoothed = Ema(Downsample(slice, MaxDrawPoints), SmoothAlpha);
-                var smPts = BuildPoints(plot, smoothed, gMin, range);
-                DrawPolyline(smPts, GetSmoothedColor(s.LineColor), 2.6f, antialiased: true);
+                if (slice.Count == 0) continue;
+                gMin = Math.Min(gMin, slice.Min());
+                gMax = Math.Max(gMax, slice.Max());
             }
-        }
 
-        // ── X-axis extent labels (show visible episode range) ─────────────
-        int totalPts = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
-        if (viewEnd > viewStart + 1)
-        {
-            float labelY = plot.Position.Y + plot.Size.Y + BottomMargin - 6f;
-            DrawString(font, new Vector2(plot.Position.X, labelY),
-                (viewStart + 1).ToString(), HorizontalAlignment.Left, 40, fs - 3, CAxisLabel);
-            DrawString(font, new Vector2(plot.Position.X + plot.Size.X - 48f, labelY),
-                viewEnd.ToString(), HorizontalAlignment.Left, 48, fs - 3, CAxisLabel);
-
-            // Show zoom hint when not viewing all data.
-            if (totalPts > _viewWindow || _viewOffset > 0)
+            if (gMin == float.MaxValue)
             {
-                var hint = _viewOffset == 0
-                    ? $"[{_viewWindow} pts  Ctrl+scroll=zoom]"
-                    : $"[scroll to pan  Ctrl+scroll=zoom]";
-                DrawString(font, new Vector2(plot.Position.X + plot.Size.X * 0.5f - 60f, labelY),
-                    hint, HorizontalAlignment.Left, -1, fs - 4, new Color(0.38f, 0.38f, 0.38f));
+                var cx = plot.Position.X + plot.Size.X * 0.5f;
+                var cy = plot.Position.Y + plot.Size.Y * 0.5f;
+                DrawString(font, new Vector2(cx - 32f, cy + fs * 0.4f), "No data yet",
+                    HorizontalAlignment.Left, -1, fs - 1, CNoData);
+                return;
             }
-        }
 
-        // ── Legend (top-left of plot) ──────────────────────────────────────
-        float lx = plot.Position.X + 6f;
-        float ly = plot.Position.Y + 6f;
-        foreach (var s in _series)
-        {
-            DrawRect(new Rect2(lx, ly + 1f, 14f, 4f), s.LineColor, filled: true);
-            DrawString(font, new Vector2(lx + 18f, ly + fs * 0.68f), s.Label,
-                HorizontalAlignment.Left, -1, fs - 3, CLegend);
-            lx += font.GetStringSize(s.Label, HorizontalAlignment.Left, -1, fs - 3).X + 36f;
-        }
+            if (Math.Abs(gMax - gMin) < 1e-6f) { gMin -= 0.5f; gMax += 0.5f; }
+            float range = gMax - gMin;
+            gMin -= range * 0.06f;
+            gMax += range * 0.06f;
+            range = gMax - gMin;
 
-        // ── Current value (top-right corner, per first series) ─────────────
-        if (_series.Count > 0 && _series[0].Points.Count > 0)
-        {
-            var cur = FormatAxisValue(_series[0].Points[^1]);
-            DrawString(font, new Vector2(size.X - RightMargin - 58f, TitleH - 7f),
-                cur, HorizontalAlignment.Right, 60f, fs, _series[0].LineColor);
-        }
-
-        // ── Crosshair + tooltip on hover (snaps to data line) ─────────────
-        if (_mouseInside)
-        {
-            var mp = GetLocalMousePosition();
-            if (plot.HasPoint(mp) && _series.Count > 0)
+            for (int gi = 0; gi <= GridLines; gi++)
             {
-                float tx = (mp.X - plot.Position.X) / plot.Size.X;
+                float t = (float)gi / GridLines;
+                float gy = plot.Position.Y + plot.Size.Y * (1f - t);
+                DrawLine(new Vector2(plot.Position.X, gy),
+                         new Vector2(plot.Position.X + plot.Size.X, gy),
+                         CGrid, 1f);
+                float axVal = gMin + range * t;
+                DrawString(font, new Vector2(2f, gy + fs * 0.38f),
+                    FormatAxisValue(axVal),
+                    HorizontalAlignment.Left, LeftMargin - 6f, fs - 3, CAxisLabel);
+            }
 
-                // Collect snapped Y for every series at the same x-index.
-                var snapPoints = new List<(string Label, Color LineColor, float Val, float SnapY)>();
-                float snapX = mp.X;
-                int snapEpisode = viewStart;
+            float rawAlpha = ShowSmoothed ? 0.18f : 1.0f;
+            float rawWidth = ShowSmoothed ? 0.9f : 1.7f;
 
+            int viewStart = 0, viewEnd = 0;
+            foreach (var s in _series)
+            {
+                if (s.Points.Count < 2) continue;
+                var (slice, startIdx) = GetViewSlice(s.Points);
+                viewStart = startIdx;
+                viewEnd = startIdx + slice.Count;
+                var pts = BuildPoints(plot, Downsample(slice, MaxDrawPoints), gMin, range);
+                DrawFill(plot, pts, s.LineColor, ShowSmoothed ? 0.08f : 0.20f);
+                var lineColor = new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha);
+                DrawPolyline(pts, lineColor, rawWidth, antialiased: true);
+            }
+
+            if (ShowSmoothed)
+            {
                 foreach (var s in _series)
                 {
-                    if (s.Points.Count < 2) continue;
-                    var (slice, startIdx) = GetViewSlice(s.Points);
-                    if (slice.Count < 2) continue;
-
-                    var ds = Downsample(slice, MaxDrawPoints);
-                    var display = ShowSmoothed && ds.Count >= 12 ? Ema(ds, SmoothAlpha) : ds;
-
-                    int idx = Math.Clamp((int)Math.Round(tx * (display.Count - 1)), 0, display.Count - 1);
-                    float val = display[idx];
-                    float ty = Math.Clamp((val - gMin) / range, 0f, 1f);
-                    float sy = plot.Position.Y + plot.Size.Y * (1f - ty);
-
-                    if (snapPoints.Count == 0)
-                    {
-                        // Derive snap X and episode from the first series' index mapping.
-                        float idxRatio = (float)idx / Math.Max(display.Count - 1, 1);
-                        snapX = plot.Position.X + idxRatio * plot.Size.X;
-                        snapEpisode = startIdx + (int)Math.Round(idxRatio * (slice.Count - 1));
-                    }
-
-                    snapPoints.Add((s.Label, s.LineColor, val, sy));
-                }
-
-                if (snapPoints.Count > 0)
-                {
-                    float primaryY = snapPoints[0].SnapY;
-
-                    // Crosshair — horizontal line tracks first series, vertical tracks cursor x.
-                    var crossColor = new Color(0.70f, 0.70f, 0.70f, 0.28f);
-                    DrawLine(new Vector2(plot.Position.X, primaryY),
-                             new Vector2(plot.Position.X + plot.Size.X, primaryY), crossColor, 1f);
-                    DrawLine(new Vector2(snapX, plot.Position.Y),
-                             new Vector2(snapX, plot.Position.Y + plot.Size.Y), crossColor, 1f);
-
-                    // Dot on each series line at the snap position.
-                    foreach (var sp in snapPoints)
-                        DrawCircle(new Vector2(snapX, sp.SnapY), 3.5f,
-                            new Color(sp.LineColor.R, sp.LineColor.G, sp.LineColor.B, 0.9f));
-
-                    // Build tooltip lines: episode header + one row per series.
-                    var lines = new List<(string Text, Color Col)>
-                    {
-                        ($"ep {snapEpisode + 1}", new Color(0.65f, 0.65f, 0.65f))
-                    };
-                    foreach (var sp in snapPoints)
-                        lines.Add(($"{sp.Label}: {FormatAxisValue(sp.Val)}", sp.LineColor));
-
-                    float lineH = fs + 3f;
-                    float maxW = 0f;
-                    foreach (var (text, _) in lines)
-                        maxW = Math.Max(maxW, font.GetStringSize(text, HorizontalAlignment.Left, -1, fs - 2).X);
-                    const float Pad = 5f;
-                    float bw = maxW + Pad * 2f;
-                    float bh = lines.Count * lineH + Pad * 2f;
-
-                    float bx = snapX + 10f;
-                    float by = primaryY - bh - 6f;
-                    if (bx + bw > plot.Position.X + plot.Size.X) bx = snapX - bw - 10f;
-                    if (by < plot.Position.Y) by = primaryY + 8f;
-
-                    DrawRect(new Rect2(bx, by, bw, bh),
-                        new Color(0.10f, 0.10f, 0.10f, 0.92f), filled: true);
-                    DrawRect(new Rect2(bx, by, bw, bh),
-                        new Color(0.40f, 0.40f, 0.40f, 0.75f), filled: false, width: 1f);
-                    for (int li = 0; li < lines.Count; li++)
-                        DrawString(font, new Vector2(bx + Pad, by + Pad + (li + 0.82f) * lineH),
-                            lines[li].Text, HorizontalAlignment.Left, -1, fs - 2, lines[li].Col);
+                    if (s.Points.Count < 12) continue;
+                    var (slice, _) = GetViewSlice(s.Points);
+                    if (slice.Count < 12) continue;
+                    var smoothed = Ema(Downsample(slice, MaxDrawPoints), SmoothAlpha);
+                    var smPts = BuildPoints(plot, smoothed, gMin, range);
+                    DrawPolyline(smPts, GetSmoothedColor(s.LineColor), 2.6f, antialiased: true);
                 }
             }
+
+            int totalPts = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
+            if (viewEnd > viewStart + 1)
+            {
+                float labelY = plot.Position.Y + plot.Size.Y + BottomMargin - 6f;
+                DrawString(font, new Vector2(plot.Position.X, labelY),
+                    (viewStart + 1).ToString(), HorizontalAlignment.Left, 40, fs - 3, CAxisLabel);
+                DrawString(font, new Vector2(plot.Position.X + plot.Size.X - 48f, labelY),
+                    viewEnd.ToString(), HorizontalAlignment.Left, 48, fs - 3, CAxisLabel);
+
+                if (totalPts > _viewWindow || _viewOffset > 0)
+                {
+                    var hint = _viewOffset == 0
+                        ? $"[{_viewWindow} pts  Ctrl+scroll=zoom]"
+                        : $"[scroll to pan  Ctrl+scroll=zoom]";
+                    DrawString(font, new Vector2(plot.Position.X + plot.Size.X * 0.5f - 60f, labelY),
+                        hint, HorizontalAlignment.Left, -1, fs - 4, new Color(0.38f, 0.38f, 0.38f));
+                }
+            }
+
+            float lx = plot.Position.X + 6f;
+            float ly = plot.Position.Y + 6f;
+            foreach (var s in _series)
+            {
+                DrawRect(new Rect2(lx, ly + 1f, 14f, 4f), s.LineColor, filled: true);
+                DrawString(font, new Vector2(lx + 18f, ly + fs * 0.68f), s.Label,
+                    HorizontalAlignment.Left, -1, fs - 3, CLegend);
+                lx += font.GetStringSize(s.Label, HorizontalAlignment.Left, -1, fs - 3).X + 36f;
+            }
+
+            if (_series.Count > 0 && _series[0].Points.Count > 0)
+            {
+                var cur = FormatAxisValue(_series[0].Points[^1]);
+                DrawString(font, new Vector2(size.X - RightMargin - 58f, TitleH - 7f),
+                    cur, HorizontalAlignment.Right, 60f, fs, _series[0].LineColor);
+            }
+
+            if (_mouseInside)
+            {
+                var mp = GetLocalMousePosition();
+                if (plot.HasPoint(mp) && _series.Count > 0)
+                {
+                    float tx = (mp.X - plot.Position.X) / plot.Size.X;
+                    var snapPoints = new List<(string Label, Color LineColor, float Val, float SnapY)>();
+                    float snapX = mp.X;
+                    int snapEpisode = viewStart;
+
+                    foreach (var s in _series)
+                    {
+                        if (s.Points.Count < 2) continue;
+                        var (slice, startIdx) = GetViewSlice(s.Points);
+                        if (slice.Count < 2) continue;
+
+                        var ds = Downsample(slice, MaxDrawPoints);
+                        var display = ShowSmoothed && ds.Count >= 12 ? Ema(ds, SmoothAlpha) : ds;
+
+                        int idx = Math.Clamp((int)Math.Round(tx * (display.Count - 1)), 0, display.Count - 1);
+                        float val = display[idx];
+                        float ty = Math.Clamp((val - gMin) / range, 0f, 1f);
+                        float sy = plot.Position.Y + plot.Size.Y * (1f - ty);
+
+                        if (snapPoints.Count == 0)
+                        {
+                            float idxRatio = (float)idx / Math.Max(display.Count - 1, 1);
+                            snapX = plot.Position.X + idxRatio * plot.Size.X;
+                            snapEpisode = startIdx + (int)Math.Round(idxRatio * (slice.Count - 1));
+                        }
+
+                        snapPoints.Add((s.Label, s.LineColor, val, sy));
+                    }
+
+                    if (snapPoints.Count > 0)
+                    {
+                        float primaryY = snapPoints[0].SnapY;
+                        var crossColor = new Color(0.70f, 0.70f, 0.70f, 0.28f);
+                        DrawLine(new Vector2(plot.Position.X, primaryY),
+                                 new Vector2(plot.Position.X + plot.Size.X, primaryY), crossColor, 1f);
+                        DrawLine(new Vector2(snapX, plot.Position.Y),
+                                 new Vector2(snapX, plot.Position.Y + plot.Size.Y), crossColor, 1f);
+
+                        foreach (var sp in snapPoints)
+                            DrawCircle(new Vector2(snapX, sp.SnapY), 3.5f,
+                                new Color(sp.LineColor.R, sp.LineColor.G, sp.LineColor.B, 0.9f));
+
+                        var lines = new List<(string Text, Color Col)>
+                        {
+                            ($"ep {snapEpisode + 1}", new Color(0.65f, 0.65f, 0.65f))
+                        };
+                        foreach (var sp in snapPoints)
+                            lines.Add(($"{sp.Label}: {FormatAxisValue(sp.Val)}", sp.LineColor));
+
+                        float lineH = fs + 3f;
+                        float maxW = 0f;
+                        foreach (var (text, _) in lines)
+                            maxW = Math.Max(maxW, font.GetStringSize(text, HorizontalAlignment.Left, -1, fs - 2).X);
+                        const float Pad = 5f;
+                        float bw = maxW + Pad * 2f;
+                        float bh = lines.Count * lineH + Pad * 2f;
+
+                        float bx = snapX + 10f;
+                        float by = primaryY - bh - 6f;
+                        if (bx + bw > plot.Position.X + plot.Size.X) bx = snapX - bw - 10f;
+                        if (by < plot.Position.Y) by = primaryY + 8f;
+
+                        DrawRect(new Rect2(bx, by, bw, bh),
+                            new Color(0.10f, 0.10f, 0.10f, 0.92f), filled: true);
+                        DrawRect(new Rect2(bx, by, bw, bh),
+                            new Color(0.40f, 0.40f, 0.40f, 0.75f), filled: false, width: 1f);
+                        for (int li = 0; li < lines.Count; li++)
+                            DrawString(font, new Vector2(bx + Pad, by + Pad + (li + 0.82f) * lineH),
+                                lines[li].Text, HorizontalAlignment.Left, -1, fs - 2, lines[li].Col);
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            GD.PushError($"[LineChartPanel] Draw failed for '{ChartTitle}': {ex.Message}");
         }
     }
 

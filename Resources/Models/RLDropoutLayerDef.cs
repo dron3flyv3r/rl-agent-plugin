@@ -9,9 +9,23 @@ namespace RlAgentPlugin.Runtime;
 /// During inference the layer is a pure passthrough.
 /// </summary>
 [GlobalClass]
+[Tool]
 public partial class RLDropoutLayerDef : RLLayerDef
 {
-    [Export] public float Rate { get; set; } = 0.1f;
+    private float _rate = 0.1f;
+
+    [Export]
+    public float Rate
+    {
+        get => _rate;
+        set
+        {
+            var clamped = Mathf.Clamp(value, 0f, 0.99f);
+            if (Mathf.IsEqualApprox(_rate, clamped)) return;
+            _rate = clamped;
+            EmitChanged();
+        }
+    }
 
     internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
                                                bool useNativeLayers = false)

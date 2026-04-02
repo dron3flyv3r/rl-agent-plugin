@@ -27,7 +27,17 @@ RLAcademy
             └── GroupB  → RLPolicyGroupConfig
 ```
 
+Optional HPO setup adds one more layer:
+
+```
+RLAcademy
+└── RLHPOOrchestrator (direct child node)
+    └── Study (RLHPOStudy)
+```
+
 Each agent also has its own `PolicyGroupConfig` property that links it to a shared policy.
+
+For the full HPO workflow and field reference, see [hpo.md](hpo.md).
 
 ---
 
@@ -61,6 +71,7 @@ Configuration for the **Proximal Policy Optimization** algorithm.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `RolloutLength` | int | 256 | Number of transitions to collect before running a gradient update. Larger = more stable, slower feedback. |
+| `BpttLength` | int | 16 | Truncated backprop-through-time length for recurrent PPO/A2C networks. Ignored for feed-forward policies. |
 | `EpochsPerUpdate` | int | 4 | How many passes over the rollout data per update. More epochs extract more value from data but risk instability. |
 | `MiniBatchSize` | int | 64 | Samples per gradient step within each epoch. Should evenly divide `RolloutLength`. |
 | `LearningRate` | float | 0.0005 | Step size for the Adam optimizer. Controls how fast the network weights change. |
@@ -224,6 +235,8 @@ Each element in `TrunkLayers` is an `RLLayerDef` with:
 | `Dropout` | `Rate` | Randomly zeroes activations during training. Reduces overfitting. |
 | `LayerNorm` | — | Normalizes activations across features. Stabilizes training for deep networks. |
 | `Flatten` | — | Flattens input to 1D. Rarely needed for flat observation vectors. |
+| `LSTM` | `HiddenSize`, `GradClipNorm` | Recurrent layer with hidden state `h` and cell state `c`. Good for partial observability. |
+| `GRU` | `HiddenSize`, `GradClipNorm` | Recurrent layer with hidden state `h` only. Lighter than LSTM. |
 
 ### Activation functions
 
@@ -264,6 +277,23 @@ TrunkLayers:
   - Dense(128, Tanh)
   - Dropout(0.1)
 ```
+
+**Recurrent PPO / A2C policy:**
+```
+TrunkLayers:
+  - Dense(64, Tanh)
+  - LSTM(64, 1.0)
+  - Dense(64, Tanh)
+```
+
+### Recurrent layer notes
+
+- LSTM and GRU layers require the native C++ GDExtension.
+- Only one recurrent layer is currently supported per trunk.
+- End-to-end recurrent training is implemented for PPO and A2C.
+- DQN and SAC reject recurrent trunks during validation and runtime construction.
+- In shared-policy multi-agent scenes, each agent gets its own recurrent state even though the weights are shared.
+- `GradClipNorm` clips that recurrent layer's accumulated sequence gradients before the optimizer step.
 
 **General rule:** Deeper is not always better in RL. Start with 2×64 and scale up only if needed.
 
@@ -310,6 +340,12 @@ RLCosineSchedule:
   FinalValue:   0.0001
   CycleSteps:   1000000
 ```
+
+### Choosing LSTM vs GRU
+
+- Use `LSTM` when you want the most expressive memory and longer temporal context.
+- Use `GRU` when you want a smaller recurrent layer with fewer parameters.
+- If you are unsure, start with `GRU(32)` or `LSTM(64)` and `BpttLength: 16`.
 
 ### Custom schedule
 
@@ -607,3 +643,32 @@ public class MyHealthSensor : IObservationSensor, IObservationDebugLabels
     public IReadOnlyList<string> DebugLabels => new[] { "health" };
 }
 ```
+
+---
+
+## RLHPOOrchestrator and RLHPOStudy
+
+The HPO system is configured differently from the rest of the training stack:
+
+- `RLHPOOrchestrator` is a node, not a resource field on `RLAcademy`
+- it must be added as a direct child of `RLAcademy`
+- its `Study` property points to an `RLHPOStudy` resource
+
+At a high level:
+
+| HPO field | Purpose |
+|-----------|---------|
+| `StudyName` | Names the study and output directory |
+| `Direction` | Defines whether the objective is maximized or minimized |
+| `ObjectiveConfig` | Defines how policy-group metrics are turned into one objective |
+| `TrialBudget` | Limits total trial count |
+| `MaxTrialSteps` / `MaxTrialSeconds` | Caps per-trial runtime |
+| `SamplerKind` | Chooses random vs TPE parameter suggestion |
+| `PrunerKind` | Chooses early stopping strategy |
+| `PruneAfterSteps` | Delays pruning until enough progress exists |
+| `SearchSpace` | Lists the trainer fields to sample each trial |
+| `BaseRunConfig` | Optional run settings for all trials |
+
+`RLHPOParameter.ParameterName` targets properties on `RLTrainerConfig`, such as `LearningRate`, `Gamma`, `EntropyCoefficient`, `PpoMiniBatchSize`, or `SacTau`.
+
+See [hpo.md](hpo.md) for the full field reference, examples, limitations, and monitoring workflow.

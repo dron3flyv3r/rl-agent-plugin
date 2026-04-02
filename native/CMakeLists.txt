@@ -23,7 +23,9 @@ add_library(rl_cnn SHARED
     src/register_types.cpp
     src/RlCnnEncoder.cpp
     src/RlDenseLayer.cpp
+    src/RlGruLayer.cpp
     src/RlLayerNormLayer.cpp
+    src/RlLstmLayer.cpp
 )
 
 target_include_directories(rl_cnn PRIVATE src/)

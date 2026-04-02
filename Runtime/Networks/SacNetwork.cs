@@ -36,6 +36,8 @@ internal sealed class SacNetwork
         var useNativeLayers = graph.ResolveNativeLayerBackend();
 
         _actorTrunk = graph.BuildTrunkLayers(obsSize, null, useNativeLayers);
+        if (_actorTrunk.Any(layer => layer.IsRecurrent))
+            throw new InvalidOperationException("[SacNetwork] Recurrent trunk layers are not supported by SAC.");
         var actorTrunkOut = graph.OutputSize(obsSize);
         // Discrete: logits over actions; Continuous: [mean_0..mean_D, log_std_0..log_std_D]
         var actorOutSize = isContinuous ? actionDim * 2 : actionDim;

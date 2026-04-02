@@ -25,7 +25,7 @@ internal static class NativeLayerSupport
         {
             var obj = ClassDB.Instantiate("RlDenseLayer").AsGodotObject();
             if (obj is null) return false;
-            obj.Free();
+            obj.Dispose();
             return true;
         }
         catch

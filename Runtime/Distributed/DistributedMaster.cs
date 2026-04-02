@@ -29,8 +29,12 @@ public struct DistributedMasterStats
     public int ConnectedWorkers;
     /// <summary>Workers configured (target count).</summary>
     public int ExpectedWorkers;
-    /// <summary>Rollouts received from workers in the current round (resets each update).</summary>
+    /// <summary>Rollout messages received since the last completed update, summed across groups.</summary>
     public int RolloutsThisRound;
+    /// <summary>True when any active distributed trainer is off-policy (for example SAC).</summary>
+    public bool HasOffPolicyTrainers;
+    /// <summary>Number of on-policy groups contributing to the rollout barrier.</summary>
+    public int OnPolicyGroupCount;
 
     /// <summary>Total training updates completed across all groups.</summary>
     public long TotalUpdates;
@@ -220,9 +224,14 @@ public sealed class DistributedMaster : IDisposable
         var entropy          = 0f;
         var clipFrac         = 0f;
         var groupCount       = Math.Max(1, _trainers.Count);
+        var hasOffPolicy     = false;
+        var onPolicyGroups   = 0;
 
         foreach (var g in _trainers.Keys)
         {
+            if (_trainers[g].IsOffPolicy) hasOffPolicy = true;
+            else onPolicyGroups++;
+
             totalUpdates     += _totalUpdates.GetValueOrDefault(g);
             totalWorkerSteps += _totalWorkerSteps.GetValueOrDefault(g);
             lastBatch        += _lastBatchSteps.GetValueOrDefault(g);
@@ -251,6 +260,8 @@ public sealed class DistributedMaster : IDisposable
             ConnectedWorkers       = connected,
             ExpectedWorkers        = _workerCount,
             RolloutsThisRound      = _rolloutsThisRound.Values.Sum(),
+            HasOffPolicyTrainers   = hasOffPolicy,
+            OnPolicyGroupCount     = onPolicyGroups,
             TotalUpdates           = totalUpdates,
             TotalSteps             = masterTotalSteps + totalWorkerSteps,
             TotalWorkerSteps       = totalWorkerSteps,
@@ -398,7 +409,12 @@ public sealed class DistributedMaster : IDisposable
                 _workerStepsThisRound[groupId] = _workerStepsThisRound.GetValueOrDefault(groupId) + steps;
                 TotalWorkerEpisodes           += episodes;
                 if (_verbose)
-                    GD.Print($"[RL Distributed] Rollout '{groupId}': {steps} steps ({_rolloutsThisRound[groupId]}/{ConnectedWorkers}).");
+                {
+                    var progress = trainer.IsOffPolicy
+                        ? $"{_rolloutsThisRound[groupId]} msg(s) since last update"
+                        : $"{_rolloutsThisRound[groupId]}/{ConnectedWorkers}";
+                    GD.Print($"[RL Distributed] Rollout '{groupId}': {steps} steps ({progress}).");
+                }
             }
         }
     }

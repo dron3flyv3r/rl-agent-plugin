@@ -5,30 +5,62 @@ using Godot.Collections;
 namespace RlAgentPlugin.Runtime;
 
 [GlobalClass]
+[Tool]
 public partial class RLNetworkGraph : Resource
 {
     private const string LayerResourceTypes =
-        $"{nameof(RLDenseLayerDef)},{nameof(RLDropoutLayerDef)},{nameof(RLFlattenLayerDef)},{nameof(RLLayerNormDef)}";
+        $"{nameof(RLDenseLayerDef)},{nameof(RLDropoutLayerDef)},{nameof(RLFlattenLayerDef)},{nameof(RLLayerNormDef)},{nameof(RLLstmLayerDef)},{nameof(RLGruLayerDef)}";
 
-
-    [Export(PropertyHint.ResourceType, LayerResourceTypes)]
-    public Array<Resource> TrunkLayers { get; set; } = new Array<Resource>
+    private Array<Resource> _trunkLayers = new()
     {
         new RLDenseLayerDef { Size = 64, Activation = RLActivationKind.Tanh },
         new RLDenseLayerDef { Size = 64, Activation = RLActivationKind.Tanh },
     };
+    private RLOptimizerKind _optimizer = RLOptimizerKind.Adam;
+    private bool _useNativeLayers;
 
-    [Export] public RLOptimizerKind Optimizer { get; set; } = RLOptimizerKind.Adam;
+    [Export(PropertyHint.ResourceType, LayerResourceTypes)]
+    public Array<Resource> TrunkLayers
+    {
+        get => _trunkLayers;
+        set
+        {
+            _trunkLayers = value ?? new Array<Resource>();
+            EmitChanged();
+        }
+    }
+
+    [Export]
+    public RLOptimizerKind Optimizer
+    {
+        get => _optimizer;
+        set
+        {
+            if (_optimizer == value) return;
+            _optimizer = value;
+            EmitChanged();
+        }
+    }
 
     /// <summary>
     /// When enabled, trunk Dense/LayerNorm layers prefer native C++ implementations
     /// if the GDExtension is available at runtime.
     /// </summary>
     [Export]
-    public bool UseNativeLayers { get; set; } = false;
+    public bool UseNativeLayers
+    {
+        get => _useNativeLayers;
+        set
+        {
+            if (_useNativeLayers == value) return;
+            _useNativeLayers = value;
+            EmitChanged();
+        }
+    }
 
-    private bool _loggedLayerBackend;
-    private bool _warnedNativeUnavailable;
+    private static readonly object BackendLogLock = new();
+    private static bool _loggedLayerBackend;
+    private static bool _warnedNativeUnavailable;
 
     /// <summary>Output size of the trunk; chains GetOutputSize through each layer def.</summary>
     public int OutputSize(int inputSize)
@@ -117,16 +149,25 @@ public partial class RLNetworkGraph : Resource
         var available = NativeLayerSupport.IsAvailable;
         var effective = requested && available;
 
-        if (requested && !available && !_warnedNativeUnavailable)
+        if (requested && !available)
         {
-            GD.PushWarning("[RLNetworkGraph] Native layers requested but unavailable. Falling back to C# layers.");
-            _warnedNativeUnavailable = true;
+            lock (BackendLogLock)
+            {
+                if (!_warnedNativeUnavailable)
+                {
+                    GD.PushWarning("[RLNetworkGraph] Native layers requested but unavailable. Falling back to C# layers.");
+                    _warnedNativeUnavailable = true;
+                }
+            }
         }
 
-        if (!_loggedLayerBackend)
+        lock (BackendLogLock)
         {
-            GD.Print($"[RLNetworkGraph] Layer backend selected: {(effective ? "C++ native" : "C# managed")} (requested_native={requested}, native_available={available}).");
-            _loggedLayerBackend = true;
+            if (!_loggedLayerBackend)
+            {
+                GD.Print($"[RLNetworkGraph] Layer backend selected: {(effective ? "C++ native" : "C# managed")} (requested_native={requested}, native_available={available}).");
+                _loggedLayerBackend = true;
+            }
         }
 
         return effective;

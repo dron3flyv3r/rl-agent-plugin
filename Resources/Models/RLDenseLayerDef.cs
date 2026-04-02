@@ -6,10 +6,36 @@ namespace RlAgentPlugin.Runtime;
 /// Layer definition for a fully-connected (dense / linear) layer.
 /// </summary>
 [GlobalClass]
+[Tool]
 public partial class RLDenseLayerDef : RLLayerDef
 {
-    [Export] public int Size { get; set; } = 64;
-    [Export] public RLActivationKind Activation { get; set; } = RLActivationKind.Tanh;
+    private int _size = 64;
+    private RLActivationKind _activation = RLActivationKind.Tanh;
+
+    [Export]
+    public int Size
+    {
+        get => _size;
+        set
+        {
+            var clamped = Mathf.Max(1, value);
+            if (_size == clamped) return;
+            _size = clamped;
+            EmitChanged();
+        }
+    }
+
+    [Export]
+    public RLActivationKind Activation
+    {
+        get => _activation;
+        set
+        {
+            if (_activation == value) return;
+            _activation = value;
+            EmitChanged();
+        }
+    }
 
     internal override NetworkLayer CreateLayer(int inputSize, RLOptimizerKind optimizer,
                                                bool useNativeLayers = false)

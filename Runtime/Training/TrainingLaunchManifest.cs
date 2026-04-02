@@ -23,6 +23,22 @@ public sealed class TrainingLaunchManifest
     public bool QuickTestMode { get; set; }
     public int QuickTestEpisodeLimit { get; set; } = 5;
     public bool QuickTestShowSpyOverlay { get; set; }
+    /// <summary>
+    /// When set by the HPO orchestrator, TrainingBootstrap applies the JSON key-value
+    /// overrides from this path on top of the resolved RLTrainerConfig.
+    /// Empty string means no HPO override.
+    /// </summary>
+    public string HpoOverridePath { get; set; } = string.Empty;
+    /// <summary>
+    /// Optional session heartbeat file written by the HPO master/orchestrator.
+    /// Trial subprocesses require this heartbeat to stay fresh while they run.
+    /// </summary>
+    public string HpoMasterHeartbeatPath { get; set; } = string.Empty;
+    /// <summary>
+    /// Session token that must match the contents of <see cref="HpoMasterHeartbeatPath"/>.
+    /// Prevents stale or unrelated heartbeat files from keeping orphaned trials alive.
+    /// </summary>
+    public string HpoMasterHeartbeatToken { get; set; } = string.Empty;
 
     public static TrainingLaunchManifest CreateDefault() => new();
 
@@ -91,6 +107,9 @@ public sealed class TrainingLaunchManifest
             QuickTestMode = ReadBool(data, nameof(QuickTestMode)),
             QuickTestEpisodeLimit = ReadInt(data, nameof(QuickTestEpisodeLimit), 5),
             QuickTestShowSpyOverlay = ReadBool(data, nameof(QuickTestShowSpyOverlay)),
+            HpoOverridePath = ReadString(data, nameof(HpoOverridePath)),
+            HpoMasterHeartbeatPath = ReadString(data, nameof(HpoMasterHeartbeatPath)),
+            HpoMasterHeartbeatToken = ReadString(data, nameof(HpoMasterHeartbeatToken)),
         };
     }
 
@@ -114,6 +133,9 @@ public sealed class TrainingLaunchManifest
             { nameof(QuickTestMode), QuickTestMode },
             { nameof(QuickTestEpisodeLimit), QuickTestEpisodeLimit },
             { nameof(QuickTestShowSpyOverlay), QuickTestShowSpyOverlay },
+            { nameof(HpoOverridePath), HpoOverridePath },
+            { nameof(HpoMasterHeartbeatPath), HpoMasterHeartbeatPath },
+            { nameof(HpoMasterHeartbeatToken), HpoMasterHeartbeatToken },
         };
     }
 

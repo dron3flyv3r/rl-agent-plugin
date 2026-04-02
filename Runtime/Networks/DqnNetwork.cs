@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace RlAgentPlugin.Runtime;
 
@@ -29,6 +30,8 @@ internal sealed class DqnNetwork
         var trunkOut = graph.OutputSize(obsSize);
 
         _onlineTrunk = graph.BuildTrunkLayers(obsSize, null, useNativeLayers);
+        if (_onlineTrunk.Any(layer => layer.IsRecurrent))
+            throw new InvalidOperationException("[DqnNetwork] Recurrent trunk layers are not supported by DQN.");
         _onlineHead = useNativeLayers
             ? new NativeDenseLayer(trunkOut, actionCount, null, graph.Optimizer)
             : new DenseLayer(trunkOut, actionCount, null, graph.Optimizer);

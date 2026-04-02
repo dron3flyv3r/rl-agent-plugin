@@ -36,6 +36,7 @@ public sealed class PolicyDecision
     public int DiscreteAction { get; init; } = -1;
     /// <summary>Sampled continuous action vector (empty for discrete-only).</summary>
     public float[] ContinuousActions { get; init; } = Array.Empty<float>();
+    public RecurrentState? RecurrentState { get; init; }
     public float LogProbability { get; init; }
     public float Value { get; init; }
     public float Entropy { get; init; }
@@ -57,6 +58,22 @@ public sealed class Transition
     public float Value { get; init; }
     /// <summary>Value estimate at next state (used by PPO for GAE).</summary>
     public float NextValue { get; init; }
+    /// <summary>
+    /// Recurrent hidden state snapshot at the START of this step (h vector).
+    /// Null for feedforward agents or the initial step of a new episode.
+    /// </summary>
+    public float[]? HiddenState { get; init; }
+    /// <summary>
+    /// LSTM cell state snapshot at the START of this step (c vector).
+    /// Null for GRU agents, feedforward agents, or the initial step.
+    /// </summary>
+    public float[]? CellState { get; init; }
+    /// <summary>
+    /// Index of this agent within its policy group's decision batch.
+    /// Used to group transitions into per-agent sequences for recurrent BPTT.
+    /// Defaults to 0 (single-agent groups).
+    /// </summary>
+    public int GroupAgentSlot { get; init; }
 }
 
 public sealed class TrainerUpdateStats
@@ -65,6 +82,7 @@ public sealed class TrainerUpdateStats
     public float ValueLoss { get; init; }
     public float Entropy { get; init; }
     public float ClipFraction { get; init; }
+    public float? SacAlpha { get; init; }
     public RLCheckpoint Checkpoint { get; init; } = new();
 }
 
@@ -144,6 +162,35 @@ public interface ITrainer
     void RecordTransition(Transition transition);
     TrainerUpdateStats? TryUpdate(string groupId, long totalSteps, long episodeCount);
     RLCheckpoint CreateCheckpoint(string groupId, long totalSteps, long episodeCount, long updateCount);
+
+    // ── Recurrent policy support ──────────────────────────────────────────────
+
+    /// <summary>
+    /// True when the trainer's policy network contains recurrent trunk layers (LSTM/GRU).
+    /// When true, <see cref="TrainingBootstrap"/> calls <see cref="SampleActionRecurrent"/>
+    /// per-agent instead of batch <see cref="SampleActions"/>.
+    /// </summary>
+    bool HasRecurrentPolicy => false;
+
+    /// <summary>
+    /// Returns a zero-initialised <see cref="RecurrentState"/> compatible with this trainer's
+    /// recurrent network. Returns null for feedforward trainers.
+    /// </summary>
+    RecurrentState? CreateZeroRecurrentState() => null;
+
+    /// <summary>
+    /// Single-step recurrent inference. Updates <paramref name="state"/> in-place and returns
+    /// the policy decision. For feedforward trainers falls back to <see cref="SampleAction"/>.
+    /// </summary>
+    PolicyDecision SampleActionRecurrent(float[] observation, RecurrentState state)
+        => SampleAction(observation);
+
+    /// <summary>
+    /// Value estimate for the given observation and recurrent state without mutating the state.
+    /// Feedforward trainers fall back to <see cref="EstimateValue"/>.
+    /// </summary>
+    float EstimateValueRecurrent(float[] observation, RecurrentState state)
+        => EstimateValue(observation);
 
     /// <summary>
     /// Returns a greedy/deterministic inference policy backed by a weight snapshot of the

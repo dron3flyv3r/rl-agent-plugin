@@ -41,8 +41,8 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         _config = config;
         _trainerConfig = config.TrainerConfig;
         var hasImageStreams = HasImageStreams(config);
-        _useGpuTrainingNetwork = hasImageStreams && GpuDevice.IsAvailable();
         _network = CreatePolicyNetwork(config, preferGpuImageEncoders: false);
+        _useGpuTrainingNetwork = ShouldUseGpuTrainingNetwork(config, _network);
 
         if (hasImageStreams)
         {
@@ -60,6 +60,8 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
     }
 
     public int TransitionCount => _transitions.Count;
+    public bool HasRecurrentPolicy => _network.HasRecurrentTrunk;
+    public RecurrentState? CreateZeroRecurrentState() => _network.HasRecurrentTrunk ? _network.CreateZeroRecurrentState() : null;
 
     public PolicyDecision SampleAction(float[] observation)
     {
@@ -109,6 +111,25 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         return decisions;
     }
 
+    public PolicyDecision SampleActionRecurrent(float[] observation, RecurrentState state)
+    {
+        var inference = _network.InferRecurrent(observation, state);
+
+        if (_config.ContinuousActionDimensions > 0)
+            return SampleContinuousDecision(inference.Logits, inference.Value);
+
+        var probabilities = Softmax(inference.Logits);
+        var sampledAction = SampleFromProbabilities(probabilities);
+        var logProbability = Mathf.Log(Math.Max(1e-6f, probabilities[sampledAction]));
+        return new PolicyDecision
+        {
+            DiscreteAction = sampledAction,
+            Value = inference.Value,
+            LogProbability = logProbability,
+            Entropy = CalculateEntropy(probabilities),
+        };
+    }
+
     private PolicyDecision SampleContinuousDecision(float[] actorOut, float value)
     {
         var D = _config.ContinuousActionDimensions;
@@ -146,6 +167,12 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         return _network.Infer(observation).Value;
     }
 
+    public float EstimateValueRecurrent(float[] observation, RecurrentState state)
+    {
+        var clonedState = CloneState(state);
+        return _network.InferRecurrent(observation, clonedState).Value;
+    }
+
     public float[] EstimateValues(VectorBatch observations)
     {
         return _network.InferBatch(observations).Values;
@@ -165,6 +192,9 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             OldLogProbability = t.OldLogProbability,
             Value = t.Value,
             NextValue = t.NextValue,
+            HiddenState = t.HiddenState is { } h ? (float[])h.Clone() : null,
+            CellState = t.CellState is { } c ? (float[])c.Clone() : null,
+            GroupAgentSlot = t.GroupAgentSlot,
         });
     }
 
@@ -176,6 +206,34 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         }
 
         var tUpdate = RLProfiler.Begin();
+        if (_network.HasRecurrentTrunk)
+        {
+            var sequences = BuildRecurrentTrainingSequences(_transitions, _trainerConfig, _network, _network.CreateZeroRecurrentState());
+            NormalizeAdvantages(sequences);
+            var recurrentResult = RunTrainingEpochsRecurrent(
+                _network,
+                sequences,
+                _trainerConfig,
+                new Random(unchecked((int)_rng.Randi())));
+            _transitions.Clear();
+            RLCheckpoint? recurrentCheckpoint = null;
+            if (recurrentResult.Checkpoint is not null)
+            {
+                _network.LoadCheckpoint(recurrentResult.Checkpoint);
+                recurrentCheckpoint = PrepareStatsCheckpoint(recurrentResult.Checkpoint, groupId, totalSteps, episodeCount);
+            }
+
+            RLProfiler.End("PPO.TryUpdate", tUpdate);
+            return new TrainerUpdateStats
+            {
+                PolicyLoss = recurrentResult.PolicyLoss,
+                ValueLoss = recurrentResult.ValueLoss,
+                Entropy = recurrentResult.Entropy,
+                ClipFraction = recurrentResult.ClipFraction,
+                Checkpoint = recurrentCheckpoint ?? new RLCheckpoint(),
+            };
+        }
+
         var samples = BuildTrainingSamples();
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(_trainerConfig.PpoMiniBatchSize, 1, samples.Count);
@@ -233,6 +291,17 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         var count = Math.Min(_transitions.Count, maxTransitions);
         var transitions = _transitions.GetRange(0, count);
         _transitions.Clear();
+
+        if (_network.HasRecurrentTrunk)
+        {
+            _shadowNetwork ??= CreatePolicyNetwork(_config, preferGpuImageEncoders: false);
+            _network.CopyWeightsTo(_shadowNetwork);
+
+            var recurrentShadow = _shadowNetwork;
+            var recurrentConfig = _trainerConfig;
+            _pendingUpdate = Task.Run(() => RunBackgroundUpdate(recurrentShadow, transitions, recurrentConfig));
+            return true;
+        }
 
         if (_useGpuTrainingNetwork)
         {
@@ -323,6 +392,15 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         RLTrainerConfig config)
     {
         var tBg = RLProfiler.Begin();
+        if (network.HasRecurrentTrunk)
+        {
+            var sequences = BuildRecurrentTrainingSequences(transitions, config, network, network.CreateZeroRecurrentState());
+            NormalizeAdvantages(sequences);
+            var recurrentResult = RunTrainingEpochsRecurrent(network, sequences, config, new Random(), captureCheckpoint: true);
+            RLProfiler.End("PPO.BackgroundUpdate", tBg);
+            return recurrentResult;
+        }
+
         var samples = BuildTrainingSamplesFrom(transitions, config);
         NormalizeAdvantages(samples);
         var miniBatchSize = Math.Clamp(config.PpoMiniBatchSize, 1, samples.Count);
@@ -435,6 +513,56 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         };
     }
 
+    private static PpoAsyncResult RunTrainingEpochsRecurrent(
+        PolicyValueNetwork network,
+        List<PolicyValueNetwork.RecurrentTrainingSequence> sequences,
+        RLTrainerConfig config,
+        Random rng,
+        bool captureCheckpoint = false)
+    {
+        var policyLoss = 0f;
+        var valueLoss = 0f;
+        var entropy = 0f;
+        var clipFraction = 0f;
+        var processedSteps = 0;
+
+        for (var epoch = 0; epoch < config.EpochsPerUpdate; epoch++)
+        {
+            ShuffleWithRandom(sequences, rng);
+            for (var start = 0; start < sequences.Count;)
+            {
+                var batch = new List<PolicyValueNetwork.RecurrentTrainingSequence>();
+                var batchStepCount = 0;
+                while (start < sequences.Count &&
+                       (batchStepCount == 0 || batchStepCount < config.PpoMiniBatchSize))
+                {
+                    batch.Add(sequences[start]);
+                    batchStepCount += sequences[start].Steps.Count;
+                    start++;
+                }
+
+                var stats = network.ApplyGradientsRecurrent(batch, config);
+                policyLoss   += stats.PolicyLoss * batchStepCount;
+                valueLoss    += stats.ValueLoss * batchStepCount;
+                entropy      += stats.Entropy * batchStepCount;
+                clipFraction += stats.ClipFraction * batchStepCount;
+                processedSteps += batchStepCount;
+            }
+        }
+
+        var norm = Math.Max(1, processedSteps);
+        return new PpoAsyncResult
+        {
+            PolicyLoss = policyLoss / norm,
+            ValueLoss = valueLoss / norm,
+            Entropy = entropy / norm,
+            ClipFraction = clipFraction / norm,
+            Checkpoint = captureCheckpoint
+                ? network.SaveCheckpoint("_ppo_trained_", 0, 0, 0)
+                : null,
+        };
+    }
+
     private static PolicyValueNetwork CreatePolicyNetwork(PolicyGroupConfig config, bool preferGpuImageEncoders)
     {
         return config.ObsSpec is not null
@@ -451,9 +579,9 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
                 config.NetworkGraph);
     }
 
-    private static bool ShouldUseGpuTrainingNetwork(PolicyGroupConfig config)
+    private static bool ShouldUseGpuTrainingNetwork(PolicyGroupConfig config, PolicyValueNetwork network)
     {
-        return HasImageStreams(config) && GpuDevice.IsAvailable();
+        return HasImageStreams(config) && !network.HasRecurrentTrunk && GpuDevice.IsAvailable();
     }
 
     private static bool HasImageStreams(PolicyGroupConfig config)
@@ -486,36 +614,100 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         IReadOnlyList<PpoTransition> transitions, RLTrainerConfig config)
     {
         var samples = new List<TrainingSample>(transitions.Count);
-        var advantages = new float[transitions.Count];
-        var returns = new float[transitions.Count];
-        var nextAdvantage = 0.0f;
-
-        for (var index = transitions.Count - 1; index >= 0; index--)
+        foreach (var trajectory in BuildAgentTrajectories(transitions))
         {
-            var transition = transitions[index];
-            var mask = transition.Done ? 0.0f : 1.0f;
-            var delta = transition.Reward + (config.Gamma * transition.NextValue * mask) - transition.Value;
-            nextAdvantage = delta + (config.Gamma * config.GaeLambda * mask * nextAdvantage);
-            advantages[index] = nextAdvantage;
-            returns[index] = transition.Value + advantages[index];
-        }
-
-        for (var index = 0; index < transitions.Count; index++)
-        {
-            var transition = transitions[index];
-            samples.Add(new TrainingSample
+            foreach (var (transition, advantage, ret) in ComputeAdvantages(trajectory, config))
             {
-                Observation = transition.Observation,
-                Action = transition.Action,
-                ContinuousActions = transition.ContinuousActions,
-                Return = returns[index],
-                Advantage = advantages[index],
-                OldLogProbability = transition.OldLogProbability,
-                ValueEstimate = transition.Value,
-            });
+                samples.Add(new TrainingSample
+                {
+                    Observation = transition.Observation,
+                    Action = transition.Action,
+                    ContinuousActions = transition.ContinuousActions,
+                    Return = ret,
+                    Advantage = advantage,
+                    OldLogProbability = transition.OldLogProbability,
+                    ValueEstimate = transition.Value,
+                });
+            }
         }
 
         return samples;
+    }
+
+    private static List<PolicyValueNetwork.RecurrentTrainingSequence> BuildRecurrentTrainingSequences(
+        IReadOnlyList<PpoTransition> transitions,
+        RLTrainerConfig config,
+        PolicyValueNetwork network,
+        RecurrentState zeroState)
+    {
+        var sequences = new List<PolicyValueNetwork.RecurrentTrainingSequence>();
+        foreach (var trajectory in BuildAgentTrajectories(transitions))
+        {
+            var enriched = ComputeAdvantages(trajectory, config);
+            for (var cursor = 0; cursor < enriched.Count;)
+            {
+                var episodeEnd = cursor;
+                while (episodeEnd < enriched.Count && !enriched[episodeEnd].transition.Done)
+                    episodeEnd++;
+                if (episodeEnd < enriched.Count)
+                    episodeEnd++;
+
+                RecurrentState? carriedState = null;
+                for (var start = cursor; start < episodeEnd;)
+                {
+                    var batchLength = Math.Min(Math.Max(1, config.BpttLength), episodeEnd - start);
+                    var steps = new List<TrainingSample>(batchLength);
+                    for (var i = 0; i < batchLength; i++)
+                    {
+                        var item = enriched[start + i];
+                        steps.Add(new TrainingSample
+                        {
+                            Observation = item.transition.Observation,
+                            Action = item.transition.Action,
+                            ContinuousActions = item.transition.ContinuousActions,
+                            Return = item.ret,
+                            Advantage = item.advantage,
+                            OldLogProbability = item.transition.OldLogProbability,
+                            ValueEstimate = item.transition.Value,
+                        });
+                    }
+
+                    var initialState = carriedState is not null
+                        ? CloneState(carriedState)
+                        : CreateInitialState(enriched[start].transition, zeroState);
+
+                    sequences.Add(new PolicyValueNetwork.RecurrentTrainingSequence
+                    {
+                        Steps = steps,
+                        InitialHiddenState = (float[])initialState.H.Clone(),
+                        InitialCellState = initialState.C is { } c
+                            ? (float[])c.Clone()
+                            : null,
+                    });
+
+                    foreach (var step in steps)
+                        network.InferRecurrent(step.Observation, initialState);
+
+                    carriedState = initialState;
+                    start += batchLength;
+                }
+
+                cursor = episodeEnd;
+            }
+        }
+
+        return sequences;
+    }
+
+    private static RecurrentState CreateInitialState(PpoTransition transition, RecurrentState zeroState)
+    {
+        return new RecurrentState(
+            transition.HiddenState is { } hiddenState
+                ? (float[])hiddenState.Clone()
+                : (float[])zeroState.H.Clone(),
+            transition.CellState is { } cellState
+                ? (float[])cellState.Clone()
+                : zeroState.C is { } zeroCell ? (float[])zeroCell.Clone() : null);
     }
 
     private static void NormalizeAdvantages(IList<TrainingSample> samples)
@@ -532,6 +724,54 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         {
             sample.Advantage = (sample.Advantage - (float)mean) / stdDev;
         }
+    }
+
+    private static void NormalizeAdvantages(IList<PolicyValueNetwork.RecurrentTrainingSequence> sequences)
+    {
+        var allSamples = sequences.SelectMany(sequence => sequence.Steps).ToList();
+        NormalizeAdvantages(allSamples);
+    }
+
+    private static List<List<PpoTransition>> BuildAgentTrajectories(IReadOnlyList<PpoTransition> transitions)
+    {
+        var bySlot = new Dictionary<int, List<PpoTransition>>();
+        foreach (var transition in transitions)
+        {
+            if (!bySlot.TryGetValue(transition.GroupAgentSlot, out var trajectory))
+            {
+                trajectory = new List<PpoTransition>();
+                bySlot[transition.GroupAgentSlot] = trajectory;
+            }
+
+            trajectory.Add(transition);
+        }
+
+        return bySlot.Values.ToList();
+    }
+
+    private static List<(PpoTransition transition, float advantage, float ret)> ComputeAdvantages(
+        IReadOnlyList<PpoTransition> trajectory,
+        RLTrainerConfig config)
+    {
+        var count = trajectory.Count;
+        var advantages = new float[count];
+        var returns = new float[count];
+        var nextAdvantage = 0.0f;
+
+        for (var index = count - 1; index >= 0; index--)
+        {
+            var transition = trajectory[index];
+            var mask = transition.Done ? 0.0f : 1.0f;
+            var delta = transition.Reward + (config.Gamma * transition.NextValue * mask) - transition.Value;
+            nextAdvantage = delta + (config.Gamma * config.GaeLambda * mask * nextAdvantage);
+            advantages[index] = nextAdvantage;
+            returns[index] = transition.Value + advantages[index];
+        }
+
+        var result = new List<(PpoTransition transition, float advantage, float ret)>(count);
+        for (var index = 0; index < count; index++)
+            result.Add((trajectory[index], advantages[index], returns[index]));
+        return result;
     }
 
     private float SampleNormal()
@@ -576,6 +816,15 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         }
     }
 
+    private static void ShuffleWithRandom(IList<PolicyValueNetwork.RecurrentTrainingSequence> sequences, Random rng)
+    {
+        for (var index = sequences.Count - 1; index > 0; index--)
+        {
+            var swapIndex = rng.Next(0, index + 1);
+            (sequences[index], sequences[swapIndex]) = (sequences[swapIndex], sequences[index]);
+        }
+    }
+
     private static float[] Softmax(IReadOnlyList<float> logits)
     {
         var maxLogit = logits.Max();
@@ -611,6 +860,13 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         return entropy;
     }
 
+    private static RecurrentState CloneState(RecurrentState state)
+    {
+        return new RecurrentState(
+            (float[])state.H.Clone(),
+            state.C is { } c ? (float[])c.Clone() : null);
+    }
+
     // ── IDistributedTrainer ───────────────────────────────────────────────────
 
     public bool IsOffPolicy => false;
@@ -631,6 +887,9 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
                 OldLogProbability = t.OldLogProbability,
                 Value             = t.Value,
                 NextValue         = t.NextValue,
+                GroupAgentSlot    = t.GroupAgentSlot,
+                HiddenState       = t.HiddenState,
+                CellState         = t.CellState,
             })
             .ToList();
         _transitions.Clear();
@@ -651,6 +910,9 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
                 OldLogProbability = t.OldLogProbability,
                 Value             = t.Value,
                 NextValue         = t.NextValue,
+                GroupAgentSlot    = t.GroupAgentSlot,
+                HiddenState       = t.HiddenState,
+                CellState         = t.CellState,
             });
         }
     }
@@ -692,6 +954,9 @@ public sealed class PpoTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         public float OldLogProbability { get; init; }
         public float Value { get; init; }
         public float NextValue { get; init; }
+        public float[]? HiddenState { get; init; }
+        public float[]? CellState { get; init; }
+        public int GroupAgentSlot { get; init; }
     }
 }
 
