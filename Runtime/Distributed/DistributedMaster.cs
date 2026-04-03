@@ -506,13 +506,17 @@ public sealed class DistributedMaster : IDisposable
         var now     = DateTime.UtcNow;
         var durSec  = _trainStartTime.TryGetValue(groupId, out var start)
                       ? (float)(now - start).TotalSeconds : 0f;
+        var roundDurSec = _lastUpdateTime.TryGetValue(groupId, out var last)
+                          ? (float)(now - last).TotalSeconds
+                          : durSec;
         var wSteps  = _workerStepsThisRound.GetValueOrDefault(groupId);
         var bSteps  = (int)wSteps; // local steps were already in the buffer
 
-        // Throughput window.
+        // Throughput window: use full wall-clock round time (rollout collection + any pause +
+        // training) so paused intervals are reflected in Steps/sec.
         if (_throughputWindow.TryGetValue(groupId, out var win))
         {
-            win.Enqueue((bSteps, Math.Max(durSec, 0.001f)));
+            win.Enqueue((bSteps, Math.Max(roundDurSec, 0.001f)));
             while (win.Count > StepsWindow) win.Dequeue();
         }
 

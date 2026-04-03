@@ -59,6 +59,10 @@ public partial class LineChartPanel : Control
     private const int CmdSmoothMedium = 4;
     private const int CmdSmoothSlow   = 5;
 
+    private static float Ui(float value) => EditorUiScale.Px(value);
+
+    private static int Ui(int value) => EditorUiScale.Px(value);
+
     // ── Public API ──────────────────────────────────────────────────────────
     public void ClearSeries()
     {
@@ -235,20 +239,41 @@ public partial class LineChartPanel : Control
             var size = Size;
             if (size.X < 12 || size.Y < 12) return;
 
+            var titleH = Ui(TitleH);
+            var leftMargin = Ui(LeftMargin);
+            var bottomMargin = Ui(BottomMargin);
+            var rightMargin = Ui(RightMargin);
+            var topPad = Ui(TopPad);
+            var borderWidth = Math.Max(1f, Ui(1f));
+            var gridWidth = Math.Max(1f, Ui(1f));
+            var rawWidth = ShowSmoothed ? Ui(0.9f) : Ui(1.7f);
+            var smoothedWidth = Ui(2.6f);
+            var legendSwatchW = Ui(14f);
+            var legendSwatchH = Ui(4f);
+            var legendGap = Ui(18f);
+            var legendAdvance = Ui(36f);
+            var axisHintWidth = Ui(48);
+            var currentValueWidth = Ui(60);
+            var tooltipPad = Ui(5f);
+            var tooltipOffset = Ui(10f);
+            var tooltipLift = Ui(6f);
+            var tooltipDrop = Ui(8f);
+            var crosshairRadius = Ui(3.5f);
+
             DrawRect(new Rect2(Vector2.Zero, size), CBg, filled: true);
-            DrawRect(new Rect2(Vector2.Zero, size), CBorder, filled: false, width: 1f);
+            DrawRect(new Rect2(Vector2.Zero, size), CBorder, filled: false, width: borderWidth);
 
             var font = GetThemeDefaultFont();
-            var fs = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 15);
+            var fs = Mathf.Clamp((int)GetThemeDefaultFontSize(), Ui(8), Ui(15));
 
-            DrawString(font, new Vector2(LeftMargin, TitleH - 7f), ChartTitle,
+            DrawString(font, new Vector2(leftMargin, titleH - Ui(7f)), ChartTitle,
                 HorizontalAlignment.Left, -1, fs, CTitle);
 
             var plot = new Rect2(
-                LeftMargin,
-                TitleH + TopPad,
-                size.X - LeftMargin - RightMargin,
-                size.Y - TitleH - TopPad - BottomMargin);
+                leftMargin,
+                titleH + topPad,
+                size.X - leftMargin - rightMargin,
+                size.Y - titleH - topPad - bottomMargin);
 
             if (plot.Size.X < 4 || plot.Size.Y < 4) return;
 
@@ -268,7 +293,7 @@ public partial class LineChartPanel : Control
             {
                 var cx = plot.Position.X + plot.Size.X * 0.5f;
                 var cy = plot.Position.Y + plot.Size.Y * 0.5f;
-                DrawString(font, new Vector2(cx - 32f, cy + fs * 0.4f), "No data yet",
+                DrawString(font, new Vector2(cx - Ui(32f), cy + fs * 0.4f), "No data yet",
                     HorizontalAlignment.Left, -1, fs - 1, CNoData);
                 return;
             }
@@ -285,15 +310,14 @@ public partial class LineChartPanel : Control
                 float gy = plot.Position.Y + plot.Size.Y * (1f - t);
                 DrawLine(new Vector2(plot.Position.X, gy),
                          new Vector2(plot.Position.X + plot.Size.X, gy),
-                         CGrid, 1f);
+                         CGrid, gridWidth);
                 float axVal = gMin + range * t;
-                DrawString(font, new Vector2(2f, gy + fs * 0.38f),
+                DrawString(font, new Vector2(Ui(2f), gy + fs * 0.38f),
                     FormatAxisValue(axVal),
-                    HorizontalAlignment.Left, LeftMargin - 6f, fs - 3, CAxisLabel);
+                    HorizontalAlignment.Left, leftMargin - Ui(6f), fs - 3, CAxisLabel);
             }
 
             float rawAlpha = ShowSmoothed ? 0.18f : 1.0f;
-            float rawWidth = ShowSmoothed ? 0.9f : 1.7f;
 
             int viewStart = 0, viewEnd = 0;
             foreach (var s in _series)
@@ -317,44 +341,44 @@ public partial class LineChartPanel : Control
                     if (slice.Count < 12) continue;
                     var smoothed = Ema(Downsample(slice, MaxDrawPoints), SmoothAlpha);
                     var smPts = BuildPoints(plot, smoothed, gMin, range);
-                    DrawPolyline(smPts, GetSmoothedColor(s.LineColor), 2.6f, antialiased: true);
+                    DrawPolyline(smPts, GetSmoothedColor(s.LineColor), smoothedWidth, antialiased: true);
                 }
             }
 
             int totalPts = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
             if (viewEnd > viewStart + 1)
             {
-                float labelY = plot.Position.Y + plot.Size.Y + BottomMargin - 6f;
+                float labelY = plot.Position.Y + plot.Size.Y + bottomMargin - Ui(6f);
                 DrawString(font, new Vector2(plot.Position.X, labelY),
-                    (viewStart + 1).ToString(), HorizontalAlignment.Left, 40, fs - 3, CAxisLabel);
-                DrawString(font, new Vector2(plot.Position.X + plot.Size.X - 48f, labelY),
-                    viewEnd.ToString(), HorizontalAlignment.Left, 48, fs - 3, CAxisLabel);
+                    (viewStart + 1).ToString(), HorizontalAlignment.Left, Ui(40), fs - 3, CAxisLabel);
+                DrawString(font, new Vector2(plot.Position.X + plot.Size.X - axisHintWidth, labelY),
+                    viewEnd.ToString(), HorizontalAlignment.Left, axisHintWidth, fs - 3, CAxisLabel);
 
                 if (totalPts > _viewWindow || _viewOffset > 0)
                 {
                     var hint = _viewOffset == 0
                         ? $"[{_viewWindow} pts  Ctrl+scroll=zoom]"
                         : $"[scroll to pan  Ctrl+scroll=zoom]";
-                    DrawString(font, new Vector2(plot.Position.X + plot.Size.X * 0.5f - 60f, labelY),
+                    DrawString(font, new Vector2(plot.Position.X + plot.Size.X * 0.5f - Ui(60f), labelY),
                         hint, HorizontalAlignment.Left, -1, fs - 4, new Color(0.38f, 0.38f, 0.38f));
                 }
             }
 
-            float lx = plot.Position.X + 6f;
-            float ly = plot.Position.Y + 6f;
+            float lx = plot.Position.X + Ui(6f);
+            float ly = plot.Position.Y + Ui(6f);
             foreach (var s in _series)
             {
-                DrawRect(new Rect2(lx, ly + 1f, 14f, 4f), s.LineColor, filled: true);
-                DrawString(font, new Vector2(lx + 18f, ly + fs * 0.68f), s.Label,
+                DrawRect(new Rect2(lx, ly + Ui(1f), legendSwatchW, legendSwatchH), s.LineColor, filled: true);
+                DrawString(font, new Vector2(lx + legendGap, ly + fs * 0.68f), s.Label,
                     HorizontalAlignment.Left, -1, fs - 3, CLegend);
-                lx += font.GetStringSize(s.Label, HorizontalAlignment.Left, -1, fs - 3).X + 36f;
+                lx += font.GetStringSize(s.Label, HorizontalAlignment.Left, -1, fs - 3).X + legendAdvance;
             }
 
             if (_series.Count > 0 && _series[0].Points.Count > 0)
             {
                 var cur = FormatAxisValue(_series[0].Points[^1]);
-                DrawString(font, new Vector2(size.X - RightMargin - 58f, TitleH - 7f),
-                    cur, HorizontalAlignment.Right, 60f, fs, _series[0].LineColor);
+                DrawString(font, new Vector2(size.X - rightMargin - Ui(58f), titleH - Ui(7f)),
+                    cur, HorizontalAlignment.Right, currentValueWidth, fs, _series[0].LineColor);
             }
 
             if (_mouseInside)
@@ -396,12 +420,12 @@ public partial class LineChartPanel : Control
                         float primaryY = snapPoints[0].SnapY;
                         var crossColor = new Color(0.70f, 0.70f, 0.70f, 0.28f);
                         DrawLine(new Vector2(plot.Position.X, primaryY),
-                                 new Vector2(plot.Position.X + plot.Size.X, primaryY), crossColor, 1f);
+                                 new Vector2(plot.Position.X + plot.Size.X, primaryY), crossColor, gridWidth);
                         DrawLine(new Vector2(snapX, plot.Position.Y),
-                                 new Vector2(snapX, plot.Position.Y + plot.Size.Y), crossColor, 1f);
+                                 new Vector2(snapX, plot.Position.Y + plot.Size.Y), crossColor, gridWidth);
 
                         foreach (var sp in snapPoints)
-                            DrawCircle(new Vector2(snapX, sp.SnapY), 3.5f,
+                            DrawCircle(new Vector2(snapX, sp.SnapY), crosshairRadius,
                                 new Color(sp.LineColor.R, sp.LineColor.G, sp.LineColor.B, 0.9f));
 
                         var lines = new List<(string Text, Color Col)>
@@ -415,21 +439,20 @@ public partial class LineChartPanel : Control
                         float maxW = 0f;
                         foreach (var (text, _) in lines)
                             maxW = Math.Max(maxW, font.GetStringSize(text, HorizontalAlignment.Left, -1, fs - 2).X);
-                        const float Pad = 5f;
-                        float bw = maxW + Pad * 2f;
-                        float bh = lines.Count * lineH + Pad * 2f;
+                        float bw = maxW + tooltipPad * 2f;
+                        float bh = lines.Count * lineH + tooltipPad * 2f;
 
-                        float bx = snapX + 10f;
-                        float by = primaryY - bh - 6f;
-                        if (bx + bw > plot.Position.X + plot.Size.X) bx = snapX - bw - 10f;
-                        if (by < plot.Position.Y) by = primaryY + 8f;
+                        float bx = snapX + tooltipOffset;
+                        float by = primaryY - bh - tooltipLift;
+                        if (bx + bw > plot.Position.X + plot.Size.X) bx = snapX - bw - tooltipOffset;
+                        if (by < plot.Position.Y) by = primaryY + tooltipDrop;
 
                         DrawRect(new Rect2(bx, by, bw, bh),
                             new Color(0.10f, 0.10f, 0.10f, 0.92f), filled: true);
                         DrawRect(new Rect2(bx, by, bw, bh),
-                            new Color(0.40f, 0.40f, 0.40f, 0.75f), filled: false, width: 1f);
+                            new Color(0.40f, 0.40f, 0.40f, 0.75f), filled: false, width: borderWidth);
                         for (int li = 0; li < lines.Count; li++)
-                            DrawString(font, new Vector2(bx + Pad, by + Pad + (li + 0.82f) * lineH),
+                            DrawString(font, new Vector2(bx + tooltipPad, by + tooltipPad + (li + 0.82f) * lineH),
                                 lines[li].Text, HorizontalAlignment.Left, -1, fs - 2, lines[li].Col);
                     }
                 }

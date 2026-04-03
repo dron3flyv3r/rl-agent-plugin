@@ -93,14 +93,14 @@ public partial class RLAcademy : Node
     public float CurriculumProgress { get; private set; }
 
     /// <summary>
-    /// Sets curriculum progress and immediately notifies every discovered agent.
+    /// Sets curriculum progress and immediately notifies every discovered curriculum consumer.
     /// </summary>
     /// <param name="progress">Desired curriculum progress in [0, 1]; clamped automatically.</param>
     public void SetCurriculumProgress(float progress)
     {
         CurriculumProgress = Mathf.Clamp(progress, 0f, 1f);
-        foreach (var agent in GetAgents())
-            agent.NotifyCurriculumProgress(CurriculumProgress);
+        foreach (var consumer in GetCurriculumConsumers())
+            consumer.NotifyCurriculumProgress(CurriculumProgress);
     }
 
     public override string[] _GetConfigurationWarnings()
@@ -235,6 +235,17 @@ public partial class RLAcademy : Node
     }
 
     /// <summary>
+    /// Returns all nodes under the academy's scene root that consume curriculum updates.
+    /// </summary>
+    public IReadOnlyList<IRLCurriculumConsumer> GetCurriculumConsumers()
+    {
+        var consumers = new List<IRLCurriculumConsumer>();
+        var sceneRoot = ResolveSceneRoot();
+        CollectCurriculumConsumers(sceneRoot, consumers);
+        return consumers;
+    }
+
+    /// <summary>
     /// Returns agents matching a specific control mode, including Auto-mode agents when relevant.
     /// </summary>
     /// <param name="controlMode">Requested control mode filter.</param>
@@ -305,6 +316,22 @@ public partial class RLAcademy : Node
             if (child is Node childNode)
             {
                 CollectAgents(childNode, agents);
+            }
+        }
+    }
+
+    private static void CollectCurriculumConsumers(Node node, ICollection<IRLCurriculumConsumer> consumers)
+    {
+        if (node is IRLCurriculumConsumer consumer)
+        {
+            consumers.Add(consumer);
+        }
+
+        foreach (var child in node.GetChildren())
+        {
+            if (child is Node childNode)
+            {
+                CollectCurriculumConsumers(childNode, consumers);
             }
         }
     }

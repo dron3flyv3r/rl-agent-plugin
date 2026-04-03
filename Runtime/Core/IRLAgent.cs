@@ -55,7 +55,6 @@ public interface IRLAgent
     // ── Episode management ────────────────────────────────────────────────────
     void EndEpisode();
     void ResetEpisode();
-    void NotifyCurriculumProgress(float progress);
     bool HasReachedEpisodeLimit();
     void AccumulateReward(float reward, IReadOnlyDictionary<string, float>? rewardBreakdown = null);
 

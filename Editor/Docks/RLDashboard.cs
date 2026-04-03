@@ -148,6 +148,10 @@ public partial class RLDashboard : Control
         new(0.82f, 0.92f, 0.35f),  // lime
     };
 
+    private static int Ui(int value) => EditorUiScale.Px(value);
+
+    private static Vector2 UiSize(float x, float y) => EditorUiScale.Size(x, y);
+
     // ── Godot lifecycle ──────────────────────────────────────────────────────
     public override void _Ready()
     {
@@ -239,15 +243,15 @@ public partial class RLDashboard : Control
 
         var margin = new MarginContainer();
         margin.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        margin.AddThemeConstantOverride("margin_left", 10);
-        margin.AddThemeConstantOverride("margin_right", 10);
-        margin.AddThemeConstantOverride("margin_top", 8);
-        margin.AddThemeConstantOverride("margin_bottom", 8);
+        margin.AddThemeConstantOverride("margin_left", Ui(10));
+        margin.AddThemeConstantOverride("margin_right", Ui(10));
+        margin.AddThemeConstantOverride("margin_top", Ui(8));
+        margin.AddThemeConstantOverride("margin_bottom", Ui(8));
         scroll.AddChild(margin);
 
         var vbox = new VBoxContainer();
         vbox.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        vbox.AddThemeConstantOverride("separation", 6);
+        vbox.AddThemeConstantOverride("separation", Ui(6));
         margin.AddChild(vbox);
 
         vbox.AddChild(BuildHeader());
@@ -263,15 +267,15 @@ public partial class RLDashboard : Control
     private Control BuildHeader()
     {
         var vbox = new VBoxContainer();
-        vbox.AddThemeConstantOverride("separation", 4);
+        vbox.AddThemeConstantOverride("separation", Ui(4));
 
         // ── Row 1: title, filter, run selector, status, live badge ───────────
         var row1 = new HBoxContainer();
-        row1.AddThemeConstantOverride("separation", 8);
-        row1.CustomMinimumSize = new Vector2(0, 30);
+        row1.AddThemeConstantOverride("separation", Ui(8));
+        row1.CustomMinimumSize = UiSize(0, 30);
 
         var title = new Label { Text = "RL Training Dashboard" };
-        title.AddThemeFontSizeOverride("font_size", 18);
+        title.AddThemeFontSizeOverride("font_size", Ui(18));
         title.VerticalAlignment = VerticalAlignment.Center;
         row1.AddChild(title);
 
@@ -284,7 +288,7 @@ public partial class RLDashboard : Control
         _prefixFilter = new LineEdit
         {
             PlaceholderText = "by prefix…",
-            CustomMinimumSize = new Vector2(120, 0),
+            CustomMinimumSize = UiSize(120, 0),
         };
         _prefixFilter.TextChanged += _ => DiscoverAndSelectLatestRun();
         row1.AddChild(_prefixFilter);
@@ -295,10 +299,10 @@ public partial class RLDashboard : Control
 
         _runDropdown = new OptionButton
         {
-            CustomMinimumSize = new Vector2(250, 0),
+            CustomMinimumSize = UiSize(250, 0),
             TooltipText = "Select a training run to inspect",
         };
-        _runDropdown.GetPopup().MaxSize = new Vector2I(1600, 360);
+        _runDropdown.GetPopup().MaxSize = new Vector2I(Ui(1600), Ui(360));
         _runDropdown.ItemSelected += OnRunSelected;
         row1.AddChild(_runDropdown);
 
@@ -320,7 +324,7 @@ public partial class RLDashboard : Control
             VerticalAlignment = VerticalAlignment.Center,
         };
         _liveBadge.AddThemeColorOverride("font_color", CRunning);
-        _liveBadge.AddThemeFontSizeOverride("font_size", 12);
+        _liveBadge.AddThemeFontSizeOverride("font_size", Ui(12));
         row1.AddChild(_liveBadge);
 
         vbox.AddChild(row1);
@@ -329,8 +333,8 @@ public partial class RLDashboard : Control
         var row2 = new HBoxContainer();
 
 
-        row2.AddThemeConstantOverride("separation", 6);
-        row2.CustomMinimumSize = new Vector2(0, 24);
+        row2.AddThemeConstantOverride("separation", Ui(6));
+        row2.CustomMinimumSize = UiSize(0, 24);
 
         var nameLabel = new Label { Text = "Name:", VerticalAlignment = VerticalAlignment.Center };
         row2.AddChild(nameLabel);
@@ -338,7 +342,7 @@ public partial class RLDashboard : Control
         _renameEdit = new LineEdit
         {
             PlaceholderText = "Display name…",
-            CustomMinimumSize = new Vector2(200, 0),
+            CustomMinimumSize = UiSize(200, 0),
             Editable = false,
         };
         row2.AddChild(_renameEdit);
@@ -349,12 +353,12 @@ public partial class RLDashboard : Control
 
         // Status indicator
         var statusBox = new HBoxContainer();
-        statusBox.AddThemeConstantOverride("separation", 5);
+        statusBox.AddThemeConstantOverride("separation", Ui(5));
 
         _statusDot = new ColorRect
         {
             Color = CIdle,
-            CustomMinimumSize = new Vector2(10, 10),
+            CustomMinimumSize = UiSize(10, 10),
             SizeFlagsVertical = SizeFlags.ShrinkCenter
         };
         statusBox.AddChild(_statusDot);
@@ -372,7 +376,7 @@ public partial class RLDashboard : Control
 
         _policyFilterDropdown = new OptionButton
         {
-            CustomMinimumSize = new Vector2(160, 0),
+            CustomMinimumSize = UiSize(160, 0),
             TooltipText = "Filter charts to a single policy group",
             Visible = false,
         };
@@ -391,7 +395,7 @@ public partial class RLDashboard : Control
         row2.AddChild(exportBtn);
 
         _headerStatus = new Label { VerticalAlignment = VerticalAlignment.Center };
-        _headerStatus.AddThemeFontSizeOverride("font_size", 11);
+        _headerStatus.AddThemeFontSizeOverride("font_size", Ui(11));
         _headerStatus.Modulate = new Color(0.75f, 0.75f, 0.75f);
         row2.AddChild(_headerStatus);
 
@@ -403,7 +407,7 @@ public partial class RLDashboard : Control
     private Control BuildStatsBar()
     {
         var panel = new PanelContainer();
-        panel.CustomMinimumSize = new Vector2(0, 40);
+        panel.CustomMinimumSize = UiSize(0, 40);
         panel.SizeFlagsVertical = SizeFlags.ShrinkBegin;
 
         var hbox = new HBoxContainer();
@@ -427,10 +431,10 @@ public partial class RLDashboard : Control
     {
         var margin = new MarginContainer();
         margin.SizeFlagsHorizontal = SizeFlags.ShrinkBegin;
-        margin.AddThemeConstantOverride("margin_left", first ? 8 : 8);
-        margin.AddThemeConstantOverride("margin_right", 8);
-        margin.AddThemeConstantOverride("margin_top", 5);
-        margin.AddThemeConstantOverride("margin_bottom", 5);
+        margin.AddThemeConstantOverride("margin_left", Ui(8));
+        margin.AddThemeConstantOverride("margin_right", Ui(8));
+        margin.AddThemeConstantOverride("margin_top", Ui(5));
+        margin.AddThemeConstantOverride("margin_bottom", Ui(5));
         parent.AddChild(margin);
 
         var vbox = new VBoxContainer();
@@ -438,12 +442,12 @@ public partial class RLDashboard : Control
         margin.AddChild(vbox);
 
         var lbl = new Label { Text = title };
-        lbl.AddThemeFontSizeOverride("font_size", 10);
+        lbl.AddThemeFontSizeOverride("font_size", Ui(10));
         lbl.Modulate = new Color(0.60f, 0.60f, 0.60f);
         vbox.AddChild(lbl);
 
         var value = new Label { Text = dflt };
-        value.AddThemeFontSizeOverride("font_size", 15);
+        value.AddThemeFontSizeOverride("font_size", Ui(15));
         vbox.AddChild(value);
 
         return value;
@@ -453,7 +457,7 @@ public partial class RLDashboard : Control
     {
         var sep = new VSeparator();
         sep.SizeFlagsVertical = SizeFlags.ShrinkCenter;
-        sep.CustomMinimumSize = new Vector2(1, 26);
+        sep.CustomMinimumSize = UiSize(1, 26);
         return sep;
     }
 
@@ -462,9 +466,9 @@ public partial class RLDashboard : Control
         var grid = new GridContainer { Columns = 2 };
         grid.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         grid.SizeFlagsVertical = SizeFlags.ShrinkBegin;
-        grid.CustomMinimumSize = new Vector2(0, 340);
-        grid.AddThemeConstantOverride("h_separation", 4);
-        grid.AddThemeConstantOverride("v_separation", 4);
+        grid.CustomMinimumSize = UiSize(0, 340);
+        grid.AddThemeConstantOverride("h_separation", Ui(4));
+        grid.AddThemeConstantOverride("v_separation", Ui(4));
 
         _rewardChart = MakeChart("Episode Reward");
         _lossChart = MakeChart("Policy Loss  /  Value Loss");
@@ -493,7 +497,7 @@ public partial class RLDashboard : Control
         var chart = new LineChartPanel { ChartTitle = title };
         chart.SizeFlagsHorizontal = SizeFlags.ExpandFill;
         chart.SizeFlagsVertical = SizeFlags.ExpandFill;
-        chart.CustomMinimumSize = new Vector2(0, 140);
+        chart.CustomMinimumSize = UiSize(0, 140);
         return chart;
     }
 
@@ -926,7 +930,7 @@ public partial class RLDashboard : Control
         }
 
         EnsureExportDialog();
-        _exportDialog!.PopupCentered(new Vector2I(700, 450));
+        _exportDialog!.PopupCentered(new Vector2I(Ui(700), Ui(450)));
     }
 
     private void EnsureExportDialog()
@@ -1554,10 +1558,10 @@ public partial class RLDashboard : Control
     private Control BuildCheckpointHistorySection()
     {
         var outer = new VBoxContainer();
-        outer.AddThemeConstantOverride("separation", 4);
+        outer.AddThemeConstantOverride("separation", Ui(4));
 
         var headerRow = new HBoxContainer();
-        headerRow.AddThemeConstantOverride("separation", 6);
+        headerRow.AddThemeConstantOverride("separation", Ui(6));
 
         _checkpointToggleBtn = new Button
         {
@@ -1566,25 +1570,25 @@ public partial class RLDashboard : Control
             ToggleMode = true,
             ButtonPressed = false,
         };
-        _checkpointToggleBtn.AddThemeFontSizeOverride("font_size", 13);
+        _checkpointToggleBtn.AddThemeFontSizeOverride("font_size", Ui(13));
         _checkpointToggleBtn.Toggled += OnCheckpointPanelToggled;
         headerRow.AddChild(_checkpointToggleBtn);
 
         _checkpointStatusLabel = new Label { VerticalAlignment = VerticalAlignment.Center };
-        _checkpointStatusLabel.AddThemeFontSizeOverride("font_size", 11);
+        _checkpointStatusLabel.AddThemeFontSizeOverride("font_size", Ui(11));
         _checkpointStatusLabel.Modulate = new Color(0.6f, 0.6f, 0.6f);
         headerRow.AddChild(_checkpointStatusLabel);
 
         headerRow.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
         var sortLabel = new Label { Text = "Sort:", VerticalAlignment = VerticalAlignment.Center };
-        sortLabel.AddThemeFontSizeOverride("font_size", 11);
+        sortLabel.AddThemeFontSizeOverride("font_size", Ui(11));
         sortLabel.Modulate = new Color(0.7f, 0.7f, 0.7f);
         headerRow.AddChild(sortLabel);
 
         _checkpointSortDropdown = new OptionButton
         {
-            CustomMinimumSize = new Vector2(160, 0),
+            CustomMinimumSize = UiSize(160, 0),
             TooltipText = "Sort checkpoints by a selected field",
         };
         _checkpointSortDropdown.AddItem("Newest Update");
@@ -1601,16 +1605,16 @@ public partial class RLDashboard : Control
 
         _checkpointHistoryPanel = new VBoxContainer();
         _checkpointHistoryPanel.Visible = false;
-        _checkpointHistoryPanel.AddThemeConstantOverride("separation", 2);
+        _checkpointHistoryPanel.AddThemeConstantOverride("separation", Ui(2));
 
         var scroll = new ScrollContainer();
-        scroll.CustomMinimumSize = new Vector2(0, 180);
+        scroll.CustomMinimumSize = UiSize(0, 180);
         scroll.SizeFlagsVertical = SizeFlags.ExpandFill;
         scroll.FollowFocus = false;
 
         _checkpointRowContainer = new VBoxContainer();
         _checkpointRowContainer.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        _checkpointRowContainer.AddThemeConstantOverride("separation", 1);
+        _checkpointRowContainer.AddThemeConstantOverride("separation", Ui(1));
         scroll.AddChild(_checkpointRowContainer);
 
         _checkpointHistoryPanel.AddChild(scroll);
@@ -1679,7 +1683,7 @@ public partial class RLDashboard : Control
             if (multiGroup)
             {
                 var groupLabel = new Label { Text = $"  Policy group: {group.Key}" };
-                groupLabel.AddThemeFontSizeOverride("font_size", 11);
+                groupLabel.AddThemeFontSizeOverride("font_size", Ui(11));
                 groupLabel.Modulate = new Color(0.75f, 0.85f, 1.0f);
                 _checkpointRowContainer.AddChild(groupLabel);
             }
@@ -1696,12 +1700,12 @@ public partial class RLDashboard : Control
     private static Control BuildCheckpointColumnHeader()
     {
         var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 4);
+        row.AddThemeConstantOverride("separation", Ui(4));
 
         void AddCol(string text, int minW)
         {
-            var lbl = new Label { Text = text, CustomMinimumSize = new Vector2(minW, 0) };
-            lbl.AddThemeFontSizeOverride("font_size", 10);
+            var lbl = new Label { Text = text, CustomMinimumSize = UiSize(minW, 0) };
+            lbl.AddThemeFontSizeOverride("font_size", Ui(10));
             lbl.Modulate = new Color(0.5f, 0.5f, 0.5f);
             row.AddChild(lbl);
         }
@@ -1719,12 +1723,12 @@ public partial class RLDashboard : Control
     private Control BuildCheckpointRow(CheckpointHistoryEntry entry)
     {
         var row = new HBoxContainer();
-        row.AddThemeConstantOverride("separation", 4);
+        row.AddThemeConstantOverride("separation", Ui(4));
 
         void AddCol(string text, int minW)
         {
-            var lbl = new Label { Text = text, CustomMinimumSize = new Vector2(minW, 0) };
-            lbl.AddThemeFontSizeOverride("font_size", 11);
+            var lbl = new Label { Text = text, CustomMinimumSize = UiSize(minW, 0) };
+            lbl.AddThemeFontSizeOverride("font_size", Ui(11));
             lbl.VerticalAlignment = VerticalAlignment.Center;
             row.AddChild(lbl);
         }
@@ -1738,9 +1742,9 @@ public partial class RLDashboard : Control
         var typeLabel = new Label
         {
             Text = entry.IsSelfPlayFrozen ? "self-play" : "history",
-            CustomMinimumSize = new Vector2(70, 0),
+            CustomMinimumSize = UiSize(70, 0),
         };
-        typeLabel.AddThemeFontSizeOverride("font_size", 10);
+        typeLabel.AddThemeFontSizeOverride("font_size", Ui(10));
         typeLabel.Modulate = entry.IsSelfPlayFrozen ? new Color(0.85f, 0.65f, 0.25f) : new Color(0.55f, 0.85f, 0.55f);
         typeLabel.VerticalAlignment = VerticalAlignment.Center;
         row.AddChild(typeLabel);
@@ -1751,7 +1755,7 @@ public partial class RLDashboard : Control
         {
             Text = "Copy Path",
             TooltipText = $"Copy path to clipboard for use in ResumeCheckpointPath:\n{entry.AbsolutePath}",
-            CustomMinimumSize = new Vector2(80, 0),
+            CustomMinimumSize = UiSize(80, 0),
         };
         copyBtn.Pressed += () =>
         {
@@ -1766,7 +1770,7 @@ public partial class RLDashboard : Control
         {
             Text = "Export",
             TooltipText = $"Export as .rlmodel: {System.IO.Path.GetFileName(entry.AbsolutePath)}",
-            CustomMinimumSize = new Vector2(64, 0),
+            CustomMinimumSize = UiSize(64, 0),
         };
         exportBtn.Pressed += () => OnExportCheckpointPressed(entry);
         row.AddChild(exportBtn);
@@ -1828,7 +1832,7 @@ public partial class RLDashboard : Control
 
         _pendingExportCheckpointEntry = entry;
         EnsureCheckpointExportDialog();
-        _checkpointExportDialog!.PopupCentered(new Vector2I(700, 450));
+        _checkpointExportDialog!.PopupCentered(new Vector2I(Ui(700), Ui(450)));
     }
 
     private void EnsureCheckpointExportDialog()

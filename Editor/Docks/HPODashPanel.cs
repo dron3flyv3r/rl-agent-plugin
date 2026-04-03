@@ -54,10 +54,16 @@ public partial class HPODashPanel : VBoxContainer
     private int                _selectedStudyIndex = -1;
     public string RunIdFilter { get; set; } = string.Empty;
 
+    private static int Ui(int value) => EditorUiScale.Px(value);
+
+    private static float Ui(float value) => EditorUiScale.Px(value);
+
+    private static Vector2 UiSize(float x, float y) => EditorUiScale.Size(x, y);
+
     // ── Godot lifecycle ──────────────────────────────────────────────────────
     public override void _Ready()
     {
-        AddThemeConstantOverride("separation", 4);
+        AddThemeConstantOverride("separation", Ui(4));
         BuildUi();
     }
 
@@ -95,7 +101,7 @@ public partial class HPODashPanel : VBoxContainer
     {
         // Toggle header row
         var headerRow = new HBoxContainer();
-        headerRow.AddThemeConstantOverride("separation", 6);
+        headerRow.AddThemeConstantOverride("separation", Ui(6));
 
         _toggleBtn = new Button
         {
@@ -104,7 +110,7 @@ public partial class HPODashPanel : VBoxContainer
             ToggleMode = true,
             ButtonPressed = false,
         };
-        _toggleBtn.AddThemeFontSizeOverride("font_size", 13);
+        _toggleBtn.AddThemeFontSizeOverride("font_size", Ui(13));
         _toggleBtn.Toggled += OnToggled;
         headerRow.AddChild(_toggleBtn);
 
@@ -113,7 +119,7 @@ public partial class HPODashPanel : VBoxContainer
         // Collapsible content
         _contentPanel = new VBoxContainer();
         _contentPanel.Visible = false;
-        (_contentPanel as VBoxContainer)!.AddThemeConstantOverride("separation", 6);
+        (_contentPanel as VBoxContainer)!.AddThemeConstantOverride("separation", Ui(6));
 
         _contentPanel.AddChild(BuildStudySelectorRow());
         _contentPanel.AddChild(new HSeparator());
@@ -122,15 +128,15 @@ public partial class HPODashPanel : VBoxContainer
         _objectiveChart = new LineChartPanel
         {
             ChartTitle            = "Objective Progression",
-            CustomMinimumSize     = new Vector2(0, 160),
+            CustomMinimumSize     = UiSize(0, 160),
             SizeFlagsHorizontal   = SizeFlags.ExpandFill,
             ShowSmoothed          = false,
         };
         _contentPanel.AddChild(_objectiveChart);
 
         var sideBySide = new HBoxContainer();
-        sideBySide.AddThemeConstantOverride("separation", 6);
-        sideBySide.CustomMinimumSize = new Vector2(0, 220);
+        sideBySide.AddThemeConstantOverride("separation", Ui(6));
+        sideBySide.CustomMinimumSize = UiSize(0, 220);
 
         _importancePanel = new HpoImportancePanel
         {
@@ -150,7 +156,7 @@ public partial class HPODashPanel : VBoxContainer
 
         _scatterGrid = new HpoScatterGrid
         {
-            CustomMinimumSize   = new Vector2(0, 260),
+            CustomMinimumSize   = UiSize(0, 260),
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
         };
         _contentPanel.AddChild(_scatterGrid);
@@ -161,13 +167,13 @@ public partial class HPODashPanel : VBoxContainer
     private Control BuildStudySelectorRow()
     {
         var hbox = new HBoxContainer();
-        hbox.AddThemeConstantOverride("separation", 10);
+        hbox.AddThemeConstantOverride("separation", Ui(10));
 
         var lbl = new Label { Text = "Study:", VerticalAlignment = VerticalAlignment.Center };
-        lbl.AddThemeFontSizeOverride("font_size", 12);
+        lbl.AddThemeFontSizeOverride("font_size", Ui(12));
         hbox.AddChild(lbl);
 
-        _studyDropdown = new OptionButton { CustomMinimumSize = new Vector2(160, 0) };
+        _studyDropdown = new OptionButton { CustomMinimumSize = UiSize(160, 0) };
         _studyDropdown.ItemSelected += i =>
         {
             _selectedStudyIndex = (int)i;
@@ -181,7 +187,7 @@ public partial class HPODashPanel : VBoxContainer
         hbox.AddChild(_studyDropdown);
 
         _summaryStats = new Label { VerticalAlignment = VerticalAlignment.Center };
-        _summaryStats.AddThemeFontSizeOverride("font_size", 11);
+        _summaryStats.AddThemeFontSizeOverride("font_size", Ui(11));
         _summaryStats.Modulate = new Color(0.55f, 0.55f, 0.55f);
         hbox.AddChild(_summaryStats);
 
@@ -191,13 +197,13 @@ public partial class HPODashPanel : VBoxContainer
     private Control BuildTrialHistorySection()
     {
         var scroll = new ScrollContainer();
-        scroll.CustomMinimumSize    = new Vector2(0, 200);
+        scroll.CustomMinimumSize    = UiSize(0, 200);
         scroll.SizeFlagsHorizontal  = SizeFlags.ExpandFill;
         scroll.FollowFocus          = false;
 
         _trialRowContainer = new VBoxContainer();
         _trialRowContainer.SizeFlagsHorizontal = SizeFlags.ExpandFill;
-        _trialRowContainer.AddThemeConstantOverride("separation", 1);
+        _trialRowContainer.AddThemeConstantOverride("separation", Ui(1));
         scroll.AddChild(_trialRowContainer);
 
         AddTrialTableHeader();
@@ -371,14 +377,14 @@ public partial class HPODashPanel : VBoxContainer
         if (_trialRowContainer is null) return;
 
         var hbox = new HBoxContainer();
-        hbox.AddThemeConstantOverride("separation", 4);
+        hbox.AddThemeConstantOverride("separation", Ui(4));
 
         void AddHeaderCell(string text, int minW)
         {
             var lbl = new Label { Text = text };
-            lbl.AddThemeFontSizeOverride("font_size", 10);
+            lbl.AddThemeFontSizeOverride("font_size", Ui(10));
             lbl.Modulate = new Color(0.55f, 0.55f, 0.55f);
-            lbl.CustomMinimumSize = new Vector2(minW, 0);
+            lbl.CustomMinimumSize = UiSize(minW, 0);
             hbox.AddChild(lbl);
         }
 
@@ -414,14 +420,14 @@ public partial class HPODashPanel : VBoxContainer
                        && trial.TrialId == _selectedStudy.BestTrialId.Value;
 
             var row = new HBoxContainer();
-            row.AddThemeConstantOverride("separation", 4);
+            row.AddThemeConstantOverride("separation", Ui(4));
             if (isBest) row.Modulate = new Color(1.0f, 0.95f, 0.70f);
 
             void AddCell(string text, int minW, Color? col = null)
             {
                 var lbl = new Label { Text = text };
-                lbl.AddThemeFontSizeOverride("font_size", 11);
-                lbl.CustomMinimumSize = new Vector2(minW, 0);
+                lbl.AddThemeFontSizeOverride("font_size", Ui(11));
+                lbl.CustomMinimumSize = UiSize(minW, 0);
                 if (col.HasValue) lbl.Modulate = col.Value;
                 row.AddChild(lbl);
             }
@@ -513,6 +519,10 @@ public partial class HPODashPanel : VBoxContainer
         private static readonly Color CDim   = new(0.48f, 0.48f, 0.48f);
         private static readonly Color CBar   = new(0.22f, 0.82f, 0.42f);
 
+        private static int Ui(int value) => EditorUiScale.Px(value);
+
+        private static float Ui(float value) => EditorUiScale.Px(value);
+
         public override void _Ready() => MouseFilter = MouseFilterEnum.Ignore;
 
         public override void _Draw()
@@ -520,19 +530,22 @@ public partial class HPODashPanel : VBoxContainer
             var size = Size;
             if (size.X < 10 || size.Y < 10) return;
 
+            var borderWidth = Math.Max(1f, Ui(1f));
+            var pad = Ui(8f);
+
             DrawRect(new Rect2(Vector2.Zero, size), CBg,   filled: true);
-            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: 1f);
+            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: borderWidth);
 
             var font = GetThemeDefaultFont();
-            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 14);
+            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), Ui(8), Ui(14));
 
-            DrawString(font, new Vector2(8f, fs + 6f),
+            DrawString(font, new Vector2(pad, fs + Ui(6f)),
                 "Parameter Importance (Spearman ρ)",
                 HorizontalAlignment.Left, -1, fs, CTitle);
 
             if (Study is null)
             {
-                DrawString(font, new Vector2(8f, size.Y * 0.5f), "No study selected",
+                DrawString(font, new Vector2(pad, size.Y * 0.5f), "No study selected",
                     HorizontalAlignment.Left, -1, fs - 1, CDim);
                 return;
             }
@@ -543,7 +556,7 @@ public partial class HPODashPanel : VBoxContainer
 
             if (completed.Count < 5)
             {
-                DrawString(font, new Vector2(8f, size.Y * 0.5f),
+                DrawString(font, new Vector2(pad, size.Y * 0.5f),
                     $"Not enough data ({completed.Count}/5 complete trials needed)",
                     HorizontalAlignment.Left, -1, fs - 1, CDim);
                 return;
@@ -576,11 +589,11 @@ public partial class HPODashPanel : VBoxContainer
             }
             importances.Sort((a, b) => MathF.Abs(b.Rho).CompareTo(MathF.Abs(a.Rho)));
 
-            float titleH  = fs + 14f;
-            float availH  = size.Y - titleH - 8f;
-            float rowH    = Math.Min(availH / importances.Count, 26f);
-            float labelW  = 120f;
-            float barMaxW = size.X - labelW - 52f - 16f;
+            float titleH  = fs + Ui(14f);
+            float availH  = size.Y - titleH - pad;
+            float rowH    = Math.Min(availH / importances.Count, Ui(26f));
+            float labelW  = Ui(120f);
+            float barMaxW = size.X - labelW - Ui(52f) - Ui(16f);
 
             for (int i = 0; i < importances.Count; i++)
             {
@@ -589,22 +602,22 @@ public partial class HPODashPanel : VBoxContainer
                 float cy     = titleH + i * rowH + rowH * 0.5f;
 
                 DrawString(font,
-                    new Vector2(8f, cy + fs * 0.38f),
-                    TruncateName(name, font, fs - 1, labelW - 4f),
+                    new Vector2(pad, cy + fs * 0.38f),
+                    TruncateName(name, font, fs - 1, labelW - Ui(4f)),
                     HorizontalAlignment.Left, labelW, fs - 1, CTitle);
 
                 float barW = absRho * barMaxW;
                 if (barW > 1f)
                 {
                     var barColor = new Color(CBar.R, CBar.G, CBar.B, 0.25f + absRho * 0.75f);
-                    DrawRect(new Rect2(8f + labelW, cy - rowH * 0.28f, barW, rowH * 0.55f),
+                    DrawRect(new Rect2(pad + labelW, cy - rowH * 0.28f, barW, rowH * 0.55f),
                         barColor, filled: true);
                 }
 
                 DrawString(font,
-                    new Vector2(8f + labelW + barMaxW + 4f, cy + fs * 0.38f),
+                    new Vector2(pad + labelW + barMaxW + Ui(4f), cy + fs * 0.38f),
                     rho.ToString("F2"),
-                    HorizontalAlignment.Left, 48f, fs - 1,
+                    HorizontalAlignment.Left, Ui(48f), fs - 1,
                     absRho > 0.5f ? CBar : CDim);
             }
         }
@@ -652,6 +665,10 @@ public partial class HPODashPanel : VBoxContainer
         private static readonly Color CGold  = new(1.00f, 0.85f, 0.20f);
         private static readonly Color CAxis  = new(0.38f, 0.38f, 0.38f);
 
+        private static int Ui(int value) => EditorUiScale.Px(value);
+
+        private static float Ui(float value) => EditorUiScale.Px(value);
+
         public override void _Ready()
         {
             MouseFilter = MouseFilterEnum.Stop;
@@ -669,13 +686,16 @@ public partial class HPODashPanel : VBoxContainer
             var size = Size;
             if (size.X < 10 || size.Y < 10) return;
 
+            var borderWidth = Math.Max(1f, Ui(1f));
+            var pad = Ui(8f);
+
             DrawRect(new Rect2(Vector2.Zero, size), CBg,   filled: true);
-            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: 1f);
+            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: borderWidth);
 
             var font = GetThemeDefaultFont();
-            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 14);
+            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), Ui(8), Ui(14));
 
-            DrawString(font, new Vector2(8f, fs + 6f), "Parallel Coordinates",
+            DrawString(font, new Vector2(pad, fs + Ui(6f)), "Parallel Coordinates",
                 HorizontalAlignment.Left, -1, fs, CTitle);
 
             if (Study is null)
@@ -696,13 +716,13 @@ public partial class HPODashPanel : VBoxContainer
                 .SelectMany(t => t.Params.Keys).Distinct().OrderBy(k => k).ToList();
             if (paramNames.Count == 0) return;
 
-            const float PadL   = 24f;
-            const float PadR   = 24f;
-            float       titleH = fs + 14f;
-            const float PadH   = 40f;
-            float plotTop = titleH + PadH;
-            float plotBot = size.Y - PadH;
-            float plotW   = size.X - PadL - PadR;
+            float padL = Ui(24f);
+            float padR = Ui(24f);
+            float titleH = fs + Ui(14f);
+            float padH = Ui(40f);
+            float plotTop = titleH + padH;
+            float plotBot = size.Y - padH;
+            float plotW   = size.X - padL - padR;
             if (plotBot <= plotTop || plotW < 4f) return;
 
             int  nAxes      = paramNames.Count;
@@ -716,11 +736,11 @@ public partial class HPODashPanel : VBoxContainer
 
             var mp         = GetLocalMousePosition();
             int hoveredIdx = -1;
-            float minDist  = 18f;
+            float minDist  = Ui(18f);
 
             foreach (var trial in ranked)
             {
-                var pts = BuildPolyline(trial, paramNames, ranges, PadL, plotW, plotTop, plotBot, nAxes);
+                var pts = BuildPolyline(trial, paramNames, ranges, padL, plotW, plotTop, plotBot, nAxes);
                 int origIdx = completed.IndexOf(trial);
                 float d = PolylineDist(mp, pts);
                 if (d < minDist)
@@ -738,11 +758,11 @@ public partial class HPODashPanel : VBoxContainer
                 if (isBest) continue;
 
                 float tRank = ranked.Count > 1 ? (float)ri / (ranked.Count - 1) : 1f;
-                var   pts   = BuildPolyline(trial, paramNames, ranges, PadL, plotW, plotTop, plotBot, nAxes);
+                var   pts   = BuildPolyline(trial, paramNames, ranges, padL, plotW, plotTop, plotBot, nAxes);
                 int origIdx = completed.IndexOf(trial);
                 bool hovered = origIdx == hoveredIdx;
                 float alpha  = hovered ? 1.0f : 0.5f;
-                float width  = hovered ? 2.5f : 1.2f;
+                float width  = hovered ? Ui(2.5f) : Ui(1.2f);
                 var   color  = new Color(1f - tRank * 0.8f, 0.2f + tRank * 0.7f, 0.2f, alpha);
                 DrawPolyline(pts, color, width, antialiased: true);
             }
@@ -750,8 +770,8 @@ public partial class HPODashPanel : VBoxContainer
             // Running trials — dashed grey
             foreach (var trial in Study.Trials.Where(t => t.State == "Running"))
             {
-                var pts = BuildPolyline(trial, paramNames, ranges, PadL, plotW, plotTop, plotBot, nAxes);
-                DrawDashedPolyline(pts, new Color(0.5f, 0.5f, 0.5f, 0.55f), 1f);
+                var pts = BuildPolyline(trial, paramNames, ranges, padL, plotW, plotTop, plotBot, nAxes);
+                DrawDashedPolyline(pts, new Color(0.5f, 0.5f, 0.5f, 0.55f), Ui(1f));
             }
 
             // Best trial — gold, drawn last
@@ -760,29 +780,29 @@ public partial class HPODashPanel : VBoxContainer
                 var best = completed.FirstOrDefault(t => t.TrialId == Study.BestTrialId.Value);
                 if (best is not null)
                 {
-                    var pts = BuildPolyline(best, paramNames, ranges, PadL, plotW, plotTop, plotBot, nAxes);
+                    var pts = BuildPolyline(best, paramNames, ranges, padL, plotW, plotTop, plotBot, nAxes);
                     var bestHovered = completed.IndexOf(best) == hoveredIdx;
-                    DrawPolyline(pts, CGold, bestHovered ? 3.2f : 2.5f, antialiased: true);
+                    DrawPolyline(pts, CGold, bestHovered ? Ui(3.2f) : Ui(2.5f), antialiased: true);
                 }
             }
 
             // Axes
-            const float nameW  = 96f;
-            const float valueW = 72f;
+            float nameW = Ui(96f);
+            float valueW = Ui(72f);
             bool isEnd(int ai) => ai == 0 || ai == nAxes - 1;
             for (int ai = 0; ai < nAxes; ai++)
             {
-                float ax      = AxisX(ai, nAxes, PadL, plotW);
+                float ax      = AxisX(ai, nAxes, padL, plotW);
                 var   name    = paramNames[ai];
                 var   (mn, mx) = ranges[name];
 
-                DrawLine(new Vector2(ax, plotTop), new Vector2(ax, plotBot), CAxis, 2f);
+                DrawLine(new Vector2(ax, plotTop), new Vector2(ax, plotBot), CAxis, Ui(2f));
 
                 if (isEnd(ai))
                 {
                     // End labels are vertical and centered along the axis span.
                     float axisMidY = (plotTop + plotBot) * 0.5f;
-                    float sideGap  = 6f;
+                    float sideGap  = Ui(6f);
                     float localY   = ai == 0
                         ? -((fs - 2) * 0.5f)
                         :  ((fs - 2) * 0.5f + sideGap);
@@ -793,7 +813,7 @@ public partial class HPODashPanel : VBoxContainer
                 }
                 else
                 {
-                    DrawString(font, new Vector2(ax - nameW * 0.5f, plotTop - fs - 10f), name,
+                    DrawString(font, new Vector2(ax - nameW * 0.5f, plotTop - fs - Ui(10f)), name,
                         HorizontalAlignment.Center, nameW, fs - 2, CDim);
                 }
 
@@ -811,7 +831,7 @@ public partial class HPODashPanel : VBoxContainer
         }
 
         private void DrawNoData(Font font, int fs, Vector2 size, string msg) =>
-            DrawString(font, new Vector2(8f, size.Y * 0.5f), msg,
+            DrawString(font, new Vector2(Ui(8f), size.Y * 0.5f), msg,
                 HorizontalAlignment.Left, -1, fs - 1, CDim);
 
         private static float AxisX(int ai, int n, float padL, float plotW) =>
@@ -869,7 +889,7 @@ public partial class HPODashPanel : VBoxContainer
             for (int i = 0; i < pts.Length - 1; i++)
             {
                 float segLen = pts[i].DistanceTo(pts[i + 1]);
-                int   dashes = Math.Max(1, (int)(segLen / 6f));
+                int   dashes = Math.Max(1, (int)(segLen / Ui(6f)));
                 for (int d = 0; d < dashes; d += 2)
                 {
                     float t0 = (float)d       / dashes;
@@ -899,17 +919,18 @@ public partial class HPODashPanel : VBoxContainer
         {
             float lineH = fs + 3f;
             float maxW  = lines.Max(l => font.GetStringSize(l.Text, HorizontalAlignment.Left, -1, fs - 1).X);
-            const float Pad = 5f;
-            float bw = maxW + Pad * 2f;
-            float bh = lines.Count * lineH + Pad * 2f;
-            float bx = Math.Min(mp.X + 12f, size.X - bw - 4f);
-            float by = Math.Clamp(mp.Y - bh * 0.5f, 4f, size.Y - bh - 4f);
+            float pad = Ui(5f);
+            float borderWidth = Math.Max(1f, Ui(1f));
+            float bw = maxW + pad * 2f;
+            float bh = lines.Count * lineH + pad * 2f;
+            float bx = Math.Min(mp.X + Ui(12f), size.X - bw - Ui(4f));
+            float by = Math.Clamp(mp.Y - bh * 0.5f, Ui(4f), size.Y - bh - Ui(4f));
 
             DrawRect(new Rect2(bx, by, bw, bh), new Color(0.10f, 0.10f, 0.10f, 0.92f), filled: true);
             DrawRect(new Rect2(bx, by, bw, bh), new Color(0.40f, 0.40f, 0.40f, 0.75f),
-                filled: false, width: 1f);
+                filled: false, width: Math.Max(1f, Ui(1f)));
             for (int li = 0; li < lines.Count; li++)
-                DrawString(font, new Vector2(bx + Pad, by + Pad + (li + 0.82f) * lineH),
+                DrawString(font, new Vector2(bx + pad, by + pad + (li + 0.82f) * lineH),
                     lines[li].Text, HorizontalAlignment.Left, -1, fs - 1, lines[li].Col);
         }
     }
@@ -928,6 +949,10 @@ public partial class HPODashPanel : VBoxContainer
         private static readonly Color CDim   = new(0.48f, 0.48f, 0.48f);
         private static readonly Color CGold  = new(1.00f, 0.85f, 0.20f);
 
+        private static int Ui(int value) => EditorUiScale.Px(value);
+
+        private static float Ui(float value) => EditorUiScale.Px(value);
+
         public override void _Ready()
         {
             MouseFilter = MouseFilterEnum.Stop;
@@ -944,20 +969,23 @@ public partial class HPODashPanel : VBoxContainer
             var size = Size;
             if (size.X < 10 || size.Y < 10) return;
 
+            var borderWidth = Math.Max(1f, Ui(1f));
+            var pad = Ui(8f);
+
             DrawRect(new Rect2(Vector2.Zero, size), CBg,   filled: true);
-            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: 1f);
+            DrawRect(new Rect2(Vector2.Zero, size), CBord, filled: false, width: borderWidth);
 
             var font = GetThemeDefaultFont();
-            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), 8, 14);
+            int  fs  = Mathf.Clamp((int)GetThemeDefaultFontSize(), Ui(8), Ui(14));
 
             string dirSuffix = Study?.Direction == "Minimize" ? "  (↓ Minimize)" :
                                Study?.Direction != null       ? "  (↑ Maximize)" : "";
-            DrawString(font, new Vector2(8f, fs + 6f), $"Parameter vs Objective{dirSuffix}",
+            DrawString(font, new Vector2(pad, fs + Ui(6f)), $"Parameter vs Objective{dirSuffix}",
                 HorizontalAlignment.Left, -1, fs, CTitle);
 
             if (Study is null)
             {
-                DrawString(font, new Vector2(8f, size.Y * 0.5f), "No study selected",
+                DrawString(font, new Vector2(pad, size.Y * 0.5f), "No study selected",
                     HorizontalAlignment.Left, -1, fs - 1, CDim);
                 return;
             }
@@ -968,7 +996,7 @@ public partial class HPODashPanel : VBoxContainer
 
             if (completed.Count == 0)
             {
-                DrawString(font, new Vector2(8f, size.Y * 0.5f), "No completed trials yet",
+                DrawString(font, new Vector2(pad, size.Y * 0.5f), "No completed trials yet",
                     HorizontalAlignment.Left, -1, fs - 1, CDim);
                 return;
             }
@@ -979,9 +1007,9 @@ public partial class HPODashPanel : VBoxContainer
 
             int   cols    = Math.Min(paramNames.Count, 3);
             int   rows    = (int)Math.Ceiling((double)paramNames.Count / cols);
-            float titleH  = fs + 12f;
-            float cellW   = (size.X - 8f) / cols;
-            float cellH   = (size.Y - titleH - 8f) / rows;
+            float titleH  = fs + Ui(12f);
+            float cellW   = (size.X - pad) / cols;
+            float cellH   = (size.Y - titleH - pad) / rows;
 
             float yMin = completed.Min(t => t.Objective!.Value);
             float yMax = completed.Max(t => t.Objective!.Value);
@@ -994,17 +1022,19 @@ public partial class HPODashPanel : VBoxContainer
 
             var  mp          = GetLocalMousePosition();
             int? tooltipTrial = null;
-            float minHoverD   = 12f;
+            float minHoverD   = Ui(12f);
 
             for (int pi = 0; pi < paramNames.Count; pi++)
             {
                 int   col      = pi % cols;
                 int   row      = pi / cols;
-                var   cellRect = new Rect2(8f + col * cellW, titleH + row * cellH,
-                                           cellW - 4f, cellH - 4f);
+                var   cellRect = new Rect2(pad + col * cellW, titleH + row * cellH,
+                                           cellW - Ui(4f), cellH - Ui(4f));
 
-                float padL = col == 0 ? 30f : 8f;
-                const float padR = 6f, padT = 16f, padB = 18f;
+                float padL = col == 0 ? Ui(30f) : pad;
+                float padR = Ui(6f);
+                float padT = Ui(16f);
+                float padB = Ui(18f);
 
                 var plotRect = new Rect2(
                     cellRect.Position.X + padL,
@@ -1013,7 +1043,7 @@ public partial class HPODashPanel : VBoxContainer
                     cellRect.Size.Y - padT - padB);
 
                 DrawRect(cellRect, CPlot,  filled: true);
-                DrawRect(cellRect, CBord,  filled: false, width: 1f);
+                DrawRect(cellRect, CBord,  filled: false, width: borderWidth);
                 if (plotRect.Size.X < 4f || plotRect.Size.Y < 4f) continue;
 
                 // Horizontal grid lines at 25 / 50 / 75 %
@@ -1023,13 +1053,13 @@ public partial class HPODashPanel : VBoxContainer
                     float gy = plotRect.Position.Y + plotRect.Size.Y * (1f - gi * 0.25f);
                     DrawLine(new Vector2(plotRect.Position.X, gy),
                              new Vector2(plotRect.Position.X + plotRect.Size.X, gy),
-                             gridCol, 1f);
+                             gridCol, borderWidth);
                 }
 
                 var name = paramNames[pi];
                 DrawString(font,
                     new Vector2(cellRect.Position.X,
-                                cellRect.Position.Y + padT - 3f),
+                                cellRect.Position.Y + padT - Ui(3f)),
                     name, HorizontalAlignment.Center, cellRect.Size.X, fs - 2, CTitle);
 
                 var xVals = completed.Where(t => t.Params.ContainsKey(name))
@@ -1040,32 +1070,32 @@ public partial class HPODashPanel : VBoxContainer
                 if (MathF.Abs(xMax - xMin) < 1e-8f) { xMin -= 0.5f; xMax += 0.5f; }
 
                 // X-axis labels
-                const float axisLabelW = 48f;
+                float axisLabelW = Ui(48f);
                 DrawString(font,
-                    new Vector2(plotRect.Position.X, plotRect.Position.Y + plotRect.Size.Y + 2f),
+                    new Vector2(plotRect.Position.X, plotRect.Position.Y + plotRect.Size.Y + Ui(2f)),
                     FormatParam(xMin), HorizontalAlignment.Left, axisLabelW, fs - 3, CDim);
                 DrawString(font,
                     new Vector2(plotRect.Position.X + plotRect.Size.X - axisLabelW,
-                                plotRect.Position.Y + plotRect.Size.Y + 2f),
+                                plotRect.Position.Y + plotRect.Size.Y + Ui(2f)),
                     FormatParam(xMax), HorizontalAlignment.Right, axisLabelW, fs - 3, CDim);
 
                 // Y-axis labels — leftmost column only
                 if (col == 0)
                 {
                     DrawString(font,
-                        new Vector2(cellRect.Position.X + 2f, plotRect.Position.Y + fs),
-                        FormatParam(yMax), HorizontalAlignment.Left, padL - 4f, fs - 3, CDim);
+                        new Vector2(cellRect.Position.X + Ui(2f), plotRect.Position.Y + fs),
+                        FormatParam(yMax), HorizontalAlignment.Left, padL - Ui(4f), fs - 3, CDim);
                     DrawString(font,
-                        new Vector2(cellRect.Position.X + 2f,
+                        new Vector2(cellRect.Position.X + Ui(2f),
                                     plotRect.Position.Y + plotRect.Size.Y),
-                        FormatParam(yMin), HorizontalAlignment.Left, padL - 4f, fs - 3, CDim);
+                        FormatParam(yMin), HorizontalAlignment.Left, padL - Ui(4f), fs - 3, CDim);
 
                     // Rotated "Obj" axis title
                     float midY = plotRect.Position.Y + plotRect.Size.Y * 0.5f;
-                    DrawSetTransform(new Vector2(cellRect.Position.X + 7f, midY),
+                    DrawSetTransform(new Vector2(cellRect.Position.X + Ui(7f), midY),
                         -Mathf.Pi * 0.5f, Vector2.One);
-                    DrawString(font, new Vector2(-20f, fs * 0.4f), "Obj",
-                        HorizontalAlignment.Center, 40f, fs - 3, CDim);
+                    DrawString(font, new Vector2(-Ui(20f), fs * 0.4f), "Obj",
+                        HorizontalAlignment.Center, Ui(40f), fs - 3, CDim);
                     DrawSetTransform(Vector2.Zero, 0f, Vector2.One);
                 }
 
@@ -1087,16 +1117,16 @@ public partial class HPODashPanel : VBoxContainer
                     Color dotColor = isBest
                         ? CGold
                         : new Color(1f - tRank * 0.8f, 0.2f + tRank * 0.7f, 0.2f, 0.85f);
-                    float radius = isBest ? 6f : 4f;
+                    float radius = isBest ? Ui(6f) : Ui(4f);
 
                     DrawCircle(dotPos, radius, dotColor);
 
                     float d = mp.DistanceTo(dotPos);
-                    if (d < radius + 4f && d < minHoverD)
+                    if (d < radius + Ui(4f) && d < minHoverD)
                     {
                         minHoverD    = d;
                         tooltipTrial = completed.IndexOf(trial);
-                        DrawCircle(dotPos, radius + 2.5f, new Color(1f, 1f, 1f, 0.28f));
+                        DrawCircle(dotPos, radius + Ui(2.5f), new Color(1f, 1f, 1f, 0.28f));
                     }
                 }
 
@@ -1120,7 +1150,7 @@ public partial class HPODashPanel : VBoxContainer
                     var   tp1    = new Vector2(
                         plotRect.Position.X + plotRect.Size.X,
                         plotRect.Position.Y + plotRect.Size.Y * (1f - Math.Clamp(tSlope + tInt, -0.05f, 1.05f)));
-                    DrawLine(tp0, tp1, new Color(0.55f, 0.55f, 1.0f, 0.50f), 1.5f);
+                    DrawLine(tp0, tp1, new Color(0.55f, 0.55f, 1.0f, 0.50f), Ui(1.5f));
                 }
             }
 
@@ -1145,17 +1175,18 @@ public partial class HPODashPanel : VBoxContainer
 
             float lineH = fs + 3f;
             float maxW  = lines.Max(l => font.GetStringSize(l.Text, HorizontalAlignment.Left, -1, fs - 1).X);
-            const float Pad = 5f;
-            float bw = maxW + Pad * 2f;
-            float bh = lines.Count * lineH + Pad * 2f;
-            float bx = Math.Min(mp.X + 12f, size.X - bw - 4f);
-            float by = Math.Clamp(mp.Y - bh * 0.5f, 4f, size.Y - bh - 4f);
+            float pad = Ui(5f);
+            float borderWidth = Math.Max(1f, Ui(1f));
+            float bw = maxW + pad * 2f;
+            float bh = lines.Count * lineH + pad * 2f;
+            float bx = Math.Min(mp.X + Ui(12f), size.X - bw - Ui(4f));
+            float by = Math.Clamp(mp.Y - bh * 0.5f, Ui(4f), size.Y - bh - Ui(4f));
 
             DrawRect(new Rect2(bx, by, bw, bh), new Color(0.10f, 0.10f, 0.10f, 0.92f), filled: true);
             DrawRect(new Rect2(bx, by, bw, bh), new Color(0.40f, 0.40f, 0.40f, 0.75f),
-                filled: false, width: 1f);
+                filled: false, width: borderWidth);
             for (int li = 0; li < lines.Count; li++)
-                DrawString(font, new Vector2(bx + Pad, by + Pad + (li + 0.82f) * lineH),
+                DrawString(font, new Vector2(bx + pad, by + pad + (li + 0.82f) * lineH),
                     lines[li].Text, HorizontalAlignment.Left, -1, fs - 1, lines[li].Col);
         }
     }

@@ -15,6 +15,8 @@ public partial class RLSetupDock : VBoxContainer
     private readonly Button _quickTestButton;
     private readonly Button _validateSceneButton;
 
+    private static int Ui(int value) => EditorUiScale.Px(value);
+
     public RLSetupDock()
     {
         Name = "RL Setup";
@@ -238,7 +240,7 @@ public partial class RLSetupDock : VBoxContainer
     private static Label MakeSectionHeader(string text)
     {
         var label = new Label { Text = text };
-        label.AddThemeFontSizeOverride("font_size", 13);
+        label.AddThemeFontSizeOverride("font_size", Ui(13));
         return label;
     }
 

@@ -767,6 +767,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         try
         {
             Node? academy = null;
+            var curriculumConsumerCount = 0;
             // groupId → list of agent nodes
             var agentsByGroup = new System.Collections.Generic.Dictionary<string, System.Collections.Generic.List<Node>>();
             var groupBindings = new System.Collections.Generic.Dictionary<string, ResolvedPolicyGroupBinding>();
@@ -829,6 +830,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
                         }
                     }
                 }
+
+                if (IsCurriculumConsumerNode(node))
+                {
+                    curriculumConsumerCount += 1;
+                }
             });
 
             if (academy is null)
@@ -850,6 +856,12 @@ public partial class RLAgentPluginEditor : EditorPlugin
                 validation.BatchSize = ReadIntProperty(runConfig, "BatchSize", 1);
                 validation.EnableSpyOverlay = ReadBoolProperty(academy, "EnableSpyOverlay");
                 validation.HasCurriculum = ReadResourceProperty(academy, "Curriculum") is not null;
+
+                if (validation.HasCurriculum && curriculumConsumerCount == 0)
+                {
+                    validation.Errors.Add(
+                        "RLAcademy has Curriculum assigned, but no scene node implements IRLCurriculumConsumer.");
+                }
 
                 if (trainingConfigRes is null)
                 {
@@ -1094,6 +1106,27 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         return ScriptInheritsPath(GetNodeScript(node), AgentScriptPath)
             || ScriptInheritsPath(GetNodeScript(node), Agent3DScriptPath);
+    }
+
+    private static bool IsCurriculumConsumerNode(Node node)
+    {
+        if (node is IRLCurriculumConsumer)
+        {
+            return true;
+        }
+
+        if (IsAgentNode(node))
+        {
+            return true;
+        }
+
+        var managedType = ResolveManagedScriptType(node);
+        if (managedType is not null && typeof(IRLCurriculumConsumer).IsAssignableFrom(managedType))
+        {
+            return true;
+        }
+
+        return node.HasMethod(nameof(IRLCurriculumConsumer.NotifyCurriculumProgress));
     }
 
     private static int ReadAgentActionCount(Node node)
