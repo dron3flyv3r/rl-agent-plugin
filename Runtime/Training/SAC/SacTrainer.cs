@@ -90,12 +90,12 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
         _logAlpha = MathF.Log(Math.Max(config.TrainerConfig.SacInitAlpha, 1e-8f));
 
         // Target entropy:
-        //   continuous → action_dims when using entropy = -log_prob
+        //   continuous → action_dims × scale, or exact override when configured
         //   discrete   → fraction × log(|A|)  where fraction ∈ (0,1]
         //     fraction=1.0 = uniform random (max entropy); fraction=0.5 = half of max.
         //     Using log(|A|) directly (fraction=1) keeps the policy fully random forever.
         _targetEntropy = _isContinuous
-            ? config.ContinuousActionDimensions
+            ? ResolveContinuousTargetEntropy(config)
             : config.TrainerConfig.SacTargetEntropyFraction * MathF.Log(config.DiscreteActionCount);
     }
 
@@ -386,6 +386,15 @@ public sealed class SacTrainer : ITrainer, IAsyncTrainer, IDistributedTrainer
             Entropy     = totalEntropy    / utd,
             NewLogAlpha = logAlpha,
         };
+    }
+
+    private static float ResolveContinuousTargetEntropy(PolicyGroupConfig config)
+    {
+        var trainer = config.TrainerConfig;
+        if (trainer.SacUseContinuousTargetEntropyOverride)
+            return Math.Max(0f, trainer.SacContinuousTargetEntropyOverride);
+
+        return Math.Max(0f, config.ContinuousActionDimensions * trainer.SacContinuousTargetEntropyScale);
     }
 
     // ── Discrete SAC batch update ─────────────────────────────────────────────

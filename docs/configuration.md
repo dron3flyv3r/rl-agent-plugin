@@ -132,7 +132,10 @@ Configuration for the **Soft Actor-Critic** algorithm (continuous actions only).
 | `AutoTuneAlpha` | bool | true | Automatically adjust alpha to maintain the target entropy. Strongly recommended. |
 | `UpdateEverySteps` | int | 1 | Run gradient updates every N environment steps. Set to 2 or more if updates are too frequent for your hardware. |
 | `UpdatesPerStep` | int | 0 | Number of gradient updates per new transition. `0` = auto-scale based on worker count. |
-| `TargetEntropyFraction` | float | 0.5 | Fraction of max entropy used as the entropy target for automatic alpha tuning. |
+| `TargetEntropyFraction` | float | 0.5 | Fraction of max entropy used as the entropy target for discrete-action SAC. |
+| `ContinuousTargetEntropyScale` | float | 1.0 | Continuous-action target entropy scale. Actual target is `action_dims × scale`. Lower values reduce exploration pressure. |
+| `UseContinuousTargetEntropyOverride` | bool | false | Use an explicit continuous target entropy instead of the scaled value. |
+| `ContinuousTargetEntropyOverride` | float | 0.0 | Exact continuous target entropy used when the override toggle is enabled. |
 
 ### Example: SAC for a locomotion task
 
@@ -146,6 +149,7 @@ RLSACConfig:
   Tau: 0.005
   InitAlpha: 0.2
   AutoTuneAlpha: true
+  ContinuousTargetEntropyScale: 0.5
   UpdatesPerStep: 1
 ```
 

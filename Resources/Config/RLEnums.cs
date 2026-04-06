@@ -27,10 +27,12 @@ public enum RLActivationKind
 
 public enum RLOptimizerKind
 {
-    Adam = 0,
-    Sgd  = 1,
+    Adam  = 0,
+    Sgd   = 1,
+    /// <summary>Adam with decoupled weight decay. Weights are scaled by (1 - lr * weightDecay) each step before the Adam gradient update. Biases are not decayed.</summary>
+    AdamW = 2,
     /// <summary>No optimizer — frozen / target layers only. No moment vectors allocated; weight updates are no-ops.</summary>
-    None = -1,
+    None  = -1,
 }
 
 public enum RLLayerKind

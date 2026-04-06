@@ -85,9 +85,10 @@ internal static class CheckpointMetadataBuilder
 
     internal static string OptimizerToString(RLOptimizerKind optimizer) => optimizer switch
     {
-        RLOptimizerKind.Sgd  => "sgd",
-        RLOptimizerKind.None => "none",
-        _                    => "adam",
+        RLOptimizerKind.Sgd   => "sgd",
+        RLOptimizerKind.AdamW => "adamw",
+        RLOptimizerKind.None  => "none",
+        _                     => "adam",
     };
 
     private static Dictionary<string, string[]> BuildDiscreteActionLabels(IEnumerable<RLActionDefinition> actionDefinitions)
@@ -166,6 +167,10 @@ internal static class CheckpointMetadataBuilder
                 values["sac_init_alpha"]           = trainer.SacInitAlpha;
                 values["sac_auto_tune_alpha"]      = trainer.SacAutoTuneAlpha ? 1f : 0f;
                 values["sac_update_every_steps"]   = trainer.SacUpdateEverySteps;
+                values["sac_target_entropy_fraction"] = trainer.SacTargetEntropyFraction;
+                values["sac_cont_target_entropy_scale"] = trainer.SacContinuousTargetEntropyScale;
+                values["sac_use_cont_target_entropy_override"] = trainer.SacUseContinuousTargetEntropyOverride ? 1f : 0f;
+                values["sac_cont_target_entropy_override"] = trainer.SacContinuousTargetEntropyOverride;
                 break;
         }
 

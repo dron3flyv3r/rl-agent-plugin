@@ -47,11 +47,14 @@ internal sealed class DenseLayer : NetworkLayer
     private readonly float[]          _weights;
     private readonly float[]          _biases;
 
-    // Adam moment vectors (null for SGD / None)
+    // Adam/AdamW moment vectors (null for SGD / None)
     private readonly float[]? _wm;
     private readonly float[]? _wv;
     private readonly float[]? _bm;
     private readonly float[]? _bv;
+
+    // AdamW decoupled weight decay coefficient (λ)
+    private readonly float _weightDecay;
 
     // Iterative bias-correction accumulators: beta^t
     private float _adamB1Pow = 1f;
@@ -66,21 +69,22 @@ internal sealed class DenseLayer : NetworkLayer
     public override int InputSize  => _inputSize;
     public override int OutputSize => _outputSize;
 
-    public DenseLayer(int inputSize, int outputSize, RLActivationKind? activation, RLOptimizerKind optimizer)
+    public DenseLayer(int inputSize, int outputSize, RLActivationKind? activation, RLOptimizerKind optimizer, float weightDecay = 0f)
     {
-        _inputSize  = inputSize;
-        _outputSize = outputSize;
-        _activation = activation;
-        _optimizer  = optimizer;
-        _weights    = new float[inputSize * outputSize];
-        _biases     = new float[outputSize];
+        _inputSize   = inputSize;
+        _outputSize  = outputSize;
+        _activation  = activation;
+        _optimizer   = optimizer;
+        _weightDecay = weightDecay;
+        _weights     = new float[inputSize * outputSize];
+        _biases      = new float[outputSize];
 
         _rng.Randomize();
         var scale = Mathf.Sqrt(2.0f / Mathf.Max(1, inputSize));
         for (var i = 0; i < _weights.Length; i++)
             _weights[i] = _rng.Randfn(0.0f, scale);
 
-        if (optimizer == RLOptimizerKind.Adam)
+        if (optimizer is RLOptimizerKind.Adam or RLOptimizerKind.AdamW)
         {
             _wm = new float[_weights.Length];
             _wv = new float[_weights.Length];
@@ -184,7 +188,7 @@ internal sealed class DenseLayer : NetworkLayer
     {
         if (_optimizer == RLOptimizerKind.None) return;
 
-        if (_optimizer == RLOptimizerKind.Adam)
+        if (_optimizer is RLOptimizerKind.Adam or RLOptimizerKind.AdamW)
         {
             _adamB1Pow *= AdamBeta1;
             _adamB2Pow *= AdamBeta2;
@@ -196,6 +200,8 @@ internal sealed class DenseLayer : NetworkLayer
                 for (var ii = 0; ii < _inputSize; ii++)
                 {
                     var wi = oi * _inputSize + ii;
+                    if (_optimizer == RLOptimizerKind.AdamW)
+                        _weights[wi] *= 1f - learningRate * _weightDecay;  // decoupled weight decay
                     var g  = buffer.WeightGradients[wi] * gradScale;
                     _wm![wi] = AdamBeta1 * _wm[wi] + (1f - AdamBeta1) * g;
                     _wv![wi] = AdamBeta2 * _wv[wi] + (1f - AdamBeta2) * g * g;
@@ -290,8 +296,8 @@ internal sealed class DenseLayer : NetworkLayer
         for (var i = 0; i < _weights.Length; i++) _weights[i] = weights[wi++];
         for (var i = 0; i < _biases.Length;  i++) _biases[i]  = weights[wi++];
 
-        // Reset Adam moments so they warm up from the new weights
-        if (_optimizer == RLOptimizerKind.Adam)
+        // Reset Adam/AdamW moments so they warm up from the new weights
+        if (_optimizer is RLOptimizerKind.Adam or RLOptimizerKind.AdamW)
         {
             Array.Clear(_wm!, 0, _wm!.Length);
             Array.Clear(_wv!, 0, _wv!.Length);
@@ -328,7 +334,7 @@ internal sealed class DenseLayer : NetworkLayer
     {
         if (_optimizer == RLOptimizerKind.None) return;
 
-        if (_optimizer == RLOptimizerKind.Adam)
+        if (_optimizer is RLOptimizerKind.Adam or RLOptimizerKind.AdamW)
         {
             _adamB1Pow *= AdamBeta1;
             _adamB2Pow *= AdamBeta2;
@@ -340,6 +346,8 @@ internal sealed class DenseLayer : NetworkLayer
                 for (var ii = 0; ii < _inputSize; ii++)
                 {
                     var wi = oi * _inputSize + ii;
+                    if (_optimizer == RLOptimizerKind.AdamW)
+                        _weights[wi] *= 1f - learningRate * _weightDecay;  // decoupled weight decay
                     var g  = localGrad[oi] * input[ii] * gradScale;
                     _wm![wi] = AdamBeta1 * _wm[wi] + (1f - AdamBeta1) * g;
                     _wv![wi] = AdamBeta2 * _wv[wi] + (1f - AdamBeta2) * g * g;

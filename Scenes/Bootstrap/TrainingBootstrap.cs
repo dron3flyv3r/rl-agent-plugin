@@ -670,6 +670,20 @@ public partial class TrainingBootstrap : Node
         foreach (var trainer in _trainersByGroup.Values)
             if (trainer is SacTrainer sac) sac.EnvBatchSize = _batchSize;
 
+        if (_asyncGradientUpdates)
+        {
+            var hasNativeLayerGroup = _groupConfigsByGroup.Values.Any(cfg =>
+                cfg.NetworkGraph.UseNativeLayers && NativeLayerSupport.IsAvailable);
+            if (hasNativeLayerGroup)
+            {
+                _asyncGradientUpdates = false;
+                GD.PushWarning(
+                    "[RL] Async gradient updates were disabled because one or more policy groups " +
+                    "use native GDExtension layers. Background training would call GodotObject-backed " +
+                    "layers off the main thread, which can cause silent editor/game crashes.");
+            }
+        }
+
         if (!TryConfigureSelfPlay(out var selfPlayError))
         {
             GD.PushError($"[RL] {selfPlayError}");

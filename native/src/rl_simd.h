@@ -196,3 +196,56 @@ static inline void adam_update_exact(float* params,
         params[i] -= lr * m_hat / (std::sqrt(v_hat) + kEps);
     }
 }
+
+// ── adamw_update_exact: AdamW — decoupled weight decay + exact bias-corrected Adam ─
+// Applies weight decay BEFORE the gradient step: params[i] *= (1 - lr * wd)
+// then performs the standard Adam update.  Pass wd=0 for biases (no decay).
+
+static inline void adamw_update_exact(float* params,
+                                       float* m, float* v,
+                                       const float* grads,
+                                       int N, float lr, float scale,
+                                       float b1t, float b2t, float wd)
+{
+    float b1_corr  = 1.f - b1t;
+    float b2_corr  = 1.f - b2t;
+    float decay    = 1.f - lr * wd;
+    int i = 0;
+#ifdef RL_USE_AVX2
+    __m256 vb1         = _mm256_set1_ps(kB1);
+    __m256 vb1c        = _mm256_set1_ps(1.f - kB1);
+    __m256 vb2         = _mm256_set1_ps(kB2);
+    __m256 vb2c        = _mm256_set1_ps(1.f - kB2);
+    __m256 veps        = _mm256_set1_ps(kEps);
+    __m256 vlr         = _mm256_set1_ps(lr);
+    __m256 vsc         = _mm256_set1_ps(scale);
+    __m256 vdecay      = _mm256_set1_ps(decay);
+    __m256 vb1corr_inv = _mm256_set1_ps(1.f / b1_corr);
+    __m256 vb2corr     = _mm256_set1_ps(b2_corr);
+
+    for (; i + 8 <= N; i += 8) {
+        __m256 p  = _mm256_mul_ps(_mm256_loadu_ps(params + i), vdecay);  // weight decay
+        __m256 g  = _mm256_mul_ps(_mm256_loadu_ps(grads + i), vsc);
+        __m256 mi = _mm256_fmadd_ps(vb1c, g, _mm256_mul_ps(vb1, _mm256_loadu_ps(m + i)));
+        __m256 vi = _mm256_fmadd_ps(vb2c, _mm256_mul_ps(g, g),
+                                    _mm256_mul_ps(vb2, _mm256_loadu_ps(v + i)));
+        _mm256_storeu_ps(m + i, mi);
+        _mm256_storeu_ps(v + i, vi);
+        __m256 m_hat  = _mm256_mul_ps(mi, vb1corr_inv);
+        __m256 v_hat  = _mm256_div_ps(vi, vb2corr);
+        __m256 update = _mm256_div_ps(
+            _mm256_mul_ps(vlr, m_hat),
+            _mm256_add_ps(_mm256_sqrt_ps(v_hat), veps));
+        _mm256_storeu_ps(params + i, _mm256_sub_ps(p, update));
+    }
+#endif
+    for (; i < N; ++i) {
+        params[i] *= decay;                                    // weight decay
+        float g  = grads[i] * scale;
+        m[i]     = kB1 * m[i] + (1.f - kB1) * g;
+        v[i]     = kB2 * v[i] + (1.f - kB2) * g * g;
+        float m_hat = m[i] / b1_corr;
+        float v_hat = v[i] / b2_corr;
+        params[i] -= lr * m_hat / (std::sqrt(v_hat) + kEps);
+    }
+}

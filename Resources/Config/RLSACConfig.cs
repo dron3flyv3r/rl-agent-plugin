@@ -44,6 +44,22 @@ public partial class RLSACConfig : RLAlgorithmConfig
     /// Only used when the action space is discrete (ignored for continuous).
     /// </summary>
     [Export(PropertyHint.Range, "0.0,1.0,0.01")] public float TargetEntropyFraction { get; set; } = 0.5f;
+    /// <summary>
+    /// Continuous-action entropy target scale used when alpha auto-tuning is enabled.
+    /// The target entropy becomes <c>action_dims × ContinuousTargetEntropyScale</c>.
+    /// 1.0 preserves the legacy behaviour; lower values reduce exploration pressure.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.0,2.0,0.01")] public float ContinuousTargetEntropyScale { get; set; } = 1.0f;
+    /// <summary>
+    /// When enabled, use <see cref="ContinuousTargetEntropyOverride"/> instead of the
+    /// scaled continuous-action entropy target.
+    /// </summary>
+    [Export] public bool UseContinuousTargetEntropyOverride { get; set; } = false;
+    /// <summary>
+    /// Exact continuous-action entropy target used when
+    /// <see cref="UseContinuousTargetEntropyOverride"/> is enabled.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.0,64.0,0.01,or_greater")] public float ContinuousTargetEntropyOverride { get; set; } = 0.0f;
 
     public override RLAlgorithmKind AlgorithmKind => RLAlgorithmKind.SAC;
     /// <summary>SAC only supports continuous action spaces. Use PPO for discrete actions.</summary>
@@ -67,6 +83,9 @@ public partial class RLSACConfig : RLAlgorithmConfig
         config.SacAutoTuneAlpha = AutoTuneAlpha;
         config.SacUpdateEverySteps = UpdateEverySteps;
         config.SacTargetEntropyFraction = TargetEntropyFraction;
+        config.SacContinuousTargetEntropyScale = ContinuousTargetEntropyScale;
+        config.SacUseContinuousTargetEntropyOverride = UseContinuousTargetEntropyOverride;
+        config.SacContinuousTargetEntropyOverride = ContinuousTargetEntropyOverride;
         config.SacUpdatesPerStep = UpdatesPerStep;
         config.StatusWriteIntervalSteps = StatusWriteIntervalSteps;
     }

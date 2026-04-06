@@ -51,7 +51,7 @@ void RlDenseLayer::initialize(int in_size, int out_size, int activation, int opt
     _cached_input.resize(in_size);
     _cached_preact.resize(out_size);
 
-    if (optimizer == 0) {  // Adam
+    if (optimizer == 0 || optimizer == 2) {  // Adam or AdamW
         _wm.assign(wsize,    0.f); _wv.assign(wsize,    0.f);
         _bm.assign(out_size, 0.f); _bv.assign(out_size, 0.f);
     } else {
@@ -68,6 +68,15 @@ void RlDenseLayer::initialize(int in_size, int out_size, int activation, int opt
 
     _grad_buf_size = wsize + out_size;
     _ready = true;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// set_weight_decay
+// ─────────────────────────────────────────────────────────────────────────────
+
+void RlDenseLayer::set_weight_decay(float wd)
+{
+    _weight_decay = wd;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -188,7 +197,7 @@ PackedFloat32Array RlDenseLayer::backward(const PackedFloat32Array& output_grad,
 
     if (_optimizer == -1) return in_grad;  // None — frozen, no update
 
-    if (_optimizer == 0) {  // Adam — exact bias-corrected formula matching DenseLayer.cs
+    if (_optimizer == 0 || _optimizer == 2) {  // Adam / AdamW
         _b1t *= kB1; _b2t *= kB2;
 
         // Weight gradient: wg[o*in + i] = local_grad[o] * cached_input[i]
@@ -196,10 +205,17 @@ PackedFloat32Array RlDenseLayer::backward(const PackedFloat32Array& output_grad,
         for (int o = 0; o < _out; ++o)
             axpy(wg.data() + o * _in, _cached_input.data(), local_grad[o], _in);
 
-        adam_update_exact(_weights.data(), _wm.data(), _wv.data(),
-                          wg.data(), _out * _in, lr, grad_scale, _b1t, _b2t);
-        adam_update_exact(_biases.data(), _bm.data(), _bv.data(),
-                          local_grad.data(), _out, lr, grad_scale, _b1t, _b2t);
+        if (_optimizer == 2) {  // AdamW — decoupled weight decay on weights only
+            adamw_update_exact(_weights.data(), _wm.data(), _wv.data(),
+                               wg.data(), _out * _in, lr, grad_scale, _b1t, _b2t, _weight_decay);
+            adamw_update_exact(_biases.data(), _bm.data(), _bv.data(),
+                               local_grad.data(), _out, lr, grad_scale, _b1t, _b2t, 0.f);
+        } else {  // Adam
+            adam_update_exact(_weights.data(), _wm.data(), _wv.data(),
+                              wg.data(), _out * _in, lr, grad_scale, _b1t, _b2t);
+            adam_update_exact(_biases.data(), _bm.data(), _bv.data(),
+                              local_grad.data(), _out, lr, grad_scale, _b1t, _b2t);
+        }
     } else {  // SGD
         for (int o = 0; o < _out; ++o) {
             axpy(_weights.data() + o * _in, _cached_input.data(),
@@ -303,12 +319,19 @@ void RlDenseLayer::apply_gradients(const PackedFloat32Array& grad_buffer,
     const float* wg = gb;
     const float* bg = gb + _out * _in;
 
-    if (_optimizer == 0) {  // Adam
+    if (_optimizer == 0 || _optimizer == 2) {  // Adam / AdamW
         _b1t *= kB1; _b2t *= kB2;
-        adam_update_exact(_weights.data(), _wm.data(), _wv.data(),
-                          wg, _out * _in, lr, grad_scale, _b1t, _b2t);
-        adam_update_exact(_biases.data(), _bm.data(), _bv.data(),
-                          bg, _out, lr, grad_scale, _b1t, _b2t);
+        if (_optimizer == 2) {  // AdamW — decoupled weight decay on weights only
+            adamw_update_exact(_weights.data(), _wm.data(), _wv.data(),
+                               wg, _out * _in, lr, grad_scale, _b1t, _b2t, _weight_decay);
+            adamw_update_exact(_biases.data(), _bm.data(), _bv.data(),
+                               bg, _out, lr, grad_scale, _b1t, _b2t, 0.f);
+        } else {  // Adam
+            adam_update_exact(_weights.data(), _wm.data(), _wv.data(),
+                              wg, _out * _in, lr, grad_scale, _b1t, _b2t);
+            adam_update_exact(_biases.data(), _bm.data(), _bv.data(),
+                              bg, _out, lr, grad_scale, _b1t, _b2t);
+        }
     } else {  // SGD
         int wsize = _out * _in;
         for (int i = 0; i < wsize; ++i)
@@ -451,8 +474,8 @@ void RlDenseLayer::set_weights(const PackedFloat32Array& weights,
     std::memcpy(_weights.data(), src,           _weights.size() * sizeof(float));
     std::memcpy(_biases.data(),  src + _out * _in, _biases.size()  * sizeof(float));
 
-    // Reset Adam moments so they warm up from the new weights (matches LoadSerialized).
-    if (_optimizer == 0) {
+    // Reset Adam/AdamW moments so they warm up from the new weights (matches LoadSerialized).
+    if (_optimizer == 0 || _optimizer == 2) {
         std::fill(_wm.begin(), _wm.end(), 0.f); std::fill(_wv.begin(), _wv.end(), 0.f);
         std::fill(_bm.begin(), _bm.end(), 0.f); std::fill(_bv.begin(), _bv.end(), 0.f);
         _b1t = 1.f; _b2t = 1.f;
@@ -467,6 +490,9 @@ void RlDenseLayer::_bind_methods()
 {
     ClassDB::bind_method(D_METHOD("initialize", "in_size", "out_size", "activation", "optimizer"),
                          &RlDenseLayer::initialize);
+
+    ClassDB::bind_method(D_METHOD("set_weight_decay", "wd"),
+                         &RlDenseLayer::set_weight_decay);
 
     ClassDB::bind_method(D_METHOD("forward", "input"),
                          &RlDenseLayer::forward);

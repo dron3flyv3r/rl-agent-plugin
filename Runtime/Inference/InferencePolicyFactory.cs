@@ -158,8 +158,9 @@ public static class InferencePolicyFactory
 
     private static RLOptimizerKind OptimizerFromString(string optimizer) => optimizer switch
     {
-        "sgd"  => RLOptimizerKind.Sgd,
-        "none" => RLOptimizerKind.None,
-        _      => RLOptimizerKind.Adam,
+        "sgd"   => RLOptimizerKind.Sgd,
+        "adamw" => RLOptimizerKind.AdamW,
+        "none"  => RLOptimizerKind.None,
+        _       => RLOptimizerKind.Adam,
     };
 }

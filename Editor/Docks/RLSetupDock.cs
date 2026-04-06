@@ -1,3 +1,5 @@
+using System.Collections.Generic;
+using System.Linq;
 using Godot;
 
 namespace RlAgentPlugin.Editor;
@@ -6,6 +8,13 @@ namespace RlAgentPlugin.Editor;
 public partial class RLSetupDock : VBoxContainer
 {
     private readonly Label _scenePathLabel;
+    private readonly Label _wizardStageLabel;
+    private readonly Label _wizardHintLabel;
+    private readonly Label _wizardIssueCountLabel;
+    private readonly Button _fixAllButton;
+    private readonly VBoxContainer _issueList;
+    private readonly VBoxContainer _reviewList;
+    private readonly Label _reviewEmptyLabel;
     private readonly Label _validationStatusLabel;
     private readonly Label _validationDetailLabel;
     private readonly Label _configLabel;
@@ -27,17 +36,23 @@ public partial class RLSetupDock : VBoxContainer
     [Signal]
     public delegate void ValidateSceneRequestedEventHandler();
 
+    [Signal]
+    public delegate void AutofixRequestedEventHandler(int fixKind, string targetPath);
+
+    [Signal]
+    public delegate void AutofixAllRequestedEventHandler();
+
+    [Signal]
+    public delegate void ReviewTargetRequestedEventHandler(bool isResource, string targetPath);
+
     private static int Ui(int value) => EditorUiScale.Px(value);
 
     public RLSetupDock()
     {
         Name = "RL Setup";
-        CustomMinimumSize = new Vector2(220f, 0f);
+        CustomMinimumSize = new Vector2(240f, 0f);
         SizeFlagsHorizontal = SizeFlags.ExpandFill;
 
-        // Tool scripts can be reconstructed after an editor domain reload while the
-        // native dock node still has its previous children. Clear any stale UI first
-        // so we do not accumulate duplicate scroll containers.
         ClearExistingChildren();
 
         var scroll = new ScrollContainer
@@ -58,9 +73,9 @@ public partial class RLSetupDock : VBoxContainer
         {
             SizeFlagsHorizontal = SizeFlags.ExpandFill,
         };
+        vbox.AddThemeConstantOverride("separation", 6);
         outer.AddChild(vbox);
 
-        // Scene
         vbox.AddChild(MakeSectionHeader("Scene"));
         _scenePathLabel = new Label
         {
@@ -70,11 +85,63 @@ public partial class RLSetupDock : VBoxContainer
         };
         vbox.AddChild(_scenePathLabel);
 
-        vbox.AddChild(MakeSpacer(4));
         vbox.AddChild(new HSeparator());
-        vbox.AddChild(MakeSpacer(4));
 
-        // Validation
+        vbox.AddChild(MakeSectionHeader("Wizard"));
+        _wizardStageLabel = new Label { Text = "Analyze" };
+        _wizardStageLabel.AddThemeFontSizeOverride("font_size", Ui(14));
+        vbox.AddChild(_wizardStageLabel);
+
+        _wizardHintLabel = new Label
+        {
+            Text = "Open a training scene to analyze setup.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        vbox.AddChild(_wizardHintLabel);
+
+        _wizardIssueCountLabel = new Label
+        {
+            Text = "Issues: 0",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        vbox.AddChild(_wizardIssueCountLabel);
+
+        _fixAllButton = new Button
+        {
+            Text = "Fix All Safe",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            CustomMinimumSize = new Vector2(0f, 30f),
+            Visible = false,
+        };
+        _fixAllButton.Pressed += OnFixAllButtonPressed;
+        vbox.AddChild(_fixAllButton);
+
+        _issueList = new VBoxContainer
+        {
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+        _issueList.AddThemeConstantOverride("separation", 4);
+        vbox.AddChild(_issueList);
+
+        vbox.AddChild(new HSeparator());
+
+        vbox.AddChild(MakeSectionHeader("Review"));
+        _reviewList = new VBoxContainer
+        {
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+        _reviewList.AddThemeConstantOverride("separation", 4);
+        vbox.AddChild(_reviewList);
+
+        _reviewEmptyLabel = new Label
+        {
+            Text = "No autofixes have been applied in this scene yet.",
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        vbox.AddChild(_reviewEmptyLabel);
+
+        vbox.AddChild(new HSeparator());
+
         vbox.AddChild(MakeSectionHeader("Validation"));
         _validationStatusLabel = new Label { Text = "—" };
         vbox.AddChild(_validationStatusLabel);
@@ -85,11 +152,8 @@ public partial class RLSetupDock : VBoxContainer
         };
         vbox.AddChild(_validationDetailLabel);
 
-        vbox.AddChild(MakeSpacer(4));
         vbox.AddChild(new HSeparator());
-        vbox.AddChild(MakeSpacer(4));
 
-        // Resources
         vbox.AddChild(MakeSectionHeader("Resources"));
         _configLabel = new Label
         {
@@ -98,11 +162,8 @@ public partial class RLSetupDock : VBoxContainer
         };
         vbox.AddChild(_configLabel);
 
-        vbox.AddChild(MakeSpacer(6));
         vbox.AddChild(new HSeparator());
-        vbox.AddChild(MakeSpacer(4));
 
-        // Start / Stop buttons
         var buttonRow = new HBoxContainer();
         buttonRow.AddThemeConstantOverride("separation", 4);
         vbox.AddChild(buttonRow);
@@ -125,8 +186,6 @@ public partial class RLSetupDock : VBoxContainer
         };
         _stopButton.Pressed += OnStopButtonPressed;
         buttonRow.AddChild(_stopButton);
-
-        vbox.AddChild(MakeSpacer(4));
 
         var utilityRow = new HBoxContainer();
         utilityRow.AddThemeConstantOverride("separation", 4);
@@ -152,18 +211,12 @@ public partial class RLSetupDock : VBoxContainer
         _validateSceneButton.Pressed += OnValidateSceneButtonPressed;
         utilityRow.AddChild(_validateSceneButton);
 
-        vbox.AddChild(MakeSpacer(4));
-
         _launchStatusLabel = new Label
         {
             Text = "Status: idle",
             AutowrapMode = TextServer.AutowrapMode.WordSmart,
         };
         vbox.AddChild(_launchStatusLabel);
-
-        vbox.AddChild(MakeSpacer(4));
-        vbox.AddChild(new HSeparator());
-        vbox.AddChild(MakeSpacer(4));
     }
 
     public void SetScenePath(string scenePath)
@@ -177,12 +230,12 @@ public partial class RLSetupDock : VBoxContainer
     {
         if (isValid == true)
         {
-            _validationStatusLabel.Text = "✓  Ready to train";
+            _validationStatusLabel.Text = "Ready to train";
             _validationStatusLabel.AddThemeColorOverride("font_color", new Color(0.45f, 0.82f, 0.45f));
         }
         else if (isValid == false)
         {
-            _validationStatusLabel.Text = "✗  Scene has errors";
+            _validationStatusLabel.Text = "Scene has blocking issues";
             _validationStatusLabel.AddThemeColorOverride("font_color", new Color(0.90f, 0.40f, 0.40f));
         }
         else
@@ -244,16 +297,173 @@ public partial class RLSetupDock : VBoxContainer
         _validateSceneButton.TooltipText = validateSceneTooltip;
     }
 
+    public void SetWizardState(TrainingSceneValidation? validation, IReadOnlyList<TrainingSceneReviewEntry>? reviewEntries)
+    {
+        ClearContainer(_issueList);
+        ClearContainer(_reviewList);
+
+        reviewEntries ??= new List<TrainingSceneReviewEntry>();
+        var orderedIssues = validation?.Issues
+            .OrderByDescending(issue => issue.Severity)
+            .ThenByDescending(issue => issue.IsAutofixable)
+            .ThenBy(issue => issue.Code)
+            .ToList() ?? new List<TrainingSceneIssue>();
+        var autofixableIssues = orderedIssues.Where(issue => issue.IsAutofixable).ToList();
+        var blockingCount = orderedIssues.Count(issue => issue.Severity == TrainingSceneIssueSeverity.Blocking);
+
+        if (validation is null)
+        {
+            SetWizardStage("Analyze", "Open a scene to inspect RL setup and available autofixes.", Colors.WhiteSmoke);
+            _wizardIssueCountLabel.Text = "Issues: —";
+            _fixAllButton.Visible = false;
+        }
+        else if (reviewEntries.Count > 0)
+        {
+            var reviewColor = validation.IsValid
+                ? new Color(0.45f, 0.82f, 0.45f)
+                : new Color(0.90f, 0.72f, 0.35f);
+            var reviewMessage = validation.IsValid
+                ? "Autofix applied. Review the created setup assets, then start training."
+                : "Autofix applied. Review the changes below, then address any remaining manual issues.";
+            SetWizardStage("Review", reviewMessage, reviewColor);
+            _wizardIssueCountLabel.Text = $"Issues: {orderedIssues.Count} total, {blockingCount} blocking";
+            _fixAllButton.Visible = autofixableIssues.Count > 0;
+            _fixAllButton.Disabled = autofixableIssues.Count == 0;
+        }
+        else if (autofixableIssues.Count > 0)
+        {
+            SetWizardStage(
+                "Fix Setup",
+                $"Found {autofixableIssues.Count} safe autofix action(s). Apply individual fixes or use Fix All Safe.",
+                new Color(0.90f, 0.72f, 0.35f));
+            _wizardIssueCountLabel.Text = $"Issues: {orderedIssues.Count} total, {blockingCount} blocking";
+            _fixAllButton.Visible = true;
+            _fixAllButton.Disabled = false;
+        }
+        else if (validation.IsValid)
+        {
+            SetWizardStage("Ready", "Required setup is present. Training and quick test are ready.", new Color(0.45f, 0.82f, 0.45f));
+            _wizardIssueCountLabel.Text = "Issues: 0 blocking";
+            _fixAllButton.Visible = false;
+        }
+        else
+        {
+            SetWizardStage("Analyze", "Validation found issues that still require manual work.", new Color(0.90f, 0.50f, 0.40f));
+            _wizardIssueCountLabel.Text = $"Issues: {orderedIssues.Count} total, {blockingCount} blocking";
+            _fixAllButton.Visible = false;
+        }
+
+        foreach (var issue in orderedIssues)
+        {
+            _issueList.AddChild(BuildIssueCard(issue));
+        }
+
+        _reviewEmptyLabel.Visible = reviewEntries.Count == 0;
+        foreach (var entry in reviewEntries)
+        {
+            _reviewList.AddChild(BuildReviewRow(entry));
+        }
+    }
+
+    private Control BuildIssueCard(TrainingSceneIssue issue)
+    {
+        var panel = new PanelContainer
+        {
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+
+        var margin = new MarginContainer();
+        SetMargins(margin, 6);
+        panel.AddChild(margin);
+
+        var box = new VBoxContainer();
+        box.AddThemeConstantOverride("separation", 4);
+        margin.AddChild(box);
+
+        var severity = issue.Severity == TrainingSceneIssueSeverity.Blocking ? "Blocking" : "Warning";
+        var severityColor = issue.Severity == TrainingSceneIssueSeverity.Blocking
+            ? new Color(0.95f, 0.45f, 0.40f)
+            : new Color(0.92f, 0.74f, 0.30f);
+        var severityLabel = new Label
+        {
+            Text = severity,
+        };
+        severityLabel.AddThemeColorOverride("font_color", severityColor);
+        box.AddChild(severityLabel);
+
+        var messageLabel = new Label
+        {
+            Text = issue.Message,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        box.AddChild(messageLabel);
+
+        if (!string.IsNullOrWhiteSpace(issue.TargetPath))
+        {
+            var pathLabel = new Label
+            {
+                Text = issue.TargetPath,
+                AutowrapMode = TextServer.AutowrapMode.WordSmart,
+            };
+            pathLabel.AddThemeColorOverride("font_color", new Color(0.72f, 0.72f, 0.72f));
+            box.AddChild(pathLabel);
+        }
+
+        if (issue.IsAutofixable)
+        {
+            var button = new Button
+            {
+                Text = string.IsNullOrWhiteSpace(issue.FixLabel) ? "Fix" : issue.FixLabel,
+                SizeFlagsHorizontal = SizeFlags.ExpandFill,
+                CustomMinimumSize = new Vector2(0f, 28f),
+            };
+            button.Pressed += () => EmitSignal(SignalName.AutofixRequested, (int)issue.FixKind, issue.TargetPath);
+            box.AddChild(button);
+        }
+
+        return panel;
+    }
+
+    private Control BuildReviewRow(TrainingSceneReviewEntry entry)
+    {
+        var row = new HBoxContainer
+        {
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+        };
+        row.AddThemeConstantOverride("separation", 6);
+
+        var label = new Label
+        {
+            Text = entry.Title,
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            AutowrapMode = TextServer.AutowrapMode.WordSmart,
+        };
+        label.TooltipText = entry.TargetPath;
+        row.AddChild(label);
+
+        var button = new Button
+        {
+            Text = string.IsNullOrWhiteSpace(entry.ActionLabel) ? "Open" : entry.ActionLabel,
+        };
+        var isResource = entry.TargetKind == TrainingSceneReviewTargetKind.Resource;
+        button.Pressed += () => EmitSignal(SignalName.ReviewTargetRequested, isResource, entry.TargetPath);
+        row.AddChild(button);
+
+        return row;
+    }
+
+    private void SetWizardStage(string stage, string hint, Color color)
+    {
+        _wizardStageLabel.Text = stage;
+        _wizardStageLabel.AddThemeColorOverride("font_color", color);
+        _wizardHintLabel.Text = hint;
+    }
+
     private static Label MakeSectionHeader(string text)
     {
         var label = new Label { Text = text };
         label.AddThemeFontSizeOverride("font_size", Ui(13));
         return label;
-    }
-
-    private static Control MakeSpacer(int height)
-    {
-        return new Control { CustomMinimumSize = new Vector2(0f, height) };
     }
 
     private static void SetMargins(MarginContainer container, int margin)
@@ -271,6 +481,16 @@ public partial class RLSetupDock : VBoxContainer
             var child = GetChild(childIndex);
             RemoveChild(child);
             child.Free();
+        }
+    }
+
+    private static void ClearContainer(Container container)
+    {
+        for (var childIndex = container.GetChildCount() - 1; childIndex >= 0; childIndex--)
+        {
+            var child = container.GetChild(childIndex);
+            container.RemoveChild(child);
+            child.QueueFree();
         }
     }
 
@@ -303,5 +523,10 @@ public partial class RLSetupDock : VBoxContainer
     private void OnValidateSceneButtonPressed()
     {
         EmitSignal(SignalName.ValidateSceneRequested);
+    }
+
+    private void OnFixAllButtonPressed()
+    {
+        EmitSignal(SignalName.AutofixAllRequested);
     }
 }

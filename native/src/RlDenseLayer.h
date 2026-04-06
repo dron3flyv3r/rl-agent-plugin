@@ -23,7 +23,7 @@ using namespace godot;
 ///   0 = None (linear),  1 = Tanh,  2 = ReLU
 ///
 /// Optimizer encoding (matches RLOptimizerKind):
-///   0 = Adam,  1 = SGD,  -1 = None (frozen)
+///   0 = Adam,  1 = SGD,  2 = AdamW,  -1 = None (frozen)
 ///
 /// Gradient buffer layout: [weight_grads[out*in] | bias_grads[out]]
 ///
@@ -35,6 +35,9 @@ class RlDenseLayer : public RefCounted {
 public:
     // ── Lifecycle ─────────────────────────────────────────────────────────────
     void initialize(int in_size, int out_size, int activation, int optimizer);
+    /// Set the weight decay coefficient λ used by AdamW (optimizer=2).
+    /// Has no effect for Adam / SGD.  Default is 0 (no decay).
+    void set_weight_decay(float wd);
 
     // ── Forward ───────────────────────────────────────────────────────────────
     /// Single-sample forward. Caches input and pre-activation for backward.
@@ -95,9 +98,10 @@ private:
     float _b1t = 1.f, _b2t = 1.f;        // bias-correction accumulators (beta^t)
     std::vector<float> _cached_input;     // [_in]  — set by forward(), used by backward
     std::vector<float> _cached_preact;    // [_out] — set by forward(), used by backward
+    float _weight_decay = 0.f;            // AdamW decoupled weight decay (λ)
     int  _in  = 0, _out = 0;
     int  _activation = 0;                 // 0=None, 1=Tanh, 2=ReLU
-    int  _optimizer  = 0;                 // 0=Adam, 1=SGD, -1=None
+    int  _optimizer  = 0;                 // 0=Adam, 1=SGD, 2=AdamW, -1=None
     int  _grad_buf_size = 0;              // _out*_in + _out
     bool _ready = false;
 

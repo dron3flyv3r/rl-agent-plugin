@@ -334,8 +334,8 @@ Position alone tells the agent where it is; velocity tells it where it's going. 
 |---------|-----|
 | Not learning at all | Check WarmupSteps, ↑ ReplayBufferCapacity |
 | Q-values diverging | ↓ LearningRate, ↓ UpdatesPerStep |
-| Very random behavior persists | ↓ InitAlpha, check AutoTuneAlpha |
-| Very deterministic too early | ↑ InitAlpha, ↑ TargetEntropyFraction |
+| Very random behavior persists | ↓ InitAlpha, lower `ContinuousTargetEntropyScale` for continuous SAC, or lower `TargetEntropyFraction` for discrete SAC |
+| Very deterministic too early | ↑ InitAlpha, raise `ContinuousTargetEntropyScale` for continuous SAC, or raise `TargetEntropyFraction` for discrete SAC |
 | Training unstable | ↓ Tau (slower target updates), ↓ BatchSize |
 
 ---

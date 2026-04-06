@@ -473,7 +473,7 @@ public partial class RLDashboard : Control
         _rewardChart = MakeChart("Episode Reward");
         _lossChart = MakeChart("Policy Loss  /  Value Loss");
         _entropyChart = MakeChart("Entropy");
-        _sacAlphaChart = MakeChart("SAC Alpha");
+        _sacAlphaChart = MakeChart("SAC Alpha (Entropy Temp)");
         _lengthChart = MakeChart("Episode Length");
         _eloChart = MakeChart("Learner Elo");
         _curriculumChart = MakeChart("Curriculum Progress");
@@ -499,6 +499,38 @@ public partial class RLDashboard : Control
         chart.SizeFlagsVertical = SizeFlags.ExpandFill;
         chart.CustomMinimumSize = UiSize(0, 140);
         return chart;
+    }
+
+    private static void SetChartTitle(LineChartPanel? chart, string title)
+    {
+        if (chart is null || chart.ChartTitle == title) return;
+        chart.ChartTitle = title;
+        chart.QueueRedraw();
+    }
+
+    private static List<Metric> CollapseRepeatedSacLossSnapshots(IReadOnlyList<Metric> metrics)
+    {
+        if (metrics.Count <= 1) return metrics.ToList();
+
+        var collapsed = new List<Metric>(metrics.Count);
+        Metric? lastKept = null;
+        foreach (var metric in metrics)
+        {
+            if (lastKept is not null
+                && metric.SacAlpha.HasValue
+                && lastKept.SacAlpha.HasValue
+                && Mathf.IsEqualApprox(metric.PolicyLoss, lastKept.PolicyLoss)
+                && Mathf.IsEqualApprox(metric.ValueLoss, lastKept.ValueLoss)
+                && Mathf.IsEqualApprox(metric.SacAlpha.Value, lastKept.SacAlpha.Value))
+            {
+                continue;
+            }
+
+            collapsed.Add(metric);
+            lastKept = metric;
+        }
+
+        return collapsed;
     }
 
     // ── Run discovery ─────────────────────────────────────────────────────────
@@ -1211,6 +1243,7 @@ public partial class RLDashboard : Control
             var group = activeGroups[i];
             var color = CPolicyPalette[i % CPolicyPalette.Length];
             var groupMetrics = _metrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
+            var groupHasSacAlpha = groupMetrics.Any(m => m.SacAlpha.HasValue);
 
             var rewardLabel = multi ? group : "Reward";
             var entropyLabel = multi ? group : "Entropy";
@@ -1245,14 +1278,21 @@ public partial class RLDashboard : Control
             }
 
             // Loss: each group gets a policy-loss and value-loss series.
-            var polLabel = multi ? $"{group} Policy" : "Policy";
-            var valLabel = multi ? $"{group} Value" : "Value";
+            var polLabel = groupHasSacAlpha
+                ? (multi ? $"{group} Actor Proxy" : "Actor Proxy")
+                : (multi ? $"{group} Policy" : "Policy");
+            var valLabel = groupHasSacAlpha
+                ? (multi ? $"{group} Critic TD" : "Critic TD")
+                : (multi ? $"{group} Value" : "Value");
             var valColor = multi
                 ? new Color(color.R * 0.65f, color.G * 0.65f, color.B * 0.65f, 0.85f)
                 : CValueLoss;
 
-            _lossChart?.UpdateSeries(polLabel, color, groupMetrics.Select(m => m.PolicyLoss));
-            _lossChart?.UpdateSeries(valLabel, valColor, groupMetrics.Select(m => m.ValueLoss));
+            var lossMetrics = groupHasSacAlpha
+                ? CollapseRepeatedSacLossSnapshots(groupMetrics)
+                : groupMetrics;
+            _lossChart?.UpdateSeries(polLabel, color, lossMetrics.Select(m => m.PolicyLoss));
+            _lossChart?.UpdateSeries(valLabel, valColor, lossMetrics.Select(m => m.ValueLoss));
 
             newLossLabels.Add(polLabel);
             newLossLabels.Add(valLabel);
@@ -1275,6 +1315,17 @@ public partial class RLDashboard : Control
         _sacAlphaSeriesLabels.Clear(); _sacAlphaSeriesLabels.UnionWith(newSacAlphaLabels);
         _lengthSeriesLabels.Clear(); _lengthSeriesLabels.UnionWith(newLengthLabels);
         _lossSeriesLabels.Clear(); _lossSeriesLabels.UnionWith(newLossLabels);
+
+        if (hasSacAlphaData)
+        {
+            SetChartTitle(_lossChart, "SAC Actor Proxy  /  Critic TD Error");
+            SetChartTitle(_entropyChart, "SAC Entropy Proxy (-log pi)");
+        }
+        else
+        {
+            SetChartTitle(_lossChart, "Policy Loss  /  Value Loss");
+            SetChartTitle(_entropyChart, "Entropy");
+        }
 
         if (_sacAlphaChart is not null)
             _sacAlphaChart.Visible = hasSacAlphaData;

@@ -66,6 +66,9 @@ public partial class RLTrainerConfig
     [HpoGroup("SAC")] public bool SacAutoTuneAlpha { get; set; } = true;
     [HpoGroup("SAC")] public int SacUpdateEverySteps { get; set; } = 1;
     [HpoGroup("SAC")] public float SacTargetEntropyFraction { get; set; } = 0.5f;
+    [HpoGroup("SAC")] public float SacContinuousTargetEntropyScale { get; set; } = 1.0f;
+    [HpoGroup("SAC")] public bool SacUseContinuousTargetEntropyOverride { get; set; } = false;
+    [HpoGroup("SAC")] public float SacContinuousTargetEntropyOverride { get; set; } = 0.0f;
     /// <summary>
     /// Gradient updates per environment step (UTD ratio).
     /// 0 = auto: equals the number of active data sources (master + connected workers).

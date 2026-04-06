@@ -273,7 +273,7 @@ See [configuration.md](configuration.md#rlsacconfig) for full parameter docs.
 
 - If Q values diverge: lower `LearningRate` or lower `UpdatesPerStep`.
 - If the agent acts randomly for too long: reduce `WarmupSteps`.
-- If alpha (entropy temperature) collapses to near-zero: check `TargetEntropyFraction`; lowering it reduces the entropy target.
+- If alpha (entropy temperature) collapses to near-zero: check `TargetEntropyFraction` for discrete SAC, or lower `ContinuousTargetEntropyScale` for continuous SAC.
 - NaN in training: usually caused by unstable alpha updates or invalid observations/rewards. Confirm `AutoTuneAlpha` settings and check metrics for divergence before increasing update intensity.
 
 ### Both
