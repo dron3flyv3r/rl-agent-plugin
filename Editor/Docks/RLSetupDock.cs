@@ -15,6 +15,18 @@ public partial class RLSetupDock : VBoxContainer
     private readonly Button _quickTestButton;
     private readonly Button _validateSceneButton;
 
+    [Signal]
+    public delegate void StartTrainingRequestedEventHandler();
+
+    [Signal]
+    public delegate void StopTrainingRequestedEventHandler();
+
+    [Signal]
+    public delegate void QuickTestRequestedEventHandler();
+
+    [Signal]
+    public delegate void ValidateSceneRequestedEventHandler();
+
     private static int Ui(int value) => EditorUiScale.Px(value);
 
     public RLSetupDock()
@@ -102,7 +114,7 @@ public partial class RLSetupDock : VBoxContainer
             TooltipText = "Launch a training run using the active or main scene",
             CustomMinimumSize = new Vector2(0f, 32f),
         };
-        _startButton.Pressed += () => StartTrainingRequested?.Invoke();
+        _startButton.Pressed += OnStartButtonPressed;
         buttonRow.AddChild(_startButton);
 
         _stopButton = new Button
@@ -111,7 +123,7 @@ public partial class RLSetupDock : VBoxContainer
             TooltipText = "Stop the active training run",
             CustomMinimumSize = new Vector2(0f, 32f),
         };
-        _stopButton.Pressed += () => StopTrainingRequested?.Invoke();
+        _stopButton.Pressed += OnStopButtonPressed;
         buttonRow.AddChild(_stopButton);
 
         vbox.AddChild(MakeSpacer(4));
@@ -127,7 +139,7 @@ public partial class RLSetupDock : VBoxContainer
             TooltipText = "Run a short smoke test with BatchSize forced to 1.",
             CustomMinimumSize = new Vector2(0f, 30f),
         };
-        _quickTestButton.Pressed += () => QuickTestRequested?.Invoke();
+        _quickTestButton.Pressed += OnQuickTestButtonPressed;
         utilityRow.AddChild(_quickTestButton);
 
         _validateSceneButton = new Button
@@ -137,7 +149,7 @@ public partial class RLSetupDock : VBoxContainer
             TooltipText = "Run scene validation now.",
             CustomMinimumSize = new Vector2(0f, 30f),
         };
-        _validateSceneButton.Pressed += () => ValidateSceneRequested?.Invoke();
+        _validateSceneButton.Pressed += OnValidateSceneButtonPressed;
         utilityRow.AddChild(_validateSceneButton);
 
         vbox.AddChild(MakeSpacer(4));
@@ -153,11 +165,6 @@ public partial class RLSetupDock : VBoxContainer
         vbox.AddChild(new HSeparator());
         vbox.AddChild(MakeSpacer(4));
     }
-
-    public event System.Action? StartTrainingRequested;
-    public event System.Action? StopTrainingRequested;
-    public event System.Action? QuickTestRequested;
-    public event System.Action? ValidateSceneRequested;
 
     public void SetScenePath(string scenePath)
     {
@@ -276,5 +283,25 @@ public partial class RLSetupDock : VBoxContainer
 
         var name = System.IO.Path.GetFileName(path);
         return string.IsNullOrWhiteSpace(name) ? fallback : name;
+    }
+
+    private void OnStartButtonPressed()
+    {
+        EmitSignal(SignalName.StartTrainingRequested);
+    }
+
+    private void OnStopButtonPressed()
+    {
+        EmitSignal(SignalName.StopTrainingRequested);
+    }
+
+    private void OnQuickTestButtonPressed()
+    {
+        EmitSignal(SignalName.QuickTestRequested);
+    }
+
+    private void OnValidateSceneButtonPressed()
+    {
+        EmitSignal(SignalName.ValidateSceneRequested);
     }
 }

@@ -61,10 +61,10 @@ public partial class RLAgentPluginEditor : EditorPlugin
         ResourceLoader.AddResourceFormatLoader(_rlModelFormatLoader, true);
 
         _setupDock = new RLSetupDock();
-        _setupDock.StartTrainingRequested += OnStartTrainingRequested;
-        _setupDock.StopTrainingRequested += OnStopTrainingRequested;
-        _setupDock.QuickTestRequested += OnQuickTestRequested;
-        _setupDock.ValidateSceneRequested += OnValidateSceneRequested;
+        _setupDock.Connect(RLSetupDock.SignalName.StartTrainingRequested, Callable.From(OnStartTrainingRequested));
+        _setupDock.Connect(RLSetupDock.SignalName.StopTrainingRequested, Callable.From(OnStopTrainingRequested));
+        _setupDock.Connect(RLSetupDock.SignalName.QuickTestRequested, Callable.From(OnQuickTestRequested));
+        _setupDock.Connect(RLSetupDock.SignalName.ValidateSceneRequested, Callable.From(OnValidateSceneRequested));
 
         _setupEditorDock = new EditorDock
         {
@@ -152,10 +152,30 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         if (_setupDock is not null)
         {
-            _setupDock.StartTrainingRequested -= OnStartTrainingRequested;
-            _setupDock.StopTrainingRequested -= OnStopTrainingRequested;
-            _setupDock.QuickTestRequested -= OnQuickTestRequested;
-            _setupDock.ValidateSceneRequested -= OnValidateSceneRequested;
+            var startCallable = Callable.From(OnStartTrainingRequested);
+            if (_setupDock.IsConnected(RLSetupDock.SignalName.StartTrainingRequested, startCallable))
+            {
+                _setupDock.Disconnect(RLSetupDock.SignalName.StartTrainingRequested, startCallable);
+            }
+
+            var stopCallable = Callable.From(OnStopTrainingRequested);
+            if (_setupDock.IsConnected(RLSetupDock.SignalName.StopTrainingRequested, stopCallable))
+            {
+                _setupDock.Disconnect(RLSetupDock.SignalName.StopTrainingRequested, stopCallable);
+            }
+
+            var quickTestCallable = Callable.From(OnQuickTestRequested);
+            if (_setupDock.IsConnected(RLSetupDock.SignalName.QuickTestRequested, quickTestCallable))
+            {
+                _setupDock.Disconnect(RLSetupDock.SignalName.QuickTestRequested, quickTestCallable);
+            }
+
+            var validateCallable = Callable.From(OnValidateSceneRequested);
+            if (_setupDock.IsConnected(RLSetupDock.SignalName.ValidateSceneRequested, validateCallable))
+            {
+                _setupDock.Disconnect(RLSetupDock.SignalName.ValidateSceneRequested, validateCallable);
+            }
+
             _setupDock = null;
         }
 
