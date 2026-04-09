@@ -122,6 +122,19 @@ public partial class RLDashboard : Control
     private string _activeRunId = "";
     private CheckpointSortMode _checkpointSortMode = CheckpointSortMode.NewestUpdate;
 
+    // Compare run
+    private OptionButton? _compareRunDropdown;
+    private readonly List<Metric> _compareMetrics = new();
+    private readonly Dictionary<string, long> _compareMetricsFileOffsets = new();
+    private string _compareRunId = "";
+    private RunMeta _compareRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false);
+    private readonly HashSet<string> _compareRewardSeriesLabels = new();
+    private readonly HashSet<string> _compareEntropySeriesLabels = new();
+    private readonly HashSet<string> _compareSacAlphaSeriesLabels = new();
+    private readonly HashSet<string> _compareLengthSeriesLabels = new();
+    private readonly HashSet<string> _compareLossSeriesLabels = new();
+    private bool _pendingCompareZoomReset;
+
     private const double PollInterval = 2.0;
     private const double LivePulseInterval = 0.8;
 
@@ -146,6 +159,19 @@ public partial class RLDashboard : Control
         new(0.92f, 0.42f, 0.78f),  // pink
         new(0.35f, 0.82f, 0.88f),  // cyan
         new(0.82f, 0.92f, 0.35f),  // lime
+    };
+
+    // Warm-toned palette for the compare (B) run so it is visually distinct.
+    private static readonly Color[] CComparePalette =
+    {
+        new(0.92f, 0.30f, 0.30f),  // red
+        new(0.92f, 0.60f, 0.18f),  // orange
+        new(0.88f, 0.85f, 0.22f),  // yellow
+        new(0.50f, 0.88f, 0.22f),  // lime
+        new(0.22f, 0.88f, 0.65f),  // teal
+        new(0.22f, 0.48f, 0.92f),  // sky
+        new(0.68f, 0.22f, 0.92f),  // violet
+        new(0.92f, 0.22f, 0.62f),  // magenta
     };
 
     private static int Ui(int value) => EditorUiScale.Px(value);
@@ -269,37 +295,32 @@ public partial class RLDashboard : Control
         var vbox = new VBoxContainer();
         vbox.AddThemeConstantOverride("separation", Ui(4));
 
-        // ── Row 1: title, filter, run selector, status, live badge ───────────
+        // ── Row 1: title · filter · run selector · refresh · LIVE ────────────
         var row1 = new HBoxContainer();
-        row1.AddThemeConstantOverride("separation", Ui(8));
-        row1.CustomMinimumSize = UiSize(0, 30);
+        row1.AddThemeConstantOverride("separation", Ui(6));
+        row1.CustomMinimumSize = UiSize(0, 28);
 
         var title = new Label { Text = "RL Training Dashboard" };
-        title.AddThemeFontSizeOverride("font_size", Ui(18));
+        title.AddThemeFontSizeOverride("font_size", Ui(16));
         title.VerticalAlignment = VerticalAlignment.Center;
         row1.AddChild(title);
 
         row1.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
-        // Prefix filter
-        var filterLabel = new Label { Text = "Filter:", VerticalAlignment = VerticalAlignment.Center };
-        row1.AddChild(filterLabel);
-
         _prefixFilter = new LineEdit
         {
-            PlaceholderText = "by prefix…",
-            CustomMinimumSize = UiSize(120, 0),
+            PlaceholderText = "Filter runs…",
+            CustomMinimumSize = UiSize(100, 0),
+            TooltipText = "Filter the run list by name prefix",
         };
         _prefixFilter.TextChanged += _ => DiscoverAndSelectLatestRun();
         row1.AddChild(_prefixFilter);
 
-        // Run selector
-        var runLabel = new Label { Text = "Run:", VerticalAlignment = VerticalAlignment.Center };
-        row1.AddChild(runLabel);
-
         _runDropdown = new OptionButton
         {
-            CustomMinimumSize = UiSize(250, 0),
+            CustomMinimumSize = UiSize(180, 0),
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            ClipText = true,
             TooltipText = "Select a training run to inspect",
         };
         _runDropdown.GetPopup().MaxSize = new Vector2I(Ui(1600), Ui(360));
@@ -308,15 +329,13 @@ public partial class RLDashboard : Control
 
         var refreshBtn = new Button
         {
-            Text = " ⟳ ",
-            TooltipText = "Rescan runs directory for new runs",
+            Text = "⟳",
+            TooltipText = "Rescan runs directory",
+            CustomMinimumSize = UiSize(28, 0),
         };
         refreshBtn.Pressed += () => DiscoverAndSelectLatestRun();
         row1.AddChild(refreshBtn);
 
-
-
-        // LIVE badge (hidden until training starts)
         _liveBadge = new Label
         {
             Text = "● LIVE",
@@ -324,45 +343,40 @@ public partial class RLDashboard : Control
             VerticalAlignment = VerticalAlignment.Center,
         };
         _liveBadge.AddThemeColorOverride("font_color", CRunning);
-        _liveBadge.AddThemeFontSizeOverride("font_size", Ui(12));
+        _liveBadge.AddThemeFontSizeOverride("font_size", Ui(11));
         row1.AddChild(_liveBadge);
 
         vbox.AddChild(row1);
 
-        // ── Row 2: rename + export ────────────────────────────────────────────
+        // ── Row 2: compare · status · rename · policy · export ───────────────
         var row2 = new HBoxContainer();
-
-
         row2.AddThemeConstantOverride("separation", Ui(6));
         row2.CustomMinimumSize = UiSize(0, 24);
 
-        var nameLabel = new Label { Text = "Name:", VerticalAlignment = VerticalAlignment.Center };
-        row2.AddChild(nameLabel);
-
-        _renameEdit = new LineEdit
+        _compareRunDropdown = new OptionButton
         {
-            PlaceholderText = "Display name…",
-            CustomMinimumSize = UiSize(200, 0),
-            Editable = false,
+            CustomMinimumSize = UiSize(180, 0),
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            ClipText = true,
+            TooltipText = "Compare a second run overlaid on the charts",
         };
-        row2.AddChild(_renameEdit);
-
-        _renameBtn = new Button { Text = "Rename", Visible = false };
-        _renameBtn.Pressed += () => SaveDisplayName(_renameEdit?.Text ?? "");
-        row2.AddChild(_renameBtn);
+        _compareRunDropdown.GetPopup().MaxSize = new Vector2I(Ui(1600), Ui(360));
+        _compareRunDropdown.AddItem("No comparison");
+        _compareRunDropdown.ItemSelected += OnCompareRunSelected;
+        row2.AddChild(_compareRunDropdown);
 
         // Status indicator
         var statusBox = new HBoxContainer();
-        statusBox.AddThemeConstantOverride("separation", Ui(5));
-
+        statusBox.AddThemeConstantOverride("separation", Ui(4));
         _statusDot = new ColorRect
         {
             Color = CIdle,
-            CustomMinimumSize = UiSize(10, 10),
-            SizeFlagsVertical = SizeFlags.ShrinkCenter
+            CustomMinimumSize = UiSize(8, 8),
+            SizeFlagsVertical = SizeFlags.ShrinkCenter,
         };
         statusBox.AddChild(_statusDot);
         _statusLabel = new Label { Text = "Idle", VerticalAlignment = VerticalAlignment.Center };
+        _statusLabel.AddThemeFontSizeOverride("font_size", Ui(11));
         statusBox.AddChild(_statusLabel);
         row2.AddChild(statusBox);
 
@@ -372,11 +386,12 @@ public partial class RLDashboard : Control
             VerticalAlignment = VerticalAlignment.Center,
             Visible = false,
         };
+        _policyFilterLabel.AddThemeFontSizeOverride("font_size", Ui(11));
         row2.AddChild(_policyFilterLabel);
 
         _policyFilterDropdown = new OptionButton
         {
-            CustomMinimumSize = UiSize(160, 0),
+            CustomMinimumSize = UiSize(130, 0),
             TooltipText = "Filter charts to a single policy group",
             Visible = false,
         };
@@ -386,17 +401,30 @@ public partial class RLDashboard : Control
 
         row2.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
+        _renameEdit = new LineEdit
+        {
+            PlaceholderText = "Run name…",
+            CustomMinimumSize = UiSize(140, 0),
+            Editable = false,
+            TooltipText = "Set a display name for this run",
+        };
+        row2.AddChild(_renameEdit);
+
+        _renameBtn = new Button { Text = "Rename", Visible = false };
+        _renameBtn.Pressed += () => SaveDisplayName(_renameEdit?.Text ?? "");
+        row2.AddChild(_renameBtn);
+
         var exportBtn = new Button
         {
-            Text = "Export Run",
+            Text = "Export",
             TooltipText = "Export trained model weights as .rlmodel file(s)",
         };
         exportBtn.Pressed += ExportRun;
         row2.AddChild(exportBtn);
 
         _headerStatus = new Label { VerticalAlignment = VerticalAlignment.Center };
-        _headerStatus.AddThemeFontSizeOverride("font_size", Ui(11));
-        _headerStatus.Modulate = new Color(0.75f, 0.75f, 0.75f);
+        _headerStatus.AddThemeFontSizeOverride("font_size", Ui(10));
+        _headerStatus.Modulate = new Color(0.65f, 0.65f, 0.65f);
         row2.AddChild(_headerStatus);
 
         vbox.AddChild(row2);
@@ -569,6 +597,22 @@ public partial class RLDashboard : Control
             _runDropdown?.AddItem(label);
         }
 
+        // Rebuild compare dropdown to match the updated run list.
+        if (_compareRunDropdown is not null)
+        {
+            _compareRunDropdown.Clear();
+            _compareRunDropdown.AddItem("None");
+            foreach (var id in _runIds)
+            {
+                var meta = ReadMeta(System.IO.Path.Combine(absDir, id));
+                _compareRunDropdown.AddItem(BuildRunLabel(id, meta.DisplayName));
+            }
+            var compareIdx = _runIds.IndexOf(_compareRunId);
+            _compareRunDropdown.Select(compareIdx >= 0 ? compareIdx + 1 : 0);
+            if (compareIdx < 0 && !string.IsNullOrEmpty(_compareRunId))
+                SelectCompareRun("");
+        }
+
         // Preserve previous selection if it still appears in the filtered list.
         var existingIdx = _runIds.IndexOf(prevRunId);
         if (existingIdx >= 0)
@@ -588,15 +632,25 @@ public partial class RLDashboard : Control
         var absDir = ProjectSettings.GlobalizePath("res://RL-Agent-Training/runs");
 
         _runDropdown.Clear();
+        if (_compareRunDropdown is not null)
+        {
+            _compareRunDropdown.Clear();
+            _compareRunDropdown.AddItem("None");
+        }
+
         foreach (var id in _runIds)
         {
             var meta = ReadMeta(System.IO.Path.Combine(absDir, id));
             var label = BuildRunLabel(id, meta.DisplayName);
             _runDropdown.AddItem(label);
+            _compareRunDropdown?.AddItem(label);
         }
 
         var selIdx = _runIds.IndexOf(_selectedRunId);
         if (selIdx >= 0) _runDropdown.Select(selIdx);
+
+        var compareIdx = _runIds.IndexOf(_compareRunId);
+        _compareRunDropdown?.Select(compareIdx >= 0 ? compareIdx + 1 : 0);
     }
 
     private void OnRunSelected(long index)
@@ -604,6 +658,44 @@ public partial class RLDashboard : Control
         if (index < 0 || index >= _runIds.Count) return;
         var runId = _runIds[(int)index];
         SelectRun(runId);
+    }
+
+    private void OnCompareRunSelected(long index)
+    {
+        var runId = index == 0 ? "" : (index - 1 < _runIds.Count ? _runIds[(int)index - 1] : "");
+        if (!string.IsNullOrEmpty(runId) && runId == _selectedRunId)
+        {
+            // Comparing a run to itself is meaningless — reset to None.
+            _compareRunDropdown?.Select(0);
+            SelectCompareRun("");
+            return;
+        }
+        SelectCompareRun(runId);
+        if (!string.IsNullOrEmpty(runId))
+            PollUpdate();
+    }
+
+    private void SelectCompareRun(string runId)
+    {
+        _compareRunId = runId;
+        _compareMetrics.Clear();
+        _compareMetricsFileOffsets.Clear();
+        _pendingCompareZoomReset = true;
+        _compareRunMeta = string.IsNullOrEmpty(runId)
+            ? new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false)
+            : ReadMeta(ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{runId}"));
+
+        // Remove any stale compare series from all charts.
+        foreach (var label in _compareRewardSeriesLabels) _rewardChart?.RemoveSeries(label);
+        foreach (var label in _compareEntropySeriesLabels) _entropyChart?.RemoveSeries(label);
+        foreach (var label in _compareSacAlphaSeriesLabels) _sacAlphaChart?.RemoveSeries(label);
+        foreach (var label in _compareLengthSeriesLabels) _lengthChart?.RemoveSeries(label);
+        foreach (var label in _compareLossSeriesLabels) _lossChart?.RemoveSeries(label);
+        _compareRewardSeriesLabels.Clear();
+        _compareEntropySeriesLabels.Clear();
+        _compareSacAlphaSeriesLabels.Clear();
+        _compareLengthSeriesLabels.Clear();
+        _compareLossSeriesLabels.Clear();
     }
 
     private void SelectRun(string runId)
@@ -693,9 +785,35 @@ public partial class RLDashboard : Control
                 if (hpoStatus is not null)
                     status = NormalizeStatus(hpoStatus);
             }
+
+            // Poll compare run if one is selected.
+            if (!string.IsNullOrEmpty(_compareRunId))
+            {
+                var compareRunDirAbs = ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{_compareRunId}");
+                if (System.IO.Directory.Exists(compareRunDirAbs))
+                {
+                    foreach (var file in System.IO.Directory.GetFiles(compareRunDirAbs, "metrics__*.jsonl"))
+                        ReadNewMetrics(file, true, _compareMetrics, _compareMetricsFileOffsets);
+                }
+            }
+
             SetStatusUi(status);
             RefreshPolicyFilterDropdown();
             RefreshCharts();
+
+            // After RefreshCharts has set AnchorLength, snap zoom to primary run once.
+            if (_pendingCompareZoomReset)
+            {
+                _pendingCompareZoomReset = false;
+                _rewardChart?.ResetZoomToAnchor();
+                _lossChart?.ResetZoomToAnchor();
+                _entropyChart?.ResetZoomToAnchor();
+                _lengthChart?.ResetZoomToAnchor();
+                _sacAlphaChart?.ResetZoomToAnchor();
+                _eloChart?.ResetZoomToAnchor();
+                _curriculumChart?.ResetZoomToAnchor();
+            }
+
             RefreshStats(status);
 
             // Clear live badge once training explicitly finishes.
@@ -717,11 +835,16 @@ public partial class RLDashboard : Control
     }
 
     private void ReadNewMetrics(string path, bool absolute = false)
+        => ReadNewMetrics(path, absolute, _metrics, _metricsFileOffsets);
+
+    private static void ReadNewMetrics(
+        string path, bool absolute,
+        List<Metric> targetMetrics, Dictionary<string, long> targetOffsets)
     {
         var absPath = absolute ? path : ProjectSettings.GlobalizePath(path);
         if (!System.IO.File.Exists(absPath)) return;
 
-        if (!_metricsFileOffsets.TryGetValue(absPath, out var offset))
+        if (!targetOffsets.TryGetValue(absPath, out var offset))
             offset = 0;
 
         try
@@ -739,10 +862,10 @@ public partial class RLDashboard : Control
             {
                 if (string.IsNullOrWhiteSpace(line)) continue;
                 var m = ParseMetricLine(line);
-                if (m is not null) _metrics.Add(m);
+                if (m is not null) targetMetrics.Add(m);
             }
 
-            _metricsFileOffsets[absPath] = stream.Position;
+            targetOffsets[absPath] = stream.Position;
         }
         catch (Exception ex)
         {
@@ -1330,6 +1453,15 @@ public partial class RLDashboard : Control
         if (_sacAlphaChart is not null)
             _sacAlphaChart.Visible = hasSacAlphaData;
 
+        // Pin x-axis to the primary run's episode count so a longer compare run
+        // cannot push the view window beyond what the primary run covers.
+        int primaryMaxPts = activeGroups.Count > 0
+            ? activeGroups.Max(g => _metrics.Count(m => m.PolicyGroup == g && !m.IsEval))
+            : _metrics.Count(m => !m.IsEval);
+        SetChartsAnchorLength(primaryMaxPts);
+
+        RefreshCompareCharts();
+
         // Elo and curriculum are not split by policy (self-play learner has a single Elo).
         bool hasFilter = !string.IsNullOrEmpty(_selectedPolicyGroupFilter);
 
@@ -1354,6 +1486,108 @@ public partial class RLDashboard : Control
                 _curriculumChart.UpdateSeries("Progress", CCurriculum,
                     curriculumMetrics.Select(m => m.CurriculumProgress!.Value));
         }
+    }
+
+    private void SetChartsAnchorLength(int count)
+    {
+        if (_rewardChart is not null)     _rewardChart.AnchorLength     = count;
+        if (_lossChart is not null)       _lossChart.AnchorLength       = count;
+        if (_entropyChart is not null)    _entropyChart.AnchorLength    = count;
+        if (_lengthChart is not null)     _lengthChart.AnchorLength     = count;
+        if (_sacAlphaChart is not null)   _sacAlphaChart.AnchorLength   = count;
+        if (_eloChart is not null)        _eloChart.AnchorLength        = count;
+        if (_curriculumChart is not null) _curriculumChart.AnchorLength = count;
+    }
+
+    private void RefreshCompareCharts()
+    {
+        // Remove stale compare series when no compare run is selected.
+        if (string.IsNullOrEmpty(_compareRunId) || _compareMetrics.Count == 0)
+        {
+            foreach (var l in _compareRewardSeriesLabels) _rewardChart?.RemoveSeries(l);
+            foreach (var l in _compareEntropySeriesLabels) _entropyChart?.RemoveSeries(l);
+            foreach (var l in _compareSacAlphaSeriesLabels) _sacAlphaChart?.RemoveSeries(l);
+            foreach (var l in _compareLengthSeriesLabels) _lengthChart?.RemoveSeries(l);
+            foreach (var l in _compareLossSeriesLabels) _lossChart?.RemoveSeries(l);
+            _compareRewardSeriesLabels.Clear();
+            _compareEntropySeriesLabels.Clear();
+            _compareSacAlphaSeriesLabels.Clear();
+            _compareLengthSeriesLabels.Clear();
+            _compareLossSeriesLabels.Clear();
+            return;
+        }
+
+        var groups = _compareMetrics.Select(m => m.PolicyGroup).Distinct().ToList();
+        bool multi = groups.Count > 1;
+
+        var newReward = new HashSet<string>();
+        var newEntropy = new HashSet<string>();
+        var newSacAlpha = new HashSet<string>();
+        var newLength = new HashSet<string>();
+        var newLoss = new HashSet<string>();
+
+        for (int i = 0; i < groups.Count; i++)
+        {
+            var group = groups[i];
+            var color = CComparePalette[i % CComparePalette.Length];
+            var gm = _compareMetrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
+            var hasSac = gm.Any(m => m.SacAlpha.HasValue);
+
+            var rewardLabel  = multi ? $"B:{group}"         : "B:Reward";
+            var entropyLabel = multi ? $"B:{group}"         : "B:Entropy";
+            var lengthLabel  = multi ? $"B:{group}"         : "B:Length";
+
+            _rewardChart?.UpdateSeries(rewardLabel, color, gm.Select(m => m.EpisodeReward));
+            _entropyChart?.UpdateSeries(entropyLabel, color, gm.Select(m => m.Entropy));
+            _lengthChart?.UpdateSeries(lengthLabel, color, gm.Select(m => (float)m.EpisodeLength));
+            newReward.Add(rewardLabel);
+            newEntropy.Add(entropyLabel);
+            newLength.Add(lengthLabel);
+
+            var evalGm = _compareMetrics.Where(m => m.PolicyGroup == group && m.IsEval).ToList();
+            if (evalGm.Count > 0)
+            {
+                var evalLabel = multi ? $"B:{group} (eval)" : "B:Reward (eval)";
+                var evalColor = new Color(color.R, color.G, color.B, 0.55f);
+                _rewardChart?.UpdateSeries(evalLabel, evalColor, evalGm.Select(m => m.EvalMeanReward));
+                newReward.Add(evalLabel);
+            }
+
+            var polLabel = hasSac
+                ? (multi ? $"B:{group} Actor Proxy" : "B:Actor Proxy")
+                : (multi ? $"B:{group} Policy"      : "B:Policy");
+            var valLabel = hasSac
+                ? (multi ? $"B:{group} Critic TD"   : "B:Critic TD")
+                : (multi ? $"B:{group} Value"       : "B:Value");
+            var valColor = new Color(color.R * 0.65f, color.G * 0.65f, color.B * 0.65f, 0.85f);
+
+            var lossGm = hasSac ? CollapseRepeatedSacLossSnapshots(gm) : gm;
+            _lossChart?.UpdateSeries(polLabel, color, lossGm.Select(m => m.PolicyLoss));
+            _lossChart?.UpdateSeries(valLabel, valColor, lossGm.Select(m => m.ValueLoss));
+            newLoss.Add(polLabel);
+            newLoss.Add(valLabel);
+
+            var alphaGm = gm.Where(m => m.SacAlpha.HasValue).ToList();
+            if (alphaGm.Count > 0)
+            {
+                var alphaLabel = multi ? $"B:{group}" : "B:Alpha";
+                var alphaColor = multi ? color : new Color(CSacAlpha.R * 0.85f, CSacAlpha.G * 0.85f, CSacAlpha.B * 0.50f);
+                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor, alphaGm.Select(m => m.SacAlpha!.Value));
+                newSacAlpha.Add(alphaLabel);
+            }
+        }
+
+        foreach (var l in _compareRewardSeriesLabels.Except(newReward))   _rewardChart?.RemoveSeries(l);
+        foreach (var l in _compareEntropySeriesLabels.Except(newEntropy))  _entropyChart?.RemoveSeries(l);
+        foreach (var l in _compareSacAlphaSeriesLabels.Except(newSacAlpha)) _sacAlphaChart?.RemoveSeries(l);
+        foreach (var l in _compareLengthSeriesLabels.Except(newLength))    _lengthChart?.RemoveSeries(l);
+        foreach (var l in _compareLossSeriesLabels.Except(newLoss))        _lossChart?.RemoveSeries(l);
+
+        _compareRewardSeriesLabels.Clear();   _compareRewardSeriesLabels.UnionWith(newReward);
+        _compareEntropySeriesLabels.Clear();  _compareEntropySeriesLabels.UnionWith(newEntropy);
+        _compareSacAlphaSeriesLabels.Clear(); _compareSacAlphaSeriesLabels.UnionWith(newSacAlpha);
+        _compareLengthSeriesLabels.Clear();   _compareLengthSeriesLabels.UnionWith(newLength);
+        _compareLossSeriesLabels.Clear();     _compareLossSeriesLabels.UnionWith(newLoss);
     }
 
     private void RefreshStats(RunStatus status)

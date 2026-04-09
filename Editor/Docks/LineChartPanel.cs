@@ -22,6 +22,13 @@ public partial class LineChartPanel : Control
     public bool ShowSmoothed { get; set; } = true;
     public float SmoothAlpha { get; set; } = 0.08f;
 
+    /// <summary>
+    /// When > 0, clamps the x-axis extent to this many points so that a longer
+    /// compare series does not widen the view beyond the primary run's length.
+    /// Set this to the primary run's episode count before adding compare series.
+    /// </summary>
+    public int AnchorLength { get; set; } = 0;
+
     // ── Layout constants ────────────────────────────────────────────────────
     private const float TitleH = 24f;
     private const float LeftMargin = 54f;
@@ -169,7 +176,7 @@ public partial class LineChartPanel : Control
                 QueueRedraw();
                 break;
             case CmdResetZoom:
-                _viewWindow = DefaultWindow;
+                _viewWindow = AnchorLength > 0 ? AnchorLength : DefaultWindow;
                 ClampOffset();
                 QueueRedraw();
                 break;
@@ -231,6 +238,34 @@ public partial class LineChartPanel : Control
         _viewOffset = Math.Max(0, Math.Min(_viewOffset, maxPoints - window));
     }
 
+    /// <summary>
+    /// Computes the shared global view range in episode-index space.
+    /// All series are aligned by episode 0 on the left; the longest series defines the x-axis extent.
+    /// </summary>
+    /// <summary>
+    /// Snaps the zoom window to AnchorLength (primary run) and resets the pan offset.
+    /// Call this once when a compare run is selected so the user starts with a clean view
+    /// of the primary run; they can then zoom out further to reveal the compare run.
+    /// </summary>
+    public void ResetZoomToAnchor()
+    {
+        _viewWindow = AnchorLength > 0 ? AnchorLength : DefaultWindow;
+        _viewOffset = 0;
+        ClampOffset();
+        QueueRedraw();
+    }
+
+    private (int globalStart, int globalEnd, int window) ComputeGlobalView()
+    {
+        // Always use the true maximum so a longer compare series is reachable by zooming out.
+        var maxPoints = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
+        if (maxPoints == 0) return (0, 0, 0);
+        var window = Math.Min(_viewWindow, maxPoints);
+        var globalEnd = maxPoints - Math.Max(0, Math.Min(_viewOffset, maxPoints - window));
+        var globalStart = Math.Max(0, globalEnd - window);
+        return (globalStart, globalEnd, window);
+    }
+
     // ── Drawing ─────────────────────────────────────────────────────────────
     public override void _Draw()
     {
@@ -279,11 +314,14 @@ public partial class LineChartPanel : Control
 
             DrawRect(plot, CPlotBg, filled: true);
 
+            // ── Global view range (shared across all series for correct episode alignment) ──
+            var (globalStart, globalEnd, viewWindow) = ComputeGlobalView();
+
             float gMin = float.MaxValue, gMax = float.MinValue;
             foreach (var s in _series)
             {
                 if (s.Points.Count == 0) continue;
-                var (slice, _) = GetViewSlice(s.Points);
+                var (slice, _) = GetViewSlice(s.Points, globalStart, globalEnd);
                 if (slice.Count == 0) continue;
                 gMin = Math.Min(gMin, slice.Min());
                 gMax = Math.Max(gMax, slice.Max());
@@ -319,14 +357,12 @@ public partial class LineChartPanel : Control
 
             float rawAlpha = ShowSmoothed ? 0.18f : 1.0f;
 
-            int viewStart = 0, viewEnd = 0;
             foreach (var s in _series)
             {
                 if (s.Points.Count < 2) continue;
-                var (slice, startIdx) = GetViewSlice(s.Points);
-                viewStart = startIdx;
-                viewEnd = startIdx + slice.Count;
-                var pts = BuildPoints(plot, Downsample(slice, MaxDrawPoints), gMin, range);
+                var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
+                if (slice.Count < 2) continue;
+                var pts = BuildPoints(plot, Downsample(slice, MaxDrawPoints), gMin, range, startIdx, globalStart, viewWindow, slice.Count);
                 DrawFill(plot, pts, s.LineColor, ShowSmoothed ? 0.08f : 0.20f);
                 var lineColor = new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha);
                 DrawPolyline(pts, lineColor, rawWidth, antialiased: true);
@@ -337,22 +373,22 @@ public partial class LineChartPanel : Control
                 foreach (var s in _series)
                 {
                     if (s.Points.Count < 12) continue;
-                    var (slice, _) = GetViewSlice(s.Points);
+                    var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
                     if (slice.Count < 12) continue;
                     var smoothed = Ema(Downsample(slice, MaxDrawPoints), SmoothAlpha);
-                    var smPts = BuildPoints(plot, smoothed, gMin, range);
+                    var smPts = BuildPoints(plot, smoothed, gMin, range, startIdx, globalStart, viewWindow, slice.Count);
                     DrawPolyline(smPts, GetSmoothedColor(s.LineColor), smoothedWidth, antialiased: true);
                 }
             }
 
             int totalPts = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
-            if (viewEnd > viewStart + 1)
+            if (globalEnd > globalStart + 1)
             {
                 float labelY = plot.Position.Y + plot.Size.Y + bottomMargin - Ui(6f);
                 DrawString(font, new Vector2(plot.Position.X, labelY),
-                    (viewStart + 1).ToString(), HorizontalAlignment.Left, Ui(40), fs - 3, CAxisLabel);
+                    (globalStart + 1).ToString(), HorizontalAlignment.Left, Ui(40), fs - 3, CAxisLabel);
                 DrawString(font, new Vector2(plot.Position.X + plot.Size.X - axisHintWidth, labelY),
-                    viewEnd.ToString(), HorizontalAlignment.Left, axisHintWidth, fs - 3, CAxisLabel);
+                    globalEnd.ToString(), HorizontalAlignment.Left, axisHintWidth, fs - 3, CAxisLabel);
 
                 if (totalPts > _viewWindow || _viewOffset > 0)
                 {
@@ -387,30 +423,34 @@ public partial class LineChartPanel : Control
                 if (plot.HasPoint(mp) && _series.Count > 0)
                 {
                     float tx = (mp.X - plot.Position.X) / plot.Size.X;
+
+                    // Compute the global episode index under the cursor.
+                    int snapEpisode = globalStart + (int)Math.Round(tx * Math.Max(viewWindow - 1, 1));
+                    snapEpisode = Math.Clamp(snapEpisode, globalStart, globalEnd - 1);
+                    float snapX = plot.Position.X + (float)(snapEpisode - globalStart) / Math.Max(viewWindow - 1, 1) * plot.Size.X;
+
                     var snapPoints = new List<(string Label, Color LineColor, float Val, float SnapY)>();
-                    float snapX = mp.X;
-                    int snapEpisode = viewStart;
 
                     foreach (var s in _series)
                     {
                         if (s.Points.Count < 2) continue;
-                        var (slice, startIdx) = GetViewSlice(s.Points);
+                        var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
                         if (slice.Count < 2) continue;
+
+                        // Map global episode to an index within this series' slice.
+                        int sliceIdx = snapEpisode - startIdx;
+                        if (sliceIdx < 0 || sliceIdx >= slice.Count) continue;
 
                         var ds = Downsample(slice, MaxDrawPoints);
                         var display = ShowSmoothed && ds.Count >= 12 ? Ema(ds, SmoothAlpha) : ds;
 
-                        int idx = Math.Clamp((int)Math.Round(tx * (display.Count - 1)), 0, display.Count - 1);
-                        float val = display[idx];
+                        int dsIdx = Math.Clamp(
+                            (int)Math.Round((float)sliceIdx / Math.Max(slice.Count - 1, 1) * (display.Count - 1)),
+                            0, display.Count - 1);
+
+                        float val = display[dsIdx];
                         float ty = Math.Clamp((val - gMin) / range, 0f, 1f);
                         float sy = plot.Position.Y + plot.Size.Y * (1f - ty);
-
-                        if (snapPoints.Count == 0)
-                        {
-                            float idxRatio = (float)idx / Math.Max(display.Count - 1, 1);
-                            snapX = plot.Position.X + idxRatio * plot.Size.X;
-                            snapEpisode = startIdx + (int)Math.Round(idxRatio * (slice.Count - 1));
-                        }
 
                         snapPoints.Add((s.Label, s.LineColor, val, sy));
                     }
@@ -466,22 +506,35 @@ public partial class LineChartPanel : Control
 
     // ── Helpers ─────────────────────────────────────────────────────────────
 
-    /// <summary>Returns the visible slice of data and its start index based on current view state.</summary>
-    private (List<float> slice, int startIdx) GetViewSlice(List<float> points)
+    /// <summary>
+    /// Returns the slice of this series that falls within [globalStart, globalEnd),
+    /// preserving episode-index alignment across series of different lengths.
+    /// </summary>
+    private static (List<float> slice, int startIdx) GetViewSlice(List<float> points, int globalStart, int globalEnd)
     {
-        if (points.Count == 0) return (points, 0);
-        var window = Math.Min(_viewWindow, points.Count);
-        var end = points.Count - Math.Max(0, Math.Min(_viewOffset, points.Count - window));
-        var start = Math.Max(0, end - window);
+        if (points.Count == 0) return (new List<float>(), 0);
+        var start = Math.Min(globalStart, points.Count);
+        var end   = Math.Min(globalEnd,   points.Count);
+        if (end <= start) return (new List<float>(), start);
         return (points.GetRange(start, end - start), start);
     }
 
-    private static Vector2[] BuildPoints(Rect2 area, List<float> data, float min, float range)
+    /// <summary>
+    /// Maps data points to screen coordinates. data may be downsampled, so originalSliceCount
+    /// gives the true episode span the data covers. seriesStart/globalStart/viewWindow place
+    /// that span correctly in the shared x-axis window.
+    /// </summary>
+    private static Vector2[] BuildPoints(Rect2 area, List<float> data, float min, float range,
+        int seriesStart, int globalStart, int viewWindow, int originalSliceCount)
     {
         var pts = new Vector2[data.Count];
+        float denom = Math.Max(viewWindow - 1, 1);
         for (int i = 0; i < data.Count; i++)
         {
-            float tx = (float)i / Math.Max(data.Count - 1, 1);
+            // Map downsampled index back to episode offset within the original slice.
+            float episodeOffset = data.Count <= 1 ? 0f
+                : (float)i / (data.Count - 1) * (originalSliceCount - 1);
+            float tx = (seriesStart - globalStart + episodeOffset) / denom;
             float ty = Math.Clamp((data[i] - min) / range, 0f, 1f);
             pts[i] = new Vector2(
                 area.Position.X + tx * area.Size.X,
