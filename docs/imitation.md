@@ -6,7 +6,9 @@ Today, "RL Imitation" means:
 
 - recording demonstrations from a running scene into `.rldem` datasets
 - training a policy with behavior cloning (BC) from those demonstrations
-- running a script-expert DAgger aggregation round to collect learner-visited states
+- running one or more script-expert DAgger aggregation rounds to cover states the learner actually visits
+- automating the full DAgger outer loop (BC seed → N × (aggregate + retrain))
+- exporting a trained checkpoint to a compact `.rlmodel` for in-game inference
 - optionally using the resulting checkpoint as a warm-start for a later RL run
 
 What it does not currently include:
@@ -16,7 +18,7 @@ What it does not currently include:
 - inverse reward learning
 - BC training that resumes optimizer state from an earlier run
 
-The current implementation is intentionally narrow: recording, BC, one-round script-expert DAgger dataset aggregation, and a bridge into PPO/SAC/A2C/DQN warm-start through the normal RL training flow.
+The current implementation is intentionally narrow: recording, BC, script-expert DAgger dataset aggregation with beta-mixing decay, an automated multi-round loop, and a bridge into PPO/SAC/A2C/DQN warm-start through the normal RL training flow.
 
 ---
 
@@ -29,9 +31,11 @@ The current implementation is intentionally narrow: recording, BC, one-round scr
    - **Script** mode: the agent's `OnScriptedInput()` heuristic
 4. Inspect the generated `.rldem` dataset.
 5. Train a BC policy from that dataset.
-6. Optionally run a DAgger round to produce an aggregated dataset.
-7. Use the saved `.rlcheckpoint`:
-   - as a saved training artifact, and
+6. Optionally export the checkpoint to a `.rlmodel` file for immediate in-game inference.
+7. Optionally run one or more DAgger rounds (manually or via Auto DAgger) to produce an aggregated dataset, then retrain.
+8. Use the saved `.rlcheckpoint`:
+   - as a saved training artifact,
+   - as the learner for the next DAgger round, and
    - as a warm-start checkpoint for a normal RL run from **RL Setup -> Start Training**
 
 The companion demos that exercise this flow are:
@@ -92,11 +96,24 @@ Current BC trainer characteristics:
 - configurable `LearningRate`
 - gradient clipping via `MaxGradientNorm`
 - dataset shuffling each epoch
+- saves `ObservationSize`, `DiscreteActionCount`, and `ContinuousActionDimensions` in the checkpoint so exported `.rlmodel` files are self-describing
 
 This logic lives in:
 
 - `Runtime/Imitation/BCTrainer.cs`
 - `Runtime/Imitation/RLImitationConfig.cs`
+
+### 5. DAgger bootstrap
+
+When a DAgger round is launched, `DAggerBootstrap` runs the learner policy in the scene while the agent's scripted heuristic provides the expert action label for every visited state. The collected frames plus the seed dataset are written as a new aggregated `.rldem`.
+
+Key implementation details:
+
+- **Action repeat**: frames are collected at the academy's decision rate, not every physics step — matching the rate at which BC trains and the policy infers.
+- **Beta mixing**: with probability `effectiveBeta` the expert physically drives the step; otherwise the learner drives. Expert action labels are always recorded regardless of who is at the wheel.
+- **Beta decay**: `effectiveBeta = MixingBeta ^ RoundIndex`, so each successive round hands more control to the learner.
+
+This logic lives in `Scenes/Bootstrap/DAggerBootstrap.cs`.
 
 ---
 
@@ -256,49 +273,76 @@ BC training writes checkpoints to:
 
 The dock keeps the newest BC checkpoint around as the default warm-start candidate for later RL runs.
 
+### Export to .rlmodel
+
+Once training completes, an **Export to .rlmodel** button appears in the Train tab.
+
+Clicking it opens a folder picker. Choose a destination directory and the plugin converts the current checkpoint into a self-contained binary `.rlmodel` file named after the checkpoint. Assign that file to an agent's **Inference Model Path** for in-game inference without any additional steps.
+
+The `.rlmodel` format embeds observation size, action dimensions, layer weights, and metadata, so it can be loaded without a separate network graph resource.
+
 ---
 
 ## DAgger
 
-The train tab exposes both:
+The Train tab exposes both:
 
-- **Manual DAgger**
-- **Run Auto DAgger**
+- **Manual DAgger** — run and control each aggregation round yourself
+- **Auto DAgger** — automate the full outer loop
 
-Current DAgger support is:
+Current DAgger support:
 
-- one aggregation round at a time
-- scripted expert only
-- seed dataset + newly collected expert-labeled learner states written into a new `.rldem`
-- an optional automated outer loop that chains BC and DAgger rounds together
+- scripted expert only (`OnScriptedInput()`)
+- seed dataset + newly collected expert-labeled learner states merged into a new `.rldem`
+- beta-mixing: each step is driven by the expert with probability `effectiveBeta`, otherwise by the learner; expert labels are always recorded
+- beta decay: `effectiveBeta = MixingBeta ^ RoundIndex`, so the learner gradually takes over in later rounds
+- action-repeat aware: frames are collected at the academy's decision rate, matching training and inference
+- automated outer loop via Auto DAgger that chains BC and DAgger rounds together
 
-Current DAgger support is not:
+Current DAgger support does not include:
 
 - human-in-the-loop expert relabeling
-- a separate discriminator / reward-learning method
+- a separate discriminator or reward-learning method
 
 ### How it works
 
 During a DAgger round:
 
-1. the selected learner checkpoint acts in the scene
-2. the agent's `OnScriptedInput()` heuristic is queried as the expert
-3. the visited observation is written with the expert action label
-4. the resulting output dataset contains:
-   - the original seed dataset frames
-   - the newly collected learner-visited states
+1. The learner policy acts in the scene from the selected checkpoint.
+2. The agent's `OnScriptedInput()` heuristic is queried as the expert for every decision step.
+3. With probability `effectiveBeta` the expert physically drives the step; otherwise the learner drives it. Either way, the expert's action is what gets recorded.
+4. The resulting output dataset contains the original seed frames plus all newly collected frames.
 
 You then run BC again on that aggregated dataset.
 
+### Beta mixing
+
+The **Mixing Beta** slider (0–1, default 0.5) controls the base decay factor.
+
+- `beta = 1.0` — expert always drives; equivalent to collecting more demonstrations. No new hard states are covered.
+- `beta = 0.5` — expert drives 50% of steps in round 1, 25% in round 2, 12.5% in round 3, etc.
+- `beta = 0.0` — learner always drives; expert still labels visited states but the learner must reach them on its own.
+
+The effective beta for round `i` is `beta^i`, so later rounds give the learner increasing autonomy while the expert continues to label every state the learner visits.
+
 ### Requirements
 
-DAgger currently requires:
+DAgger requires:
 
 - a specific selected agent group
 - a scripted expert implementation through `OnScriptedInput()`
-- a learner checkpoint
-- a compatible network graph
+- a learner checkpoint (`.rlcheckpoint` or `.rlmodel`)
+- a network graph (required when the checkpoint does not embed its own layer definitions)
 - a seed dataset
+
+### Learner checkpoint format
+
+The **Checkpoint** field accepts both:
+
+- `.rlcheckpoint` — the standard training checkpoint produced by BC or RL training
+- `.rlmodel` — the compact inference export; useful if you only kept the model file
+
+When a `.rlmodel` is provided without a network graph path, DAgger will error unless the model's embedded metadata includes layer definitions. In practice, always provide the network graph alongside a `.rlmodel` learner to be safe.
 
 ### Output
 
@@ -306,30 +350,32 @@ DAgger datasets are written to:
 
 - `res://RL-Agent-Demos/<name>_<timestamp>.rldem`
 
-The dataset is immediately available in the normal dataset dropdown after the run completes.
+The dataset is immediately available in the dataset dropdown after the round completes.
 
 ### Manual DAgger
 
-1. record or script-generate an initial dataset
-2. train BC
-3. run one DAgger round from that checkpoint
-4. train BC again on the aggregated dataset
-5. repeat as needed
+1. Record or script-generate an initial seed dataset.
+2. Train BC.
+3. Run one DAgger round from the BC checkpoint.
+4. Train BC again on the aggregated dataset.
+5. Repeat as needed, optionally reducing beta each round to hand more control to the learner.
 
 ### Auto DAgger
 
-`Auto DAgger` automates the outer loop in the editor.
+Auto DAgger automates the entire outer loop in the editor.
 
 If you provide a checkpoint, the loop starts from that learner.
-If you leave the checkpoint field empty, the loop first trains a seed BC checkpoint from the selected dataset.
+If the checkpoint field is empty, the loop first trains a seed BC checkpoint from the selected dataset.
 
-Each round then does:
+Each round:
 
-1. run one DAgger aggregation round
-2. write a new aggregated dataset
-3. retrain BC on that aggregated dataset
+1. Runs one DAgger aggregation round.
+2. Writes a new aggregated dataset.
+3. Retrains BC on that dataset.
 
-After the last round, the final BC checkpoint remains selected in the dock and the final aggregated dataset remains available in the dataset list.
+The effective beta decays automatically: round `i` uses `MixingBeta^i`.
+
+After the last round, the final BC checkpoint remains selected in the dock and the final aggregated dataset appears in the dataset list.
 
 ---
 
@@ -477,12 +523,21 @@ Use this when:
 - you already have a decent scripted oracle
 - you want to fix covariate shift before switching to RL fine-tuning
 
-Typical flow:
+**Manual flow** (full control over each round):
 
-1. train BC
-2. run a DAgger round from the BC checkpoint
-3. retrain BC on the aggregated dataset
-4. repeat or switch to PPO fine-tuning
+1. Train BC on your seed dataset.
+2. Run one DAgger round from the BC checkpoint (set Mixing Beta to taste).
+3. Retrain BC on the aggregated dataset.
+4. Repeat or switch to PPO fine-tuning.
+
+**Automated flow** (recommended for most cases):
+
+1. Select your seed dataset and set Algorithm to **Auto DAgger**.
+2. Set Mixing Beta (0.5 is a good starting point) and Rounds (3–5).
+3. Click **Run Auto DAgger** and let the loop complete.
+4. The final checkpoint is ready for inference export or RL fine-tuning.
+
+The beta decay means each successive round gives the learner more autonomy, progressively covering hard states that pure BC demonstrations never reach.
 
 ---
 
@@ -569,9 +624,15 @@ That is the current implementation. The warm-start field is for later RL trainin
 Check:
 
 - a specific agent group is selected
-- the selected agent supports Script mode
-- a learner checkpoint path is set
-- the selected network graph matches the learner checkpoint architecture
+- the selected agent overrides `OnScriptedInput()`
+- a learner checkpoint path is set (`.rlcheckpoint` or `.rlmodel`)
+- the network graph path matches the learner checkpoint architecture, or the `.rlcheckpoint` embeds its own layer definitions
+
+### Export button does nothing / no file appears
+
+The export button shows a folder picker. If you dismiss the dialog without selecting a folder, no file is written. Select a folder and confirm.
+
+If the export fails silently, check the Godot output panel for a `[RLModelExporter]` error message — it usually indicates a malformed checkpoint or a write-permission issue on the destination folder.
 
 ### Fine-tuned RL run behaves strangely after BC
 
@@ -585,13 +646,12 @@ Check:
 
 ## Current Limitations
 
-- Imitation learning is BC-only today.
-- DAgger is currently script-expert only and runs one aggregation round at a time.
-- BC training does not yet load an earlier checkpoint before supervised updates.
-- The train tab exposes only epochs and learning rate; batch size and other BC knobs are fixed in code.
+- DAgger is script-expert only; there is no human-in-the-loop relabeling.
+- BC training starts from scratch each run; it does not resume optimizer state from an earlier checkpoint.
+- The Train tab exposes only epochs and learning rate; batch size and other BC knobs are fixed in code.
 - Step mode supports discrete-only agents.
 - The dataset format is vector-observation oriented; it stores flattened observation arrays, not high-level semantic labels.
-- Multi-agent recording is practical only when all recorded agents share one compatible schema.
+- Multi-agent recording is practical only when all recorded agents share one compatible observation and action schema.
 
 ---
 
