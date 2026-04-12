@@ -642,6 +642,92 @@ internal sealed class PolicyValueNetwork : IDisposable
         };
     }
 
+    /// <summary>
+    /// Supervised (behavior cloning) gradient update.
+    /// Discrete action space: minimises cross-entropy loss between the policy's softmax
+    ///   distribution and the recorded action.
+    /// Continuous action space: minimises MSE between tanh(predicted_mean) and the
+    ///   recorded action (which is already tanh-squashed into [-1, 1]).
+    /// Only the policy head and trunk are updated; the value head is left unchanged.
+    /// Multi-stream (image) observations are supported for forward inference but stream
+    ///   encoder weights are not updated in this MVP pass.
+    /// </summary>
+    /// <returns>Mean BC loss for this batch.</returns>
+    public float ApplyBCGradients(IReadOnlyList<BCSample> samples, float learningRate, float maxGradNorm = 0.5f)
+    {
+        if (samples.Count == 0) return 0f;
+
+        var trunkGradients = new GradientBuffer[_trunkLayers.Length];
+        for (var i = 0; i < _trunkLayers.Length; i++)
+            trunkGradients[i] = _trunkLayers[i].CreateGradientBuffer();
+
+        var policyGradients = _policyHead.CreateGradientBuffer();
+        var totalLoss = 0f;
+
+        for (var s = 0; s < samples.Count; s++)
+        {
+            var sample = samples[s];
+            var inference = Infer(sample.Observation); // handles stream encoders internally
+
+            float[] logitsGrad;
+
+            if (_continuousActionDims > 0)
+            {
+                // MSE loss on tanh(mean) vs recorded action (already in [-1, 1]).
+                var D = _continuousActionDims;
+                logitsGrad = new float[D * 2]; // [mean_0..D-1, logStd_0..D-1]
+                var batchLoss = 0f;
+                for (var d = 0; d < D; d++)
+                {
+                    var predicted = MathF.Tanh(inference.Logits[d]);
+                    var target = d < sample.ContinuousActions.Length ? sample.ContinuousActions[d] : 0f;
+                    var error = predicted - target;
+                    batchLoss += error * error;
+                    // Chain rule through tanh: d(tanh(x))/dx = 1 - tanh²(x)
+                    logitsGrad[d] = error * (1f - predicted * predicted);
+                }
+                totalLoss += 0.5f * batchLoss / Math.Max(1, D);
+            }
+            else
+            {
+                // Cross-entropy loss: L = -log(softmax(logits)[target])
+                var probs = Softmax(inference.Logits);
+                var target = Math.Clamp(sample.DiscreteAction, 0, probs.Length - 1);
+                var targetProb = Math.Clamp(probs[target], 1e-7f, 1f);
+                totalLoss += -MathF.Log(targetProb);
+
+                // Gradient: softmax(logits) - one_hot(target)
+                logitsGrad = new float[probs.Length];
+                for (var i = 0; i < probs.Length; i++)
+                    logitsGrad[i] = probs[i];
+                logitsGrad[target] -= 1f;
+            }
+
+            var trunkGrad = _policyHead.AccumulateGradients(logitsGrad, policyGradients);
+            for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
+                trunkGrad = _trunkLayers[layerIndex].AccumulateGradients(trunkGrad, trunkGradients[layerIndex]);
+            // Note: stream encoder weights are not updated in this pass (MVP limitation).
+        }
+
+        // Gradient clipping + apply.
+        var globalNormSq = policyGradients.SumSquares();
+        foreach (var g in trunkGradients) globalNormSq += g.SumSquares();
+
+        var gradScale = 1f / samples.Count;
+        if (maxGradNorm > 0f)
+        {
+            var avgNorm = Mathf.Sqrt(globalNormSq) * gradScale;
+            if (avgNorm > maxGradNorm)
+                gradScale *= maxGradNorm / avgNorm;
+        }
+
+        _policyHead.ApplyGradients(policyGradients, learningRate, gradScale);
+        for (var layerIndex = _trunkLayers.Length - 1; layerIndex >= 0; layerIndex--)
+            _trunkLayers[layerIndex].ApplyGradients(trunkGradients[layerIndex], learningRate, gradScale);
+
+        return totalLoss / samples.Count;
+    }
+
     public RLCheckpoint SaveCheckpoint(string runId, long totalSteps, long episodeCount, long updateCount)
     {
         var weights = new List<float>();
@@ -1239,4 +1325,17 @@ internal sealed class PolicyValueNetwork : IDisposable
         public float[] InitialHiddenState { get; init; } = Array.Empty<float>();
         public float[]? InitialCellState { get; init; }
     }
+}
+
+/// <summary>
+/// One training sample for behavior cloning.
+/// Used by <see cref="PolicyValueNetwork.ApplyBCGradients"/>.
+/// </summary>
+internal readonly struct BCSample
+{
+    public float[] Observation { get; init; }
+    /// <summary>Target discrete action index. Ignored when action space is continuous-only.</summary>
+    public int DiscreteAction { get; init; }
+    /// <summary>Target continuous actions (tanh-squashed, in [-1, 1]). Ignored when discrete-only.</summary>
+    public float[] ContinuousActions { get; init; }
 }

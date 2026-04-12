@@ -13,6 +13,7 @@ If you are new to the plugin, read [get-started.md](get-started.md) first, then 
 | Area | Included features |
 | --- | --- |
 | Core training | PPO and SAC fully documented here; A2C, DQN, and MCTS are referenced elsewhere in the docs |
+| Imitation learning | in-editor demonstration recording, dataset inspection, BC training, script-expert DAgger rounds, Auto DAgger loops, RL warm-start bridge |
 | Runtime modes | Training mode + inference mode with `.rlmodel` |
 | Editor workflow | Start/Stop/Run toolbar, RL Setup dock, RLDash charts |
 | Observations | Vector observations, built-in sensors, image observations |
@@ -157,7 +158,32 @@ See also: [get-started.md](get-started.md)
 
 ---
 
-## 6) Live dashboard metrics (RLDash)
+## 6) RL imitation and behavior cloning
+
+### What it is
+
+- In-editor demonstration recording into `.rldem` datasets.
+- Behavior cloning (BC) training from those recordings.
+- Script-expert DAgger aggregation rounds that produce new datasets from learner rollouts.
+- Warm-start bridge from BC checkpoints into later RL training runs.
+
+### Why use it
+
+- Bootstrap a policy from human or scripted demonstrations before RL fine-tuning.
+- Validate observations/actions by inspecting datasets directly in the editor.
+
+### Show me
+
+- Open **RL Imitation** dock.
+- Record a dataset.
+- Train BC to produce `bc_*.rlcheckpoint`.
+- Use that checkpoint as a warm-start source for a normal RL run if needed.
+
+See also: [imitation.md](imitation.md)
+
+---
+
+## 7) Live dashboard metrics (RLDash)
 
 ### What it is
 
@@ -177,7 +203,7 @@ See also: [tuning.md](tuning.md), [architecture.md](architecture.md#metrics--das
 
 ---
 
-## 7) Model export/import (`.rlmodel`) for deployment
+## 8) Model export/import (`.rlmodel`) for deployment
 
 ### What it is
 
@@ -198,7 +224,7 @@ See also: [README.md](../README.md), [architecture.md](architecture.md#inference
 
 ---
 
-## 8) Training and inference modes
+## 9) Training and inference modes
 
 ### What it is
 

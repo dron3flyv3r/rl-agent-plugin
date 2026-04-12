@@ -23,6 +23,9 @@ public sealed class TrainingLaunchManifest
     public bool QuickTestMode { get; set; }
     public int QuickTestEpisodeLimit { get; set; } = 5;
     public bool QuickTestShowSpyOverlay { get; set; }
+    public bool OverrideResumeFromCheckpoint { get; set; }
+    public bool ResumeFromCheckpoint { get; set; }
+    public string ResumeCheckpointPath { get; set; } = string.Empty;
     /// <summary>
     /// When set by the HPO orchestrator, TrainingBootstrap applies the JSON key-value
     /// overrides from this path on top of the resolved RLTrainerConfig.
@@ -107,6 +110,9 @@ public sealed class TrainingLaunchManifest
             QuickTestMode = ReadBool(data, nameof(QuickTestMode)),
             QuickTestEpisodeLimit = ReadInt(data, nameof(QuickTestEpisodeLimit), 5),
             QuickTestShowSpyOverlay = ReadBool(data, nameof(QuickTestShowSpyOverlay)),
+            OverrideResumeFromCheckpoint = ReadBool(data, nameof(OverrideResumeFromCheckpoint)),
+            ResumeFromCheckpoint = ReadBool(data, nameof(ResumeFromCheckpoint)),
+            ResumeCheckpointPath = ReadString(data, nameof(ResumeCheckpointPath)),
             HpoOverridePath = ReadString(data, nameof(HpoOverridePath)),
             HpoMasterHeartbeatPath = ReadString(data, nameof(HpoMasterHeartbeatPath)),
             HpoMasterHeartbeatToken = ReadString(data, nameof(HpoMasterHeartbeatToken)),
@@ -133,6 +139,9 @@ public sealed class TrainingLaunchManifest
             { nameof(QuickTestMode), QuickTestMode },
             { nameof(QuickTestEpisodeLimit), QuickTestEpisodeLimit },
             { nameof(QuickTestShowSpyOverlay), QuickTestShowSpyOverlay },
+            { nameof(OverrideResumeFromCheckpoint), OverrideResumeFromCheckpoint },
+            { nameof(ResumeFromCheckpoint), ResumeFromCheckpoint },
+            { nameof(ResumeCheckpointPath), ResumeCheckpointPath },
             { nameof(HpoOverridePath), HpoOverridePath },
             { nameof(HpoMasterHeartbeatPath), HpoMasterHeartbeatPath },
             { nameof(HpoMasterHeartbeatToken), HpoMasterHeartbeatToken },

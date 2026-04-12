@@ -49,9 +49,17 @@ public partial class RLDashboard : Control
         public long WorkerEpisodeCount;
         public string Message = "";
         public string ResumedFrom = "";
+        public bool WarmStartUsed;
+        public string WarmStartSource = "";
     }
 
-    private sealed record RunMeta(string DisplayName, string[] AgentNames, string[] AgentGroups, bool HasCurriculum);
+    private sealed record RunMeta(
+        string DisplayName,
+        string[] AgentNames,
+        string[] AgentGroups,
+        bool HasCurriculum,
+        bool WarmStartUsed,
+        string WarmStartSource);
 
     private enum CheckpointSortMode
     {
@@ -64,11 +72,18 @@ public partial class RLDashboard : Control
         Type = 6,
     }
 
+    private enum PlotXAxisMode
+    {
+        Episodes = 0,
+        Steps = 1,
+    }
+
     // ── UI handles ───────────────────────────────────────────────────────────
     private OptionButton? _runDropdown;
     private LineEdit? _prefixFilter;
     private LineEdit? _renameEdit;
     private Button? _renameBtn;
+    private OptionButton? _xAxisDropdown;
     private Label? _policyFilterLabel;
     private OptionButton? _policyFilterDropdown;
     private Label? _liveBadge;
@@ -107,7 +122,7 @@ public partial class RLDashboard : Control
     private readonly List<string> _runIds = new();
     private readonly Dictionary<string, long> _metricsFileOffsets = new();
     private string _selectedRunId = "";
-    private RunMeta _selectedRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false);
+    private RunMeta _selectedRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false, false, "");
     private string _selectedPolicyGroupFilter = "";
     private List<string> _knownPolicyGroups = new();
     private readonly HashSet<string> _rewardSeriesLabels = new();
@@ -121,13 +136,14 @@ public partial class RLDashboard : Control
     private int _lastKnownRunCount = -1;
     private string _activeRunId = "";
     private CheckpointSortMode _checkpointSortMode = CheckpointSortMode.NewestUpdate;
+    private PlotXAxisMode _plotXAxisMode = PlotXAxisMode.Episodes;
 
     // Compare run
     private OptionButton? _compareRunDropdown;
     private readonly List<Metric> _compareMetrics = new();
     private readonly Dictionary<string, long> _compareMetricsFileOffsets = new();
     private string _compareRunId = "";
-    private RunMeta _compareRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false);
+    private RunMeta _compareRunMeta = new("", Array.Empty<string>(), Array.Empty<string>(), false, false, "");
     private readonly HashSet<string> _compareRewardSeriesLabels = new();
     private readonly HashSet<string> _compareEntropySeriesLabels = new();
     private readonly HashSet<string> _compareSacAlphaSeriesLabels = new();
@@ -399,6 +415,25 @@ public partial class RLDashboard : Control
         _policyFilterDropdown.ItemSelected += OnPolicyFilterSelected;
         row2.AddChild(_policyFilterDropdown);
 
+        var xAxisLabel = new Label
+        {
+            Text = "X:",
+            VerticalAlignment = VerticalAlignment.Center,
+        };
+        xAxisLabel.AddThemeFontSizeOverride("font_size", Ui(11));
+        row2.AddChild(xAxisLabel);
+
+        _xAxisDropdown = new OptionButton
+        {
+            CustomMinimumSize = UiSize(100, 0),
+            TooltipText = "Choose whether charts use episode count or total steps on the X-axis",
+        };
+        _xAxisDropdown.AddItem("Episodes");
+        _xAxisDropdown.AddItem("Steps");
+        _xAxisDropdown.Select((int)_plotXAxisMode);
+        _xAxisDropdown.ItemSelected += OnXAxisModeSelected;
+        row2.AddChild(_xAxisDropdown);
+
         row2.AddChild(new Control { SizeFlagsHorizontal = SizeFlags.ExpandFill });
 
         _renameEdit = new LineEdit
@@ -508,6 +543,7 @@ public partial class RLDashboard : Control
         _sacAlphaChart.Visible = false;  // shown only when SAC alpha metrics are present
         _eloChart.Visible = false;  // shown only during self-play
         _curriculumChart.Visible = false;  // shown only when curriculum is configured
+        ConfigureChartAxes();
 
         grid.AddChild(_rewardChart);
         grid.AddChild(_lossChart);
@@ -527,6 +563,29 @@ public partial class RLDashboard : Control
         chart.SizeFlagsVertical = SizeFlags.ExpandFill;
         chart.CustomMinimumSize = UiSize(0, 140);
         return chart;
+    }
+
+    private void ConfigureChartAxes()
+    {
+        var axisName = _plotXAxisMode == PlotXAxisMode.Steps ? "steps" : "ep";
+        var compact = _plotXAxisMode == PlotXAxisMode.Steps;
+
+        ConfigureChartAxis(_rewardChart, axisName, compact);
+        ConfigureChartAxis(_lossChart, axisName, compact);
+        ConfigureChartAxis(_entropyChart, axisName, compact);
+        ConfigureChartAxis(_sacAlphaChart, axisName, compact);
+        ConfigureChartAxis(_lengthChart, axisName, compact);
+        ConfigureChartAxis(_eloChart, axisName, compact);
+        ConfigureChartAxis(_curriculumChart, axisName, compact);
+    }
+
+    private static void ConfigureChartAxis(LineChartPanel? chart, string axisName, bool compactLabels)
+    {
+        if (chart is null)
+            return;
+
+        chart.XAxisName = axisName;
+        chart.CompactXAxisLabels = compactLabels;
     }
 
     private static void SetChartTitle(LineChartPanel? chart, string title)
@@ -682,7 +741,7 @@ public partial class RLDashboard : Control
         _compareMetricsFileOffsets.Clear();
         _pendingCompareZoomReset = true;
         _compareRunMeta = string.IsNullOrEmpty(runId)
-            ? new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false)
+            ? new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false, false, "")
             : ReadMeta(ProjectSettings.GlobalizePath($"res://RL-Agent-Training/runs/{runId}"));
 
         // Remove any stale compare series from all charts.
@@ -892,6 +951,8 @@ public partial class RLDashboard : Control
                 WorkerEpisodeCount = GetLong(d, "worker_episode_count"),
                 Message = GetString(d, "message", ""),
                 ResumedFrom = GetString(d, "resumed_from", ""),
+                WarmStartUsed = GetBool(d, "warm_start_used"),
+                WarmStartSource = GetString(d, "warm_start_source", ""),
             };
         }
         catch
@@ -1185,25 +1246,27 @@ public partial class RLDashboard : Control
     private static RunMeta ReadMeta(string runDirAbsPath)
     {
         var metaPath = System.IO.Path.Combine(runDirAbsPath, "meta.json");
-        if (!System.IO.File.Exists(metaPath)) return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
+        if (!System.IO.File.Exists(metaPath)) return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false, false, "");
 
         try
         {
             using var doc = JsonDocument.Parse(System.IO.File.ReadAllText(metaPath));
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
-                return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
+                return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false, false, "");
 
             var d = doc.RootElement;
             var displayName = GetString(d, "display_name", "");
             var agentNames = GetStringArray(d, "agent_names");
             var agentGroups = GetStringArray(d, "agent_groups");
             var hasCurriculum = GetBool(d, "has_curriculum");
+            var warmStartUsed = GetBool(d, "warm_start_used");
+            var warmStartSource = GetString(d, "warm_start_source", "");
 
-            return new RunMeta(displayName, agentNames, agentGroups, hasCurriculum);
+            return new RunMeta(displayName, agentNames, agentGroups, hasCurriculum, warmStartUsed, warmStartSource);
         }
         catch
         {
-            return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false);
+            return new RunMeta("", Array.Empty<string>(), Array.Empty<string>(), false, false, "");
         }
     }
 
@@ -1225,6 +1288,8 @@ public partial class RLDashboard : Control
                 { "agent_names",   agentArr },
                 { "agent_groups",  groupArr },
                 { "has_curriculum", meta.HasCurriculum },
+                { "warm_start_used", meta.WarmStartUsed },
+                { "warm_start_source", meta.WarmStartSource },
             };
 
             System.IO.File.WriteAllText(
@@ -1246,12 +1311,16 @@ public partial class RLDashboard : Control
         {
             case "running":
                 _statusDot.Color = CRunning;
-                _statusLabel.Text = string.IsNullOrEmpty(status.ResumedFrom) ? "Running" : "Running (resumed)";
+                _statusLabel.Text = status.WarmStartUsed
+                    ? "Running (warm-started)"
+                    : string.IsNullOrEmpty(status.ResumedFrom) ? "Running" : "Running (resumed)";
                 break;
             case "done":
             case "stopped":
                 _statusDot.Color = CStopped;
-                _statusLabel.Text = string.IsNullOrEmpty(status.ResumedFrom) ? "Stopped" : "Stopped (resumed)";
+                _statusLabel.Text = status.WarmStartUsed
+                    ? "Stopped (warm-started)"
+                    : string.IsNullOrEmpty(status.ResumedFrom) ? "Stopped" : "Stopped (resumed)";
                 break;
             case "loading":
                 _statusDot.Color = CIdle;
@@ -1339,6 +1408,28 @@ public partial class RLDashboard : Control
         RefreshStats(status);
     }
 
+    private void OnXAxisModeSelected(long index)
+    {
+        _plotXAxisMode = index == (long)PlotXAxisMode.Steps
+            ? PlotXAxisMode.Steps
+            : PlotXAxisMode.Episodes;
+
+        ConfigureChartAxes();
+        RefreshCharts();
+        _rewardChart?.ResetZoomToAnchor();
+        _lossChart?.ResetZoomToAnchor();
+        _entropyChart?.ResetZoomToAnchor();
+        _lengthChart?.ResetZoomToAnchor();
+        _sacAlphaChart?.ResetZoomToAnchor();
+        _eloChart?.ResetZoomToAnchor();
+        _curriculumChart?.ResetZoomToAnchor();
+    }
+
+    private float GetMetricXAxisValue(Metric metric)
+        => _plotXAxisMode == PlotXAxisMode.Steps
+            ? metric.TotalSteps
+            : metric.EpisodeCount;
+
     private void RefreshCharts()
     {
         if (_metrics.Count == 0) return;
@@ -1367,14 +1458,15 @@ public partial class RLDashboard : Control
             var color = CPolicyPalette[i % CPolicyPalette.Length];
             var groupMetrics = _metrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
             var groupHasSacAlpha = groupMetrics.Any(m => m.SacAlpha.HasValue);
+            var groupXAxis = groupMetrics.Select(GetMetricXAxisValue).ToList();
 
             var rewardLabel = multi ? group : "Reward";
             var entropyLabel = multi ? group : "Entropy";
             var lengthLabel = multi ? group : "Length";
 
-            _rewardChart?.UpdateSeries(rewardLabel, color, groupMetrics.Select(m => m.EpisodeReward));
-            _entropyChart?.UpdateSeries(entropyLabel, color, groupMetrics.Select(m => m.Entropy));
-            _lengthChart?.UpdateSeries(lengthLabel, color, groupMetrics.Select(m => (float)m.EpisodeLength));
+            _rewardChart?.UpdateSeries(rewardLabel, color, groupXAxis, groupMetrics.Select(m => m.EpisodeReward));
+            _entropyChart?.UpdateSeries(entropyLabel, color, groupXAxis, groupMetrics.Select(m => m.Entropy));
+            _lengthChart?.UpdateSeries(lengthLabel, color, groupXAxis, groupMetrics.Select(m => (float)m.EpisodeLength));
 
             newRewardLabels.Add(rewardLabel);
             newEntropyLabels.Add(entropyLabel);
@@ -1386,7 +1478,9 @@ public partial class RLDashboard : Control
                 hasSacAlphaData = true;
                 var alphaLabel = multi ? group : "Alpha";
                 var alphaColor = multi ? color : CSacAlpha;
-                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor, alphaMetrics.Select(m => m.SacAlpha!.Value));
+                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor,
+                    alphaMetrics.Select(GetMetricXAxisValue),
+                    alphaMetrics.Select(m => m.SacAlpha!.Value));
                 newSacAlphaLabels.Add(alphaLabel);
             }
 
@@ -1396,7 +1490,9 @@ public partial class RLDashboard : Control
             {
                 var evalLabel = multi ? $"{group} (eval)" : "Reward (eval)";
                 var evalColor = new Color(color.R, color.G, color.B, 0.55f);
-                _rewardChart?.UpdateSeries(evalLabel, evalColor, evalMetrics.Select(m => m.EvalMeanReward));
+                _rewardChart?.UpdateSeries(evalLabel, evalColor,
+                    evalMetrics.Select(GetMetricXAxisValue),
+                    evalMetrics.Select(m => m.EvalMeanReward));
                 newRewardLabels.Add(evalLabel);
             }
 
@@ -1414,8 +1510,12 @@ public partial class RLDashboard : Control
             var lossMetrics = groupHasSacAlpha
                 ? CollapseRepeatedSacLossSnapshots(groupMetrics)
                 : groupMetrics;
-            _lossChart?.UpdateSeries(polLabel, color, lossMetrics.Select(m => m.PolicyLoss));
-            _lossChart?.UpdateSeries(valLabel, valColor, lossMetrics.Select(m => m.ValueLoss));
+            _lossChart?.UpdateSeries(polLabel, color,
+                lossMetrics.Select(GetMetricXAxisValue),
+                lossMetrics.Select(m => m.PolicyLoss));
+            _lossChart?.UpdateSeries(valLabel, valColor,
+                lossMetrics.Select(GetMetricXAxisValue),
+                lossMetrics.Select(m => m.ValueLoss));
 
             newLossLabels.Add(polLabel);
             newLossLabels.Add(valLabel);
@@ -1455,10 +1555,18 @@ public partial class RLDashboard : Control
 
         // Pin x-axis to the primary run's episode count so a longer compare run
         // cannot push the view window beyond what the primary run covers.
-        int primaryMaxPts = activeGroups.Count > 0
-            ? activeGroups.Max(g => _metrics.Count(m => m.PolicyGroup == g && !m.IsEval))
-            : _metrics.Count(m => !m.IsEval);
-        SetChartsAnchorLength(primaryMaxPts);
+        float primaryMaxX = activeGroups.Count > 0
+            ? activeGroups.Max(g => _metrics
+                .Where(m => m.PolicyGroup == g && !m.IsEval)
+                .Select(GetMetricXAxisValue)
+                .DefaultIfEmpty(0f)
+                .Max())
+            : _metrics
+                .Where(m => !m.IsEval)
+                .Select(GetMetricXAxisValue)
+                .DefaultIfEmpty(0f)
+                .Max();
+        SetChartsAnchorLength(primaryMaxX);
 
         RefreshCompareCharts();
 
@@ -1472,7 +1580,9 @@ public partial class RLDashboard : Control
         {
             _eloChart.Visible = eloMetrics.Count > 0;
             if (eloMetrics.Count > 0)
-                _eloChart.UpdateSeries("Elo", CElo, eloMetrics.Select(m => m.LearnerElo!.Value));
+                _eloChart.UpdateSeries("Elo", CElo,
+                    eloMetrics.Select(GetMetricXAxisValue),
+                    eloMetrics.Select(m => m.LearnerElo!.Value));
         }
 
         var curriculumMetrics = _metrics
@@ -1484,19 +1594,20 @@ public partial class RLDashboard : Control
             _curriculumChart.Visible = showCurriculum;
             if (curriculumMetrics.Count > 0)
                 _curriculumChart.UpdateSeries("Progress", CCurriculum,
+                    curriculumMetrics.Select(GetMetricXAxisValue),
                     curriculumMetrics.Select(m => m.CurriculumProgress!.Value));
         }
     }
 
-    private void SetChartsAnchorLength(int count)
+    private void SetChartsAnchorLength(float maxX)
     {
-        if (_rewardChart is not null)     _rewardChart.AnchorLength     = count;
-        if (_lossChart is not null)       _lossChart.AnchorLength       = count;
-        if (_entropyChart is not null)    _entropyChart.AnchorLength    = count;
-        if (_lengthChart is not null)     _lengthChart.AnchorLength     = count;
-        if (_sacAlphaChart is not null)   _sacAlphaChart.AnchorLength   = count;
-        if (_eloChart is not null)        _eloChart.AnchorLength        = count;
-        if (_curriculumChart is not null) _curriculumChart.AnchorLength = count;
+        if (_rewardChart is not null)     _rewardChart.AnchorMaxX     = maxX;
+        if (_lossChart is not null)       _lossChart.AnchorMaxX       = maxX;
+        if (_entropyChart is not null)    _entropyChart.AnchorMaxX    = maxX;
+        if (_lengthChart is not null)     _lengthChart.AnchorMaxX     = maxX;
+        if (_sacAlphaChart is not null)   _sacAlphaChart.AnchorMaxX   = maxX;
+        if (_eloChart is not null)        _eloChart.AnchorMaxX        = maxX;
+        if (_curriculumChart is not null) _curriculumChart.AnchorMaxX = maxX;
     }
 
     private void RefreshCompareCharts()
@@ -1532,14 +1643,15 @@ public partial class RLDashboard : Control
             var color = CComparePalette[i % CComparePalette.Length];
             var gm = _compareMetrics.Where(m => m.PolicyGroup == group && !m.IsEval).ToList();
             var hasSac = gm.Any(m => m.SacAlpha.HasValue);
+            var xAxis = gm.Select(GetMetricXAxisValue).ToList();
 
             var rewardLabel  = multi ? $"B:{group}"         : "B:Reward";
             var entropyLabel = multi ? $"B:{group}"         : "B:Entropy";
             var lengthLabel  = multi ? $"B:{group}"         : "B:Length";
 
-            _rewardChart?.UpdateSeries(rewardLabel, color, gm.Select(m => m.EpisodeReward));
-            _entropyChart?.UpdateSeries(entropyLabel, color, gm.Select(m => m.Entropy));
-            _lengthChart?.UpdateSeries(lengthLabel, color, gm.Select(m => (float)m.EpisodeLength));
+            _rewardChart?.UpdateSeries(rewardLabel, color, xAxis, gm.Select(m => m.EpisodeReward));
+            _entropyChart?.UpdateSeries(entropyLabel, color, xAxis, gm.Select(m => m.Entropy));
+            _lengthChart?.UpdateSeries(lengthLabel, color, xAxis, gm.Select(m => (float)m.EpisodeLength));
             newReward.Add(rewardLabel);
             newEntropy.Add(entropyLabel);
             newLength.Add(lengthLabel);
@@ -1549,7 +1661,9 @@ public partial class RLDashboard : Control
             {
                 var evalLabel = multi ? $"B:{group} (eval)" : "B:Reward (eval)";
                 var evalColor = new Color(color.R, color.G, color.B, 0.55f);
-                _rewardChart?.UpdateSeries(evalLabel, evalColor, evalGm.Select(m => m.EvalMeanReward));
+                _rewardChart?.UpdateSeries(evalLabel, evalColor,
+                    evalGm.Select(GetMetricXAxisValue),
+                    evalGm.Select(m => m.EvalMeanReward));
                 newReward.Add(evalLabel);
             }
 
@@ -1562,8 +1676,12 @@ public partial class RLDashboard : Control
             var valColor = new Color(color.R * 0.65f, color.G * 0.65f, color.B * 0.65f, 0.85f);
 
             var lossGm = hasSac ? CollapseRepeatedSacLossSnapshots(gm) : gm;
-            _lossChart?.UpdateSeries(polLabel, color, lossGm.Select(m => m.PolicyLoss));
-            _lossChart?.UpdateSeries(valLabel, valColor, lossGm.Select(m => m.ValueLoss));
+            _lossChart?.UpdateSeries(polLabel, color,
+                lossGm.Select(GetMetricXAxisValue),
+                lossGm.Select(m => m.PolicyLoss));
+            _lossChart?.UpdateSeries(valLabel, valColor,
+                lossGm.Select(GetMetricXAxisValue),
+                lossGm.Select(m => m.ValueLoss));
             newLoss.Add(polLabel);
             newLoss.Add(valLabel);
 
@@ -1572,7 +1690,9 @@ public partial class RLDashboard : Control
             {
                 var alphaLabel = multi ? $"B:{group}" : "B:Alpha";
                 var alphaColor = multi ? color : new Color(CSacAlpha.R * 0.85f, CSacAlpha.G * 0.85f, CSacAlpha.B * 0.50f);
-                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor, alphaGm.Select(m => m.SacAlpha!.Value));
+                _sacAlphaChart?.UpdateSeries(alphaLabel, alphaColor,
+                    alphaGm.Select(GetMetricXAxisValue),
+                    alphaGm.Select(m => m.SacAlpha!.Value));
                 newSacAlpha.Add(alphaLabel);
             }
         }
@@ -1633,6 +1753,13 @@ public partial class RLDashboard : Control
             var updateSuffix = last.OpponentUpdateCount.HasValue ? $" u{last.OpponentUpdateCount.Value}" : string.Empty;
             SetHeaderStatus(
                 $"Latest matchup: {last.PolicyGroup} vs {last.OpponentGroup} ({last.OpponentSource}{updateSuffix})");
+        }
+        else if (status.WarmStartUsed)
+        {
+            var source = string.IsNullOrWhiteSpace(status.WarmStartSource)
+                ? "configured checkpoint"
+                : status.WarmStartSource;
+            SetHeaderStatus($"Warm-started from: {source}");
         }
         else if (!string.IsNullOrEmpty(status.ResumedFrom))
         {

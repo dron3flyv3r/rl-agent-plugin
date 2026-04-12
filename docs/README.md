@@ -9,6 +9,7 @@
 
 ## Deep dives
 - [Algorithms](algorithms.md)
+- [RL Imitation](imitation.md)
 - [Hyperparameter Optimization (HPO)](hpo.md)
 - [Tuning Guide](tuning.md)
 - [Architecture Overview](architecture.md)
@@ -70,5 +71,7 @@
 - **Start training**: top toolbar **Start Training** or right-side **RL Setup** dock
 - **Watch metrics**: open **RLDash**
 - **Run hyperparameter search**: add an `RLHPOOrchestrator` under `RLAcademy` and follow [hpo.md](hpo.md)
+- **Record demonstrations / run behavior cloning**: see [imitation.md](imitation.md)
+- **Fine-tune PPO from a BC checkpoint**: see [imitation.md](imitation.md) and [How to Fine-Tune a Pre-Trained Model](How-to/Deployment%20&%20Transfer/fine-tune-a-pre-trained-model.md)
 - **Export model**: in RLDash, use **Export Run** (or checkpoint-row **Export**) to create `.rlmodel`
 - **Run inference**: set `PolicyGroupConfig.InferenceModelPath` and click **Run Inference**

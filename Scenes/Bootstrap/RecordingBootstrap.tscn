@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://addons/rl-agent-plugin/Scenes/Bootstrap/RecordingBootstrap.cs" id="1"]
+
+[node name="RecordingBootstrap" type="Node"]
+script = ExtResource("1")

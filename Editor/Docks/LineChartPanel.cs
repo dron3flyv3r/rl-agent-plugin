@@ -14,20 +14,27 @@ namespace RlAgentPlugin.Editor;
 [Tool]
 public partial class LineChartPanel : Control
 {
-    public readonly record struct SeriesEntry(string Label, Color LineColor, List<float> Points);
+    public readonly record struct SeriesEntry(string Label, Color LineColor, List<float> XPoints, List<float> Points);
 
     private readonly List<SeriesEntry> _series = new();
 
     public string ChartTitle { get; set; } = "";
     public bool ShowSmoothed { get; set; } = true;
     public float SmoothAlpha { get; set; } = 0.08f;
+    public string XAxisName { get; set; } = "ep";
+    public bool CompactXAxisLabels { get; set; }
 
     /// <summary>
     /// When > 0, clamps the x-axis extent to this many points so that a longer
     /// compare series does not widen the view beyond the primary run's length.
     /// Set this to the primary run's episode count before adding compare series.
     /// </summary>
-    public int AnchorLength { get; set; } = 0;
+    public float AnchorMaxX { get; set; } = 0f;
+    public int AnchorLength
+    {
+        get => Mathf.RoundToInt(AnchorMaxX);
+        set => AnchorMaxX = value;
+    }
 
     // ── Layout constants ────────────────────────────────────────────────────
     private const float TitleH = 24f;
@@ -39,10 +46,10 @@ public partial class LineChartPanel : Control
     private const int GridLines = 5;
 
     // ── View / scroll state ─────────────────────────────────────────────────
-    private const int DefaultWindow = 2500;
-    private int _viewWindow = DefaultWindow;   // number of data points in the visible window
-    private int _viewOffset = 0;     // points scrolled back from the right edge (0 = live tail)
-    private const int MinWindow = 20;
+    private const float DefaultWindow = 2500f;
+    private float _viewWindow = DefaultWindow;   // X-axis units in the visible window
+    private float _viewOffset = 0f;     // X units scrolled back from the right edge (0 = live tail)
+    private const float MinWindow = 20f;
 
     // ── Colours ─────────────────────────────────────────────────────────────
     private static readonly Color CBg = new(0.12f, 0.12f, 0.12f);
@@ -80,14 +87,37 @@ public partial class LineChartPanel : Control
 
     public void UpdateSeries(string label, Color color, IEnumerable<float> data)
     {
-        var list = data.ToList();
-        var idx = _series.FindIndex(s => s.Label == label);
-        if (idx >= 0)
-            _series[idx] = new SeriesEntry(label, color, list);
-        else
-            _series.Add(new SeriesEntry(label, color, list));
+        var yPoints = data.ToList();
+        var xPoints = new List<float>(yPoints.Count);
+        for (var i = 0; i < yPoints.Count; i++)
+            xPoints.Add(i + 1);
 
-        // Keep offset clamped when new data arrives.
+        UpdateSeries(label, color, xPoints, yPoints);
+    }
+
+    public void UpdateSeries(string label, Color color, IEnumerable<float> xData, IEnumerable<float> yData)
+    {
+        var xPoints = xData.ToList();
+        var yPoints = yData.ToList();
+        var count = Math.Min(xPoints.Count, yPoints.Count);
+        if (count <= 0)
+        {
+            RemoveSeries(label);
+            return;
+        }
+
+        if (xPoints.Count != count)
+            xPoints = xPoints.Take(count).ToList();
+        if (yPoints.Count != count)
+            yPoints = yPoints.Take(count).ToList();
+
+        var idx = _series.FindIndex(s => s.Label == label);
+        var entry = new SeriesEntry(label, color, xPoints, yPoints);
+        if (idx >= 0)
+            _series[idx] = entry;
+        else
+            _series.Add(entry);
+
         ClampOffset();
         QueueRedraw();
     }
@@ -204,7 +234,7 @@ public partial class LineChartPanel : Control
 
     private void PanLeft()
     {
-        var step = Math.Max(1, _viewWindow / 10);
+        var step = Math.Max(1f, _viewWindow / 10f);
         _viewOffset += step;
         ClampOffset();
         QueueRedraw();
@@ -212,30 +242,36 @@ public partial class LineChartPanel : Control
 
     private void PanRight()
     {
-        var step = Math.Max(1, _viewWindow / 10);
+        var step = Math.Max(1f, _viewWindow / 10f);
         _viewOffset = Math.Max(0, _viewOffset - step);
         QueueRedraw();
     }
 
     private void ZoomIn()
     {
-        _viewWindow = Math.Max(MinWindow, (int)(_viewWindow * 0.8f));
+        _viewWindow = Math.Max(MinWindow, _viewWindow * 0.8f);
         ClampOffset();
         QueueRedraw();
     }
 
     private void ZoomOut()
     {
-        _viewWindow = (int)(_viewWindow * 1.25f);
+        _viewWindow *= 1.25f;
         ClampOffset();
         QueueRedraw();
     }
 
     private void ClampOffset()
     {
-        var maxPoints = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
-        var window = Math.Min(_viewWindow, maxPoints);
-        _viewOffset = Math.Max(0, Math.Min(_viewOffset, maxPoints - window));
+        var (minX, maxX) = GetGlobalXBounds();
+        if (maxX <= minX)
+        {
+            _viewOffset = 0f;
+            return;
+        }
+
+        var window = Math.Min(_viewWindow, maxX - minX);
+        _viewOffset = Math.Max(0f, Math.Min(_viewOffset, maxX - minX - window));
     }
 
     /// <summary>
@@ -249,21 +285,33 @@ public partial class LineChartPanel : Control
     /// </summary>
     public void ResetZoomToAnchor()
     {
-        _viewWindow = AnchorLength > 0 ? AnchorLength : DefaultWindow;
-        _viewOffset = 0;
+        _viewWindow = AnchorMaxX > 0f ? AnchorMaxX : DefaultWindow;
+        _viewOffset = 0f;
         ClampOffset();
         QueueRedraw();
     }
 
-    private (int globalStart, int globalEnd, int window) ComputeGlobalView()
+    private (float globalStart, float globalEnd, float window, float minX, float maxX) ComputeGlobalView()
     {
-        // Always use the true maximum so a longer compare series is reachable by zooming out.
-        var maxPoints = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
-        if (maxPoints == 0) return (0, 0, 0);
-        var window = Math.Min(_viewWindow, maxPoints);
-        var globalEnd = maxPoints - Math.Max(0, Math.Min(_viewOffset, maxPoints - window));
-        var globalStart = Math.Max(0, globalEnd - window);
-        return (globalStart, globalEnd, window);
+        var (minX, maxX) = GetGlobalXBounds();
+        if (maxX <= minX)
+            return (0f, 0f, 0f, minX, maxX);
+
+        var window = Math.Min(_viewWindow, maxX - minX);
+        var globalEnd = maxX - Math.Max(0f, Math.Min(_viewOffset, maxX - minX - window));
+        var globalStart = Math.Max(minX, globalEnd - window);
+        return (globalStart, globalEnd, window, minX, maxX);
+    }
+
+    private (float minX, float maxX) GetGlobalXBounds()
+    {
+        var nonEmpty = _series.Where(s => s.XPoints.Count > 0).ToList();
+        if (nonEmpty.Count == 0)
+            return (0f, 0f);
+
+        var minX = nonEmpty.Min(s => s.XPoints[0]);
+        var maxX = nonEmpty.Max(s => s.XPoints[^1]);
+        return (minX, maxX);
     }
 
     // ── Drawing ─────────────────────────────────────────────────────────────
@@ -315,13 +363,13 @@ public partial class LineChartPanel : Control
             DrawRect(plot, CPlotBg, filled: true);
 
             // ── Global view range (shared across all series for correct episode alignment) ──
-            var (globalStart, globalEnd, viewWindow) = ComputeGlobalView();
+            var (globalStart, globalEnd, viewWindow, minX, maxX) = ComputeGlobalView();
 
             float gMin = float.MaxValue, gMax = float.MinValue;
             foreach (var s in _series)
             {
                 if (s.Points.Count == 0) continue;
-                var (slice, _) = GetViewSlice(s.Points, globalStart, globalEnd);
+                var (_, slice) = GetViewSlice(s.XPoints, s.Points, globalStart, globalEnd);
                 if (slice.Count == 0) continue;
                 gMin = Math.Min(gMin, slice.Min());
                 gMax = Math.Max(gMax, slice.Max());
@@ -360,9 +408,10 @@ public partial class LineChartPanel : Control
             foreach (var s in _series)
             {
                 if (s.Points.Count < 2) continue;
-                var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
-                if (slice.Count < 2) continue;
-                var pts = BuildPoints(plot, Downsample(slice, MaxDrawPoints), gMin, range, startIdx, globalStart, viewWindow, slice.Count);
+                var (xSlice, ySlice) = GetViewSlice(s.XPoints, s.Points, globalStart, globalEnd);
+                if (ySlice.Count < 2) continue;
+                var (sampledX, sampledY) = DownsampleSeries(xSlice, ySlice, MaxDrawPoints);
+                var pts = BuildPoints(plot, sampledX, sampledY, gMin, range, globalStart, viewWindow);
                 DrawFill(plot, pts, s.LineColor, ShowSmoothed ? 0.08f : 0.20f);
                 var lineColor = new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha);
                 DrawPolyline(pts, lineColor, rawWidth, antialiased: true);
@@ -373,27 +422,27 @@ public partial class LineChartPanel : Control
                 foreach (var s in _series)
                 {
                     if (s.Points.Count < 12) continue;
-                    var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
-                    if (slice.Count < 12) continue;
-                    var smoothed = Ema(Downsample(slice, MaxDrawPoints), SmoothAlpha);
-                    var smPts = BuildPoints(plot, smoothed, gMin, range, startIdx, globalStart, viewWindow, slice.Count);
+                    var (xSlice, ySlice) = GetViewSlice(s.XPoints, s.Points, globalStart, globalEnd);
+                    if (ySlice.Count < 12) continue;
+                    var (sampledX, sampledY) = DownsampleSeries(xSlice, ySlice, MaxDrawPoints);
+                    var smoothed = Ema(sampledY, SmoothAlpha);
+                    var smPts = BuildPoints(plot, sampledX, smoothed, gMin, range, globalStart, viewWindow);
                     DrawPolyline(smPts, GetSmoothedColor(s.LineColor), smoothedWidth, antialiased: true);
                 }
             }
 
-            int totalPts = _series.Count > 0 ? _series.Max(s => s.Points.Count) : 0;
-            if (globalEnd > globalStart + 1)
+            if (globalEnd > globalStart)
             {
                 float labelY = plot.Position.Y + plot.Size.Y + bottomMargin - Ui(6f);
                 DrawString(font, new Vector2(plot.Position.X, labelY),
-                    (globalStart + 1).ToString(), HorizontalAlignment.Left, Ui(40), fs - 3, CAxisLabel);
+                    FormatXAxisLabel(globalStart), HorizontalAlignment.Left, Ui(52), fs - 3, CAxisLabel);
                 DrawString(font, new Vector2(plot.Position.X + plot.Size.X - axisHintWidth, labelY),
-                    globalEnd.ToString(), HorizontalAlignment.Left, axisHintWidth, fs - 3, CAxisLabel);
+                    FormatXAxisLabel(globalEnd), HorizontalAlignment.Left, axisHintWidth, fs - 3, CAxisLabel);
 
-                if (totalPts > _viewWindow || _viewOffset > 0)
+                if (maxX - minX > _viewWindow || _viewOffset > 0f)
                 {
-                    var hint = _viewOffset == 0
-                        ? $"[{_viewWindow} pts  Ctrl+scroll=zoom]"
+                    var hint = _viewOffset == 0f
+                        ? $"[{XAxisName} window  Ctrl+scroll=zoom]"
                         : $"[scroll to pan  Ctrl+scroll=zoom]";
                     DrawString(font, new Vector2(plot.Position.X + plot.Size.X * 0.5f - Ui(60f), labelY),
                         hint, HorizontalAlignment.Left, -1, fs - 4, new Color(0.38f, 0.38f, 0.38f));
@@ -425,30 +474,24 @@ public partial class LineChartPanel : Control
                     float tx = (mp.X - plot.Position.X) / plot.Size.X;
 
                     // Compute the global episode index under the cursor.
-                    int snapEpisode = globalStart + (int)Math.Round(tx * Math.Max(viewWindow - 1, 1));
-                    snapEpisode = Math.Clamp(snapEpisode, globalStart, globalEnd - 1);
-                    float snapX = plot.Position.X + (float)(snapEpisode - globalStart) / Math.Max(viewWindow - 1, 1) * plot.Size.X;
+                    float snapDomainX = globalStart + tx * Math.Max(viewWindow, 1f);
+                    snapDomainX = Math.Clamp(snapDomainX, globalStart, globalEnd);
+                    float snapX = plot.Position.X + (snapDomainX - globalStart) / Math.Max(viewWindow, 1f) * plot.Size.X;
 
                     var snapPoints = new List<(string Label, Color LineColor, float Val, float SnapY)>();
 
                     foreach (var s in _series)
                     {
                         if (s.Points.Count < 2) continue;
-                        var (slice, startIdx) = GetViewSlice(s.Points, globalStart, globalEnd);
-                        if (slice.Count < 2) continue;
+                        var (xSlice, ySlice) = GetViewSlice(s.XPoints, s.Points, globalStart, globalEnd);
+                        if (ySlice.Count < 2) continue;
 
-                        // Map global episode to an index within this series' slice.
-                        int sliceIdx = snapEpisode - startIdx;
-                        if (sliceIdx < 0 || sliceIdx >= slice.Count) continue;
+                        var (sampledX, sampledY) = DownsampleSeries(xSlice, ySlice, MaxDrawPoints);
+                        var display = ShowSmoothed && sampledY.Count >= 12 ? Ema(sampledY, SmoothAlpha) : sampledY;
+                        var pointIdx = FindNearestIndex(sampledX, snapDomainX);
+                        if (pointIdx < 0 || pointIdx >= display.Count) continue;
 
-                        var ds = Downsample(slice, MaxDrawPoints);
-                        var display = ShowSmoothed && ds.Count >= 12 ? Ema(ds, SmoothAlpha) : ds;
-
-                        int dsIdx = Math.Clamp(
-                            (int)Math.Round((float)sliceIdx / Math.Max(slice.Count - 1, 1) * (display.Count - 1)),
-                            0, display.Count - 1);
-
-                        float val = display[dsIdx];
+                        float val = display[pointIdx];
                         float ty = Math.Clamp((val - gMin) / range, 0f, 1f);
                         float sy = plot.Position.Y + plot.Size.Y * (1f - ty);
 
@@ -470,7 +513,7 @@ public partial class LineChartPanel : Control
 
                         var lines = new List<(string Text, Color Col)>
                         {
-                            ($"ep {snapEpisode + 1}", new Color(0.65f, 0.65f, 0.65f))
+                            ($"{XAxisName} {FormatXAxisTooltipValue(snapDomainX)}", new Color(0.65f, 0.65f, 0.65f))
                         };
                         foreach (var sp in snapPoints)
                             lines.Add(($"{sp.Label}: {FormatAxisValue(sp.Val)}", sp.LineColor));
@@ -510,13 +553,33 @@ public partial class LineChartPanel : Control
     /// Returns the slice of this series that falls within [globalStart, globalEnd),
     /// preserving episode-index alignment across series of different lengths.
     /// </summary>
-    private static (List<float> slice, int startIdx) GetViewSlice(List<float> points, int globalStart, int globalEnd)
+    private static (List<float> xSlice, List<float> ySlice) GetViewSlice(
+        List<float> xPoints,
+        List<float> points,
+        float globalStart,
+        float globalEnd)
     {
-        if (points.Count == 0) return (new List<float>(), 0);
-        var start = Math.Min(globalStart, points.Count);
-        var end   = Math.Min(globalEnd,   points.Count);
-        if (end <= start) return (new List<float>(), start);
-        return (points.GetRange(start, end - start), start);
+        if (points.Count == 0 || xPoints.Count == 0)
+            return (new List<float>(), new List<float>());
+
+        var start = 0;
+        while (start < xPoints.Count && xPoints[start] < globalStart)
+            start++;
+        if (start > 0)
+            start--;
+
+        var end = start;
+        while (end < xPoints.Count && xPoints[end] <= globalEnd)
+            end++;
+        if (end < xPoints.Count)
+            end++;
+
+        if (end <= start)
+            return (new List<float>(), new List<float>());
+
+        return (
+            xPoints.GetRange(start, end - start),
+            points.GetRange(start, end - start));
     }
 
     /// <summary>
@@ -524,17 +587,20 @@ public partial class LineChartPanel : Control
     /// gives the true episode span the data covers. seriesStart/globalStart/viewWindow place
     /// that span correctly in the shared x-axis window.
     /// </summary>
-    private static Vector2[] BuildPoints(Rect2 area, List<float> data, float min, float range,
-        int seriesStart, int globalStart, int viewWindow, int originalSliceCount)
+    private static Vector2[] BuildPoints(
+        Rect2 area,
+        List<float> xPoints,
+        List<float> data,
+        float min,
+        float range,
+        float globalStart,
+        float viewWindow)
     {
         var pts = new Vector2[data.Count];
-        float denom = Math.Max(viewWindow - 1, 1);
+        float denom = Math.Max(viewWindow, 1f);
         for (int i = 0; i < data.Count; i++)
         {
-            // Map downsampled index back to episode offset within the original slice.
-            float episodeOffset = data.Count <= 1 ? 0f
-                : (float)i / (data.Count - 1) * (originalSliceCount - 1);
-            float tx = (seriesStart - globalStart + episodeOffset) / denom;
+            float tx = (xPoints[i] - globalStart) / denom;
             float ty = Math.Clamp((data[i] - min) / range, 0f, 1f);
             pts[i] = new Vector2(
                 area.Position.X + tx * area.Size.X,
@@ -586,14 +652,48 @@ public partial class LineChartPanel : Control
         return result;
     }
 
-    private static List<float> Downsample(List<float> data, int max)
+    private static (List<float> xPoints, List<float> yPoints) DownsampleSeries(List<float> xPoints, List<float> data, int max)
     {
-        if (data.Count <= max) return data;
-        var result = new List<float>(max);
+        if (data.Count <= max) return (xPoints, data);
+        var sampledX = new List<float>(max);
+        var sampledY = new List<float>(max);
         float step = (float)(data.Count - 1) / (max - 1);
         for (int i = 0; i < max; i++)
-            result.Add(data[(int)Math.Round(i * step)]);
-        return result;
+        {
+            var sourceIndex = (int)Math.Round(i * step);
+            sampledX.Add(xPoints[sourceIndex]);
+            sampledY.Add(data[sourceIndex]);
+        }
+
+        return (sampledX, sampledY);
+    }
+
+    private static int FindNearestIndex(List<float> xPoints, float target)
+    {
+        if (xPoints.Count == 0)
+            return -1;
+
+        var low = 0;
+        var high = xPoints.Count - 1;
+        while (low <= high)
+        {
+            var mid = (low + high) / 2;
+            if (xPoints[mid] < target)
+                low = mid + 1;
+            else if (xPoints[mid] > target)
+                high = mid - 1;
+            else
+                return mid;
+        }
+
+        if (low <= 0)
+            return 0;
+        if (low >= xPoints.Count)
+            return xPoints.Count - 1;
+
+        return Math.Abs(xPoints[low] - target) < Math.Abs(xPoints[low - 1] - target)
+            ? low
+            : low - 1;
     }
 
     private static string FormatAxisValue(float v)
@@ -604,4 +704,21 @@ public partial class LineChartPanel : Control
         if (abs >= 1f)     return v.ToString("F2");
         return v.ToString("F3");
     }
+
+    private string FormatXAxisLabel(float value)
+    {
+        var rounded = (long)Math.Round(value);
+        if (!CompactXAxisLabels)
+            return rounded.ToString("N0");
+
+        var abs = Math.Abs(rounded);
+        if (abs >= 1_000_000)
+            return $"{rounded / 1_000_000.0:F1}M";
+        if (abs >= 1_000)
+            return $"{rounded / 1_000.0:F1}K";
+        return rounded.ToString("N0");
+    }
+
+    private static string FormatXAxisTooltipValue(float value)
+        => ((long)Math.Round(value)).ToString("N0");
 }

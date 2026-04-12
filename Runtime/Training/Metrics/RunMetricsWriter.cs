@@ -18,8 +18,16 @@ public sealed class RunMetricsWriter
     public RunMetricsWriter(TrainingLaunchManifest manifest)
         : this(manifest.MetricsPath, manifest.StatusPath) { }
 
-    public void WriteStatus(string status, string scenePath, long totalSteps, long episodeCount, string message,
-        long workerEpisodeCount = 0, string resumedFrom = "")
+    public void WriteStatus(
+        string status,
+        string scenePath,
+        long totalSteps,
+        long episodeCount,
+        string message,
+        long workerEpisodeCount = 0,
+        string resumedFrom = "",
+        bool warmStartUsed = false,
+        string warmStartSource = "")
     {
         EnsureFileDirectory(_statusPath);
         using var file = FileAccess.Open(_statusPath, FileAccess.ModeFlags.Write);
@@ -41,6 +49,9 @@ public sealed class RunMetricsWriter
             payload["worker_episode_count"] = workerEpisodeCount;
         if (!string.IsNullOrEmpty(resumedFrom))
             payload["resumed_from"] = resumedFrom;
+        payload["warm_start_used"] = warmStartUsed;
+        if (!string.IsNullOrWhiteSpace(warmStartSource))
+            payload["warm_start_source"] = warmStartSource;
 
         file.StoreString(Json.Stringify(payload));
     }

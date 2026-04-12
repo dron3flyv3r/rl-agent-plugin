@@ -1,16 +1,45 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Reflection;
+using System.Threading;
+using System.Threading.Tasks;
 using Godot;
 using RlAgentPlugin.Editor;
 using RlAgentPlugin.Runtime;
+using RlAgentPlugin.Runtime.Imitation;
 
 namespace RlAgentPlugin;
 
 [Tool]
 public partial class RLAgentPluginEditor : EditorPlugin
 {
+    private enum AutoDaggerPhase
+    {
+        InitialBC,
+        DAgger,
+        RetrainBC,
+    }
+
+    private sealed class AutoDaggerLoopState
+    {
+        public string ScenePath { get; init; } = string.Empty;
+        public string AgentGroupId { get; init; } = string.Empty;
+        public string NetworkGraphPath { get; init; } = string.Empty;
+        public string OutputNameBase { get; init; } = "dagger";
+        public int AdditionalFrames { get; init; }
+        public int TotalRounds { get; init; }
+        public int Epochs { get; init; }
+        public float LearningRate { get; init; }
+        public float MixingBeta { get; init; } = 0.5f;
+        public int CurrentRound { get; set; }
+        public string CurrentDatasetPath { get; set; } = string.Empty;
+        public string CurrentCheckpointPath { get; set; } = string.Empty;
+        public AutoDaggerPhase Phase { get; set; }
+        public bool CancelRequested { get; set; }
+    }
+
     private const string AgentScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent2D.cs";
     private const string Agent3DScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent3D.cs";
     private const string AcademyScriptPath = "res://addons/rl-agent-plugin/Runtime/Core/RLAcademy.cs";
@@ -41,8 +70,10 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     private RLModelFormatLoader? _rlModelFormatLoader;
     private EditorDock? _setupEditorDock;
+    private EditorDock? _imitationEditorDock;
     private RLSetupDock? _setupDock;
     private RLDashboard? _dashboard;
+    private RLImitationDock? _imitationDock;
     private Button? _startTrainingButton;
     private Button? _stopTrainingButton;
     private Button? _runInferenceButton;
@@ -51,9 +82,35 @@ public partial class RLAgentPluginEditor : EditorPlugin
     private TrainingSceneValidation? _lastValidation;
     private bool _launchedTrainingRun;
     private bool _launchedQuickTestRun;
+    private bool _launchedRecordingRun;
+    private bool _launchedDaggerRun;
+    private bool _recordingGameStarted; // true once isPlaying was observed for this recording session
+    private bool _daggerGameStarted;
     private string _activeStatusPath = string.Empty;
+    private string _activeRecordingOutputPath = string.Empty;
+    private string _activeDaggerOutputPath = string.Empty;
+    private float _activeRecordingTimeScale = 1.0f;
+    private bool _recordingPaused;
+    private bool _recordingCapRead;
+    private bool _stepModeEnabled;
+    private int _stepCount;
+    private int _pendingStepAction;
     private string _lastAutoScenePath = string.Empty;
     private string _lastValidationSignature = string.Empty;
+    private CancellationTokenSource? _bcTrainingCts;
+    private Task? _bcTrainingTask;
+    // Thread-safe handoff: background thread writes, main thread reads in SavePendingBCCheckpoint.
+    private RLCheckpoint? _pendingBCCheckpoint;
+    private string _pendingBCOutPath = string.Empty;
+    // Final training stats — updated each progress tick, read when saving the checkpoint.
+    private int _bcFinalEpoch;
+    private float _bcFinalLoss;
+    private int _bcTotalEpochs;
+    private string _lastSavedBCCheckpointPath = string.Empty;
+    private AutoDaggerLoopState? _autoDaggerLoop;
+    // Reset to false on every C# assembly reload, ensuring signals are reconnected exactly once
+    // per session without stale-callable disconnect attempts (which Godot can't resolve).
+    private bool _imitationDockSignalsConnected;
 
     public override void _EnterTree()
     {
@@ -100,10 +157,25 @@ public partial class RLAgentPluginEditor : EditorPlugin
         _networkGraphInspectorPlugin = new RLNetworkGraphInspectorPlugin();
         AddInspectorPlugin(_networkGraphInspectorPlugin);
 
+        _imitationDock = new RLImitationDock();
+        ConnectImitationDockSignals(_imitationDock);
+        _imitationEditorDock = new EditorDock
+        {
+            Title = "RL Imitation",
+            DefaultSlot = EditorDock.DockSlot.Bottom,
+        };
+        _imitationEditorDock.AddChild(_imitationDock);
+        AddDock(_imitationEditorDock);
+        CallDeferred(nameof(RefreshImitationDatasets));
+
+        // Reset sentinel so first _Process frame always triggers a scene refresh.
+        _lastAutoScenePath = "\x00";
+
         RegisterCustomTypes();
         CallDeferred(nameof(EnsureProjectScriptClassesAreFresh));
         SetProcess(true);
-        RefreshValidationFromActiveScene();
+        // _lastAutoScenePath is set to a sentinel ("\x00") above, so _Process will
+        // detect the mismatch on its first frame and call RefreshValidationFromActiveScene().
     }
 
     public override void _ExitTree()
@@ -212,6 +284,18 @@ public partial class RLAgentPluginEditor : EditorPlugin
             _dashboard.QueueFree();
             _dashboard = null;
         }
+
+        if (_imitationEditorDock is not null)
+        {
+            RemoveDock(_imitationEditorDock);
+            _imitationEditorDock.QueueFree();
+            _imitationEditorDock = null;
+            _imitationDock = null;
+        }
+
+        _bcTrainingCts?.Cancel();
+        _bcTrainingCts = null;
+        _bcTrainingTask = null;
     }
 
     public override bool _HasMainScreen() => true;
@@ -241,6 +325,83 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         var isPlaying = EditorInterface.Singleton.IsPlayingScene();
         var currentScenePath = ResolveTrainingScenePath();
+
+        if (isPlaying && _launchedRecordingRun)
+        {
+            // Mark that the game has actually started for this recording session.
+            _recordingGameStarted = true;
+
+            // Poll capabilities file once (written by RecordingBootstrap at startup).
+            if (!_recordingCapRead && !string.IsNullOrWhiteSpace(_activeRecordingOutputPath))
+            {
+                var capPath = _activeRecordingOutputPath + ".cap";
+                if (System.IO.File.Exists(capPath))
+                {
+                    _recordingCapRead = true;
+                    ReadRecordingCapabilities(capPath);
+                }
+            }
+
+            // Poll status file for live recording stats.
+            if (!string.IsNullOrWhiteSpace(_activeRecordingOutputPath))
+            {
+                var statusPath = _activeRecordingOutputPath + ".status";
+                if (System.IO.File.Exists(statusPath))
+                {
+                    try
+                    {
+                        var text = System.IO.File.ReadAllText(statusPath);
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            var parsed = Json.ParseString(text);
+                            if (parsed.VariantType == Variant.Type.Dictionary)
+                            {
+                                var d = parsed.AsGodotDictionary();
+                                var frames = d.ContainsKey("Frames") ? d["Frames"].AsInt64() : 0L;
+                                var episodes = d.ContainsKey("Episodes") ? d["Episodes"].AsInt32() : 0;
+                                var episodeSteps = d.ContainsKey("EpisodeSteps") ? d["EpisodeSteps"].AsInt32() : 0;
+                                var episodeReward = d.ContainsKey("EpisodeReward") ? (float)d["EpisodeReward"].AsDouble() : 0f;
+                                var paused = d.ContainsKey("Paused") && d["Paused"].AsBool();
+                                _imitationDock?.SetRecordingStats(frames, episodes, episodeSteps, episodeReward, paused);
+                            }
+                        }
+                    }
+                    catch { /* file may be partially written */ }
+                }
+            }
+        }
+
+        if (isPlaying && _launchedDaggerRun)
+        {
+            _daggerGameStarted = true;
+
+            if (!string.IsNullOrWhiteSpace(_activeDaggerOutputPath))
+            {
+                var statusPath = _activeDaggerOutputPath + ".status";
+                if (System.IO.File.Exists(statusPath))
+                {
+                    try
+                    {
+                        var text = System.IO.File.ReadAllText(statusPath);
+                        if (!string.IsNullOrWhiteSpace(text))
+                        {
+                            var parsed = Json.ParseString(text);
+                            if (parsed.VariantType == Variant.Type.Dictionary)
+                            {
+                                var d = parsed.AsGodotDictionary();
+                                var addedFrames = d.ContainsKey("AddedFrames") ? d["AddedFrames"].AsInt32() : 0;
+                                var targetFrames = d.ContainsKey("TargetFrames") ? d["TargetFrames"].AsInt32() : 0;
+                                var episodes = d.ContainsKey("Episodes") ? d["Episodes"].AsInt32() : 0;
+                                var progress = targetFrames > 0 ? Mathf.Clamp((float)addedFrames / targetFrames, 0f, 1f) : 0f;
+                                _imitationDock?.SetDaggerProgress(progress, addedFrames, targetFrames, episodes);
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+        }
+
         if (!isPlaying)
         {
             if (_launchedQuickTestRun)
@@ -251,6 +412,84 @@ public partial class RLAgentPluginEditor : EditorPlugin
             }
 
             _launchedTrainingRun = false;
+
+            // Only conclude a recording session after the game has actually started and then stopped.
+            // Without this guard, _launchedRecordingRun would be reset in the frames before
+            // IsPlayingScene() returns true (PlayCustomScene is asynchronous), which would prevent
+            // the .cap file from ever being polled.
+            if (_launchedRecordingRun && _recordingGameStarted)
+            {
+                _launchedRecordingRun = false;
+                _recordingGameStarted = false;
+                var doneMarker = _activeRecordingOutputPath + ".done";
+                if (System.IO.File.Exists(doneMarker))
+                {
+                    _imitationDock?.SetRecordingStatus("Recording saved.", false);
+                    RefreshImitationDatasets();
+                }
+                else
+                {
+                    _imitationDock?.SetRecordingStatus("Recording stopped (no output produced).", false);
+                }
+
+                _activeRecordingOutputPath = string.Empty;
+                _activeRecordingTimeScale = 1.0f;
+                _recordingPaused = false;
+                _recordingCapRead = false;
+                _stepModeEnabled = false;
+                _stepCount = 0;
+            }
+
+            if (_launchedDaggerRun && _daggerGameStarted)
+            {
+                _launchedDaggerRun = false;
+                _daggerGameStarted = false;
+                var doneMarker = _activeDaggerOutputPath + ".done";
+                if (System.IO.File.Exists(doneMarker))
+                {
+                    try
+                    {
+                        var statusPath = _activeDaggerOutputPath + ".status";
+                        int seedFrames = 0;
+                        int addedFrames = 0;
+                        if (System.IO.File.Exists(statusPath))
+                        {
+                            var text = System.IO.File.ReadAllText(statusPath);
+                            if (!string.IsNullOrWhiteSpace(text))
+                            {
+                                var parsed = Json.ParseString(text);
+                                if (parsed.VariantType == Variant.Type.Dictionary)
+                                {
+                                    var d = parsed.AsGodotDictionary();
+                                    seedFrames = d.ContainsKey("SeedFrames") ? d["SeedFrames"].AsInt32() : 0;
+                                    addedFrames = d.ContainsKey("AddedFrames") ? d["AddedFrames"].AsInt32() : 0;
+                                }
+                            }
+                        }
+
+                        var resPath = "res://RL-Agent-Demos/" + System.IO.Path.GetFileName(_activeDaggerOutputPath);
+                        _imitationDock?.SetDaggerStatus("DAgger round saved.", false);
+                        _imitationDock?.SetDaggerSummary(resPath, seedFrames, addedFrames);
+                        RefreshImitationDatasets();
+                        if (_autoDaggerLoop is not null)
+                            OnAutoDaggerRoundCompleted(resPath);
+                    }
+                    catch (Exception ex)
+                    {
+                        _imitationDock?.SetDaggerStatus($"DAgger finished, but status could not be read ({ex.Message}).", false);
+                        if (_autoDaggerLoop is not null)
+                            FinalizeAutoDaggerLoop($"Auto DAgger failed while reading round status ({ex.Message}).", false);
+                    }
+                }
+                else
+                {
+                    _imitationDock?.SetDaggerStatus("DAgger stopped (no output produced).", false);
+                    if (_autoDaggerLoop is not null)
+                        FinalizeAutoDaggerLoop("Auto DAgger stopped before producing a dataset.", false);
+                }
+
+                _activeDaggerOutputPath = string.Empty;
+            }
         }
 
         var hasScenePath = !string.IsNullOrWhiteSpace(currentScenePath);
@@ -311,9 +550,39 @@ public partial class RLAgentPluginEditor : EditorPlugin
             return;
         }
 
+        // After a C# assembly reload, Godot re-runs the RLImitationDock constructor (clearing
+        // its UI) but does NOT call _ExitTree/_EnterTree on the plugin, so _lastAutoScenePath
+        // still matches and the normal path-change check never fires.
+        // The dock sets native metadata to signal it was rebuilt. The plugin's _imitationDock
+        // reference is a stale C# wrapper (null UI fields), so we must re-fetch it via the
+        // native node tree before refreshing.
+        if (_imitationDock?.HasMeta("_rl_needs_scene_refresh") == true &&
+            EditorInterface.Singleton.GetEditedSceneRoot() is not null)
+        {
+            // Re-fetch the live C# wrapper from the native tree.
+            if (_imitationEditorDock?.GetChildCount() > 0 &&
+                _imitationEditorDock.GetChild(0) is RLImitationDock freshDock)
+            {
+                _imitationDock = freshDock;
+                // Stale Callables from the old assembly are now null — reconnect with fresh delegates.
+                ConnectImitationDockSignals(freshDock);
+            }
+            RefreshImitationSceneInfo();
+            RefreshImitationDatasets();
+        }
+
         // Auto-refresh validation when the edited scene changes.
+        // After a C# assembly reload, GetEditedSceneRoot() returns null for several frames
+        // even though a scene is open. Don't commit the path change until the root is
+        // actually available — otherwise we'd show "no scene open" and never re-trigger.
         if (currentScenePath != _lastAutoScenePath)
         {
+            var editedRootNow = EditorInterface.Singleton.GetEditedSceneRoot();
+            if (editedRootNow is null)
+            {
+                // Scene root not settled yet — keep the sentinel, retry next frame.
+                return;
+            }
             ResetWizardReviewState(currentScenePath);
             _lastAutoScenePath = currentScenePath;
             RefreshValidationFromActiveScene();
@@ -433,6 +702,19 @@ public partial class RLAgentPluginEditor : EditorPlugin
         RemoveCustomType(nameof(RLGruLayerDef));
     }
 
+    /// <summary>
+    /// Called deferred after _EnterTree. Retries every frame until GetEditedSceneRoot()
+    /// returns a valid root, then fires a full scene refresh. Handles the case where
+    /// the scene root is unavailable for several frames after a C# assembly reload.
+    /// </summary>
+    private void TryRefreshSceneInfoDeferred()
+    {
+        if (!IsInsideTree()) return;
+        // _Process handles the first-frame refresh via the sentinel in _lastAutoScenePath.
+        // Just call refresh once — do not loop; looping fills the message queue.
+        RefreshValidationFromActiveScene();
+    }
+
     private void RefreshValidationFromActiveScene()
     {
         if (_setupDock is null)
@@ -450,6 +732,10 @@ public partial class RLAgentPluginEditor : EditorPlugin
             _setupDock.SetValidationSummary("No active scene. Open a scene or set a main scene in Project Settings.");
             _setupDock.SetConfigSummary(string.Empty, string.Empty, string.Empty);
             UpdateWizardUi(null);
+            _imitationDock?.SetSceneInfo(string.Empty,
+                Array.Empty<string>(), Array.Empty<string>(),
+                Array.Empty<string>(), Array.Empty<string>(),
+                Array.Empty<bool>(), Array.Empty<bool>());
             return;
         }
 
@@ -457,6 +743,252 @@ public partial class RLAgentPluginEditor : EditorPlugin
         var validation = ValidateSceneSafely(scenePath, "auto validation");
         _lastValidationSignature = BuildValidationSignature(EditorInterface.Singleton.GetEditedSceneRoot());
         UpdateValidationUi(validation);
+
+        RefreshImitationSceneInfo();
+    }
+
+    private void RefreshImitationSceneInfo()
+    {
+        if (_imitationDock is null) { return; }
+
+        var editedRoot = EditorInterface.Singleton.GetEditedSceneRoot();
+        if (editedRoot is null)
+        {
+            _imitationDock.SetSceneInfo(string.Empty,
+                Array.Empty<string>(), Array.Empty<string>(),
+                Array.Empty<string>(), Array.Empty<string>(),
+                Array.Empty<bool>(), Array.Empty<bool>());
+            return;
+        }
+
+        // Collect one entry per unique AgentId found in the scene.
+        var seen = new System.Collections.Generic.HashSet<string>();
+        var displayNames = new System.Collections.Generic.List<string>();
+        var groupIds = new System.Collections.Generic.List<string>();
+        var networkPaths = new System.Collections.Generic.List<string>();
+        var inferencePaths = new System.Collections.Generic.List<string>();
+        var humanSupports = new System.Collections.Generic.List<bool>();
+        var scriptSupports = new System.Collections.Generic.List<bool>();
+
+        CollectAgentEntries(editedRoot, seen, displayNames, groupIds, networkPaths, inferencePaths, humanSupports, scriptSupports);
+
+        _imitationDock.SetSceneInfo(editedRoot.SceneFilePath,
+            displayNames.ToArray(), groupIds.ToArray(),
+            networkPaths.ToArray(), inferencePaths.ToArray(),
+            humanSupports.ToArray(), scriptSupports.ToArray());
+    }
+
+    private static void CollectAgentEntries(
+        Node node,
+        System.Collections.Generic.HashSet<string> seen,
+        System.Collections.Generic.List<string> displayNames,
+        System.Collections.Generic.List<string> groupIds,
+        System.Collections.Generic.List<string> networkPaths,
+        System.Collections.Generic.List<string> inferencePaths,
+        System.Collections.Generic.List<bool> humanSupports,
+        System.Collections.Generic.List<bool> scriptSupports)
+    {
+        if (IsAgentNode(node))
+        {
+            // Read PolicyGroupConfig — direct cast first, Godot property API fallback
+            // (user game scripts are not [Tool] so the C# cast may fail in editor context).
+            RLPolicyGroupConfig? config = null;
+            if (node is Runtime.IRLAgent directAgent)
+            {
+                config = directAgent.PolicyGroupConfig;
+            }
+            else
+            {
+                var variant = node.Get("PolicyGroupConfig");
+                if (variant.VariantType == Variant.Type.Object)
+                    config = variant.AsGodotObject() as RLPolicyGroupConfig;
+            }
+
+            var groupId = config?.AgentId ?? string.Empty;
+            var key = string.IsNullOrWhiteSpace(groupId) ? node.Name.ToString() : groupId;
+            var displayName = string.IsNullOrWhiteSpace(groupId) ? node.Name.ToString() : groupId;
+            var supportsHuman = SupportsHumanRecording(node);
+            var supportsScript = SupportsScriptRecording(node);
+
+            if (seen.Add(key))
+            {
+                displayNames.Add(displayName);
+                groupIds.Add(groupId);
+                networkPaths.Add(config?.NetworkGraph?.ResourcePath ?? string.Empty);
+                inferencePaths.Add(config?.InferenceModelPath ?? string.Empty);
+                humanSupports.Add(supportsHuman);
+                scriptSupports.Add(supportsScript);
+            }
+            else
+            {
+                var existingIndex = displayNames.FindIndex(name => string.Equals(name, displayName, StringComparison.Ordinal));
+                if (existingIndex >= 0)
+                {
+                    humanSupports[existingIndex] &= supportsHuman;
+                    scriptSupports[existingIndex] &= supportsScript;
+                }
+            }
+        }
+
+        foreach (var child in node.GetChildren())
+        {
+            if (child is Node childNode)
+                CollectAgentEntries(childNode, seen, displayNames, groupIds, networkPaths, inferencePaths, humanSupports, scriptSupports);
+        }
+    }
+
+    private static bool SupportsHumanRecording(Node node)
+    {
+        return HasImplementedControlMethod(node, "OnHumanInput")
+            || HasExternalHumanRecordingController(node);
+    }
+
+    private static bool SupportsScriptRecording(Node node)
+        => HasImplementedControlMethod(node, "OnScriptedInput");
+
+    private static bool HasImplementedControlMethod(Node node, string methodName)
+    {
+        var managedType = ResolveManagedScriptType(node);
+        if (managedType is null)
+        {
+            return false;
+        }
+
+        var method = managedType.GetMethod(methodName, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+        if (method is null)
+        {
+            return false;
+        }
+
+        var declaringType = method.DeclaringType;
+        if (declaringType is null || declaringType == typeof(RLAgent2D) || declaringType == typeof(RLAgent3D))
+        {
+            return false;
+        }
+
+        return MethodHasImplementationBody(method);
+    }
+
+    private static bool MethodHasImplementationBody(MethodInfo method)
+    {
+        var scriptPath = GetScriptPaths(method.DeclaringType!)
+            .FirstOrDefault(path => !string.IsNullOrWhiteSpace(path) && path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(scriptPath))
+        {
+            return true;
+        }
+
+        var absolutePath = ProjectSettings.GlobalizePath(scriptPath);
+        if (!System.IO.File.Exists(absolutePath))
+        {
+            return true;
+        }
+
+        string source;
+        try
+        {
+            source = System.IO.File.ReadAllText(absolutePath);
+        }
+        catch
+        {
+            return true;
+        }
+
+        var methodName = method.Name;
+        var nameIndex = source.IndexOf(methodName, StringComparison.Ordinal);
+        if (nameIndex < 0)
+        {
+            return true;
+        }
+
+        var arrowIndex = source.IndexOf("=>", nameIndex, StringComparison.Ordinal);
+        var braceIndex = source.IndexOf('{', nameIndex);
+        if (arrowIndex >= 0 && (braceIndex < 0 || arrowIndex < braceIndex))
+        {
+            var expressionEnd = source.IndexOf(';', arrowIndex);
+            if (expressionEnd < 0)
+            {
+                return true;
+            }
+
+            var expressionBody = source.Substring(arrowIndex + 2, expressionEnd - arrowIndex - 2);
+            return HasNonWhitespaceCode(expressionBody);
+        }
+
+        if (braceIndex < 0)
+        {
+            return true;
+        }
+
+        var depth = 0;
+        for (var i = braceIndex; i < source.Length; i++)
+        {
+            if (source[i] == '{')
+            {
+                depth++;
+            }
+            else if (source[i] == '}')
+            {
+                depth--;
+                if (depth == 0)
+                {
+                    var body = source.Substring(braceIndex + 1, i - braceIndex - 1);
+                    return HasNonWhitespaceCode(body);
+                }
+            }
+        }
+
+        return true;
+    }
+
+    private static bool HasExternalHumanRecordingController(Node node)
+    {
+        for (var current = node.GetParent(); current is not null; current = current.GetParent())
+        {
+            var script = GetNodeScript(current);
+            if (script is null || string.IsNullOrWhiteSpace(script.ResourcePath) ||
+                !script.ResourcePath.EndsWith(".cs", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var absolutePath = ProjectSettings.GlobalizePath(script.ResourcePath);
+            if (!System.IO.File.Exists(absolutePath))
+            {
+                continue;
+            }
+
+            try
+            {
+                var text = System.IO.File.ReadAllText(absolutePath);
+                if (text.Contains("RLAgentControlMode.Human", StringComparison.Ordinal)
+                    && text.Contains("ApplyAction(", StringComparison.Ordinal)
+                    && (text.Contains("PendingStepAction", StringComparison.Ordinal)
+                        || text.Contains("Input.IsActionPressed", StringComparison.Ordinal)
+                        || text.Contains("Input.GetAxis", StringComparison.Ordinal)))
+                {
+                    return true;
+                }
+            }
+            catch
+            {
+                // Ignore read errors and continue with the next ancestor script.
+            }
+        }
+
+        return false;
+    }
+
+    private static bool HasNonWhitespaceCode(string source)
+    {
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            return false;
+        }
+
+        source = System.Text.RegularExpressions.Regex.Replace(source, @"/\*.*?\*/", string.Empty, System.Text.RegularExpressions.RegexOptions.Singleline);
+        source = System.Text.RegularExpressions.Regex.Replace(source, @"//.*?$", string.Empty, System.Text.RegularExpressions.RegexOptions.Multiline);
+        return source.Any(character => !char.IsWhiteSpace(character));
     }
 
     private void OnStartTrainingRequested()
@@ -504,6 +1036,22 @@ public partial class RLAgentPluginEditor : EditorPlugin
         manifest.SimulationSpeed = validation.SimulationSpeed;
         manifest.ActionRepeat = validation.ActionRepeat;
         manifest.BatchSize = Math.Max(1, validation.BatchSize);
+
+        var imitationWarmStartEnabled = _imitationDock?.IsWarmStartEnabled() ?? false;
+        var imitationWarmStartPath = _imitationDock?.GetWarmStartCheckpointPath() ?? string.Empty;
+        if (imitationWarmStartEnabled)
+        {
+            if (string.IsNullOrWhiteSpace(imitationWarmStartPath))
+            {
+                _setupDock.SetLaunchStatus("Warm-start is enabled in RL Imitation, but no checkpoint path is selected.");
+                return;
+            }
+
+            manifest.OverrideResumeFromCheckpoint = true;
+            manifest.ResumeFromCheckpoint = true;
+            manifest.ResumeCheckpointPath = imitationWarmStartPath;
+            GD.Print($"[RL Training] Resume override from RL Imitation warm-start: {imitationWarmStartPath}");
+        }
 
         var writeError = manifest.SaveToUserStorage();
         if (writeError != Error.Ok)
@@ -696,6 +1244,8 @@ public partial class RLAgentPluginEditor : EditorPlugin
                 { "agent_names",   agentArr },
                 { "agent_groups",  groupArr },
                 { "has_curriculum", hasCurriculum },
+                { "warm_start_used", false },
+                { "warm_start_source", "" },
             };
 
             System.IO.File.WriteAllText(
@@ -729,6 +1279,730 @@ public partial class RLAgentPluginEditor : EditorPlugin
         _launchedQuickTestRun = false;
         _activeStatusPath = string.Empty;
         _setupDock?.SetLaunchStatus(stoppedQuickTest ? "Quick test stopped." : "Training run stopped.");
+    }
+
+    // ── Imitation Learning handlers ───────────────────────────────────────────
+
+    private void OnStartRecordingRequested(string scenePath, string agentGroupId, string outputName, bool scriptMode)
+    {
+        if (_imitationDock is null) return;
+
+        if (!Godot.FileAccess.FileExists(scenePath))
+        {
+            _imitationDock.SetRecordingStatus($"Scene not found: {scenePath}", false);
+            return;
+        }
+
+        if (EditorInterface.Singleton.IsPlayingScene())
+        {
+            _imitationDock.SetRecordingStatus("Stop the current play session before recording.", false);
+            return;
+        }
+
+        if (!TrySaveEditedSceneForLaunch(scenePath, "starting recording", out var saveError))
+        {
+            _imitationDock.SetRecordingStatus(saveError, false);
+            return;
+        }
+
+        // Ensure output directory exists.
+        var demosDir = ProjectSettings.GlobalizePath("res://RL-Agent-Demos");
+        System.IO.Directory.CreateDirectory(demosDir);
+
+        var safeName = string.Join("_", outputName.Split(System.IO.Path.GetInvalidFileNameChars()));
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = "demo";
+
+        var outputFileName = $"{safeName}_{BuildRunTimestampSuffix()}.rldem";
+        var outputAbsPath = System.IO.Path.Combine(demosDir, outputFileName);
+
+        var manifest = new RecordingLaunchManifest
+        {
+            ScenePath = scenePath,
+            AcademyNodePath = string.Empty, // RecordingBootstrap uses DFS fallback
+            OutputFilePath = outputAbsPath,
+            AgentGroupId = agentGroupId,
+            ScriptMode = scriptMode,
+        };
+
+        var writeError = manifest.SaveToUserStorage();
+        if (writeError != Error.Ok)
+        {
+            _imitationDock.SetRecordingStatus($"Failed to write manifest: {writeError}", false);
+            return;
+        }
+
+        _activeRecordingOutputPath = outputAbsPath;
+        _launchedRecordingRun = true;
+        _recordingGameStarted = false;
+
+        // Write an initial ctrl file so the bootstrap picks up pre-selected step mode
+        // (user may have toggled step mode before clicking Start Recording).
+        WriteRecordingControlFile();
+
+        _imitationDock.SetRecordingStatus($"Recording to {outputFileName}…", true);
+
+        EditorInterface.Singleton.PlayCustomScene(
+            "res://addons/rl-agent-plugin/Scenes/Bootstrap/RecordingBootstrap.tscn");
+    }
+
+    private void OnStopRecordingRequested()
+    {
+        if (!_launchedRecordingRun || string.IsNullOrEmpty(_activeRecordingOutputPath)) return;
+
+        // Write stop signal — RecordingBootstrap polls for this file.
+        var stopSignalPath = _activeRecordingOutputPath + ".stop";
+        try { System.IO.File.WriteAllText(stopSignalPath, "stop"); }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RLAgentPluginEditor] Could not write stop signal: {ex.Message}");
+        }
+
+        _imitationDock?.SetRecordingStatus("Stopping…", true);
+    }
+
+    private void OnSetRecordingSpeed(float timeScale)
+    {
+        _activeRecordingTimeScale = timeScale;
+        WriteRecordingControlFile();
+    }
+
+    private void OnPauseRecording(bool paused)
+    {
+        _recordingPaused = paused;
+        WriteRecordingControlFile();
+    }
+
+    private void OnSetStepMode(bool enabled)
+    {
+        _stepModeEnabled = enabled;
+        if (!enabled) _stepCount = 0;
+        WriteRecordingControlFile();
+    }
+
+    private void OnStepActionRequested(int actionIndex)
+    {
+        _pendingStepAction = actionIndex;
+        _stepCount++;
+        WriteRecordingControlFile();
+    }
+
+    private void ReadRecordingCapabilities(string capPath)
+    {
+        try
+        {
+            var text = System.IO.File.ReadAllText(capPath);
+            var parsed = Json.ParseString(text);
+            if (parsed.VariantType != Variant.Type.Dictionary) return;
+
+            var d = parsed.AsGodotDictionary();
+            var onlyDiscrete = d.ContainsKey("OnlyDiscrete") && d["OnlyDiscrete"].AsBool();
+            var scriptMode = d.ContainsKey("ScriptMode") && d["ScriptMode"].AsBool();
+
+            var labels = Array.Empty<string>();
+            if (d.ContainsKey("Labels") && d["Labels"].VariantType == Variant.Type.Array)
+            {
+                var arr = d["Labels"].AsGodotArray();
+                labels = new string[arr.Count];
+                for (var i = 0; i < arr.Count; i++)
+                    labels[i] = arr[i].AsString();
+            }
+
+            _imitationDock?.SetRecordingCapabilities(onlyDiscrete, labels, scriptMode);
+        }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RLAgentPluginEditor] Could not read capabilities file: {ex.Message}");
+        }
+    }
+
+    private void WriteRecordingControlFile()
+    {
+        if (string.IsNullOrWhiteSpace(_activeRecordingOutputPath)) return;
+        var ctrlPath = _activeRecordingOutputPath + ".ctrl";
+        try
+        {
+            System.IO.File.WriteAllText(ctrlPath, Json.Stringify(new Godot.Collections.Dictionary
+            {
+                { "TimeScale",      _activeRecordingTimeScale },
+                { "PauseRecording", _recordingPaused },
+                { "StepMode",       _stepModeEnabled },
+                { "StepCount",      _stepCount },
+                { "StepAction",     _pendingStepAction },
+            }));
+        }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RLAgentPluginEditor] Could not write control file: {ex.Message}");
+        }
+    }
+
+    private void OnStartBCTrainingRequested(
+        string datasetPath,
+        string checkpointPath,
+        string networkGraphPath,
+        int epochs,
+        float learningRate)
+        => StartBCTrainingInternal(datasetPath, networkGraphPath, epochs, learningRate);
+
+    private bool StartBCTrainingInternal(
+        string datasetPath,
+        string networkGraphPath,
+        int epochs,
+        float learningRate)
+    {
+        if (_imitationDock is null) return false;
+
+        if (string.IsNullOrWhiteSpace(datasetPath))
+        {
+            _imitationDock.SetTrainingStatus("No dataset selected.", false);
+            return false;
+        }
+
+        var dataset = DemonstrationDataset.Open(datasetPath);
+        if (dataset is null)
+        {
+            _imitationDock.SetTrainingStatus($"Failed to load dataset: {datasetPath}", false);
+            return false;
+        }
+
+        if (dataset.Frames.Count == 0)
+        {
+            _imitationDock.SetTrainingStatus("Dataset is empty — record some demonstrations first.", false);
+            return false;
+        }
+
+        // Build the network from the configured graph (required in both warm-start and fresh modes).
+        if (string.IsNullOrWhiteSpace(networkGraphPath))
+        {
+            _imitationDock.SetTrainingStatus("Select a network graph resource.", false);
+            return false;
+        }
+
+        var networkGraph = GD.Load<RLNetworkGraph>(networkGraphPath);
+        if (networkGraph is null)
+        {
+            _imitationDock.SetTrainingStatus($"Could not load network graph: {networkGraphPath}", false);
+            return false;
+        }
+
+        var network = new PolicyValueNetwork(
+            dataset.ObsSize,
+            dataset.DiscreteActionCount,
+            dataset.ContinuousActionDims,
+            networkGraph);
+
+        // Warm-start: load existing weights into the network before training.
+        _imitationDock.SetWarmStartSource(
+            _imitationDock.IsWarmStartEnabled() ? _imitationDock.GetWarmStartCheckpointPath() : string.Empty);
+        GD.Print("[RL Imitation] BC Train starts from scratch. Use RL Setup -> Start Training to fine-tune from the warm-start checkpoint.");
+
+        var config = new RLImitationConfig
+        {
+            Epochs = Math.Max(1, epochs),
+            LearningRate = Math.Max(1e-6f, learningRate),
+            BatchSize = 64,
+        };
+
+        // Prepare output path on the main thread (uses Godot ProjectSettings).
+        var trainedDir = ProjectSettings.GlobalizePath("res://RL-Agent-Demos/trained");
+        System.IO.Directory.CreateDirectory(trainedDir);
+        var outFileName = $"bc_{BuildRunTimestampSuffix()}.rlcheckpoint";
+        var outAbsPath = System.IO.Path.Combine(trainedDir, outFileName);
+
+        _bcTrainingCts?.Cancel();
+        _bcTrainingCts = new CancellationTokenSource();
+        var cts = _bcTrainingCts;
+
+        var trainer = new BCTrainer(network, dataset, config);
+        _imitationDock.SetTrainingStatus($"Training… (0/{epochs} epochs)", true);
+        _imitationDock.SetTrainingProgress(0f, 0f, 0, epochs);
+
+        _bcTrainingTask = Task.Run(() =>
+        {
+            trainer.Train(report =>
+            {
+                // CallDeferred on this Node is thread-safe in Godot 4.
+                CallDeferred(nameof(OnBCProgressDeferred),
+                    report.Progress, report.BatchLoss, report.Epoch, report.TotalEpochs);
+            }, cts.Token);
+
+            if (cts.Token.IsCancellationRequested)
+            {
+                CallDeferred(nameof(OnBCTrainingCancelledDeferred));
+                return;
+            }
+
+            // BuildCheckpoint is pure C# (no Godot API) — safe on background thread.
+            // SaveToZip uses Json.Stringify (Godot API) so we save on the main thread via deferred.
+            _pendingBCCheckpoint = trainer.BuildCheckpoint($"bc_{outFileName}");
+            _pendingBCOutPath = outAbsPath;
+            CallDeferred(nameof(SavePendingBCCheckpoint), outFileName);
+        });
+
+        return true;
+    }
+
+    private void OnBCProgressDeferred(float progress, float loss, int epoch, int totalEpochs)
+    {
+        _bcFinalEpoch = epoch;
+        _bcFinalLoss = loss;
+        _bcTotalEpochs = totalEpochs;
+        _imitationDock?.SetTrainingProgress(progress, loss, epoch, totalEpochs);
+    }
+
+    // Runs on main thread — safe to call Godot APIs.
+    private void SavePendingBCCheckpoint(string outFileName)
+    {
+        var checkpoint = _pendingBCCheckpoint;
+        var outAbsPath = _pendingBCOutPath;
+        _pendingBCCheckpoint = null;
+        _pendingBCOutPath = string.Empty;
+        _bcTrainingTask = null;
+        _bcTrainingCts = null;
+
+        if (checkpoint is null || _imitationDock is null) return;
+
+        var saveError = RLCheckpoint.SaveToZip(checkpoint, outAbsPath);
+
+        _imitationDock.SetTrainingProgress(1f, 0f, 0, 0);
+
+        if (saveError == Error.Ok)
+        {
+            _lastSavedBCCheckpointPath = outAbsPath;
+            _imitationDock.SetTrainingStatus("Training complete.", false);
+            _imitationDock.SetTrainingSummary(_bcFinalEpoch, _bcFinalLoss, outAbsPath);
+            if (_autoDaggerLoop is not null)
+                OnAutoDaggerBcCompleted(outAbsPath);
+        }
+        else
+        {
+            _imitationDock.SetTrainingStatus($"Training done but save failed ({saveError}).", false);
+            if (_autoDaggerLoop is not null)
+                FinalizeAutoDaggerLoop($"Auto DAgger failed while saving a BC checkpoint ({saveError}).", false);
+        }
+    }
+
+    private void OnBCTrainingCancelledDeferred()
+    {
+        _bcTrainingTask = null;
+        _bcTrainingCts = null;
+        _imitationDock?.SetTrainingStatus("Training cancelled.", false);
+        _imitationDock?.SetTrainingProgress(0f, 0f, 0, 0);
+
+        if (_autoDaggerLoop is not null)
+            FinalizeAutoDaggerLoop("Auto DAgger cancelled.", false);
+    }
+
+    private void OnCancelBCTrainingRequested()
+    {
+        if (_autoDaggerLoop is not null)
+            _autoDaggerLoop.CancelRequested = true;
+
+        _bcTrainingCts?.Cancel();
+
+        if (_launchedDaggerRun && !string.IsNullOrWhiteSpace(_activeDaggerOutputPath))
+        {
+            try
+            {
+                System.IO.File.WriteAllText(_activeDaggerOutputPath + ".stop", "stop");
+                _imitationDock?.SetDaggerStatus("Stopping DAgger…", true);
+            }
+            catch (Exception ex)
+            {
+                GD.PushWarning($"[RLAgentPluginEditor] Could not write DAgger stop signal: {ex.Message}");
+            }
+        }
+    }
+
+    // ── Imitation dock signal wiring ─────────────────────────────────────────
+    // Called at startup and after a C# assembly reload (Godot recreates dock
+    // C# wrappers but does NOT call _EnterTree/_ExitTree on the plugin).
+    //
+    // We intentionally do NOT try to disconnect stale connections first: after
+    // assembly reload the old Callables have null delegate handles and Godot
+    // cannot match them for disconnection, producing a flood of console errors.
+    // Instead, _imitationDockSignalsConnected (a plain C# field, so reset to
+    // false on every reload) ensures we connect exactly once per session.
+    // Any leftover stale connections are harmless — Godot prints "Continuing"
+    // and skips them; the fresh connection added here handles the signal.
+
+    private void ConnectImitationDockSignals(RLImitationDock dock)
+    {
+        if (_imitationDockSignalsConnected) return;
+        _imitationDockSignalsConnected = true;
+
+        dock.Connect(RLImitationDock.SignalName.StartRecordingRequested,
+            Callable.From<string, string, string, bool>(OnStartRecordingRequested));
+        dock.Connect(RLImitationDock.SignalName.StopRecordingRequested,
+            Callable.From(OnStopRecordingRequested));
+        dock.Connect(RLImitationDock.SignalName.StartBCTrainingRequested,
+            Callable.From<string, string, string, int, float>(OnStartBCTrainingRequested));
+        dock.Connect(RLImitationDock.SignalName.StartDAggerRequested,
+            Callable.From<string, string, string, string, string, string, int, float>(OnStartDAggerRequested));
+        dock.Connect(RLImitationDock.SignalName.StartAutoDAggerRequested,
+            Callable.From<string, string, string, string, string, string, string>(OnStartAutoDAggerRequested));
+        dock.Connect(RLImitationDock.SignalName.CancelBCTrainingRequested,
+            Callable.From(OnCancelBCTrainingRequested));
+        dock.Connect(RLImitationDock.SignalName.ExportModelRequested,
+            Callable.From<string, string>(OnExportModelRequested));
+        dock.Connect(RLImitationDock.SignalName.RefreshDatasetsRequested,
+            Callable.From(RefreshImitationDatasets));
+        dock.Connect(RLImitationDock.SignalName.SetRecordingSpeedRequested,
+            Callable.From<float>(OnSetRecordingSpeed));
+        dock.Connect(RLImitationDock.SignalName.PauseRecordingRequested,
+            Callable.From<bool>(OnPauseRecording));
+        dock.Connect(RLImitationDock.SignalName.SetStepModeRequested,
+            Callable.From<bool>(OnSetStepMode));
+        dock.Connect(RLImitationDock.SignalName.StepActionRequested,
+            Callable.From<int>(OnStepActionRequested));
+    }
+
+    private void OnExportModelRequested(string checkpointPath, string destPath)
+    {
+        if (_imitationDock is null) return;
+
+        if (string.IsNullOrWhiteSpace(checkpointPath) || !System.IO.File.Exists(checkpointPath))
+        {
+            _imitationDock.SetTrainingStatus($"Checkpoint not found: {checkpointPath}", false);
+            return;
+        }
+
+        var result = RLModelExporter.Export(checkpointPath, destPath);
+
+        if (result == Error.Ok)
+        {
+            var resPath = ProjectSettings.LocalizePath(destPath);
+            _imitationDock.SetTrainingStatus($"Exported: {resPath}", false);
+        }
+        else
+        {
+            _imitationDock.SetTrainingStatus("Export failed — see Godot output for details.", false);
+        }
+    }
+
+    private void OnStartAutoDAggerRequested(
+        string scenePath,
+        string agentGroupId,
+        string datasetPath,
+        string checkpointPath,
+        string networkGraphPath,
+        string outputName,
+        string configJson)
+    {
+        if (_imitationDock is null) return;
+
+        if (_autoDaggerLoop is not null || _bcTrainingTask is not null || _launchedDaggerRun)
+        {
+            _imitationDock.SetDaggerStatus("Another imitation task is already running.", false);
+            return;
+        }
+
+        if (!Godot.FileAccess.FileExists(scenePath))
+        {
+            _imitationDock.SetDaggerStatus($"Scene not found: {scenePath}", false);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(agentGroupId))
+        {
+            _imitationDock.SetDaggerStatus("Select a specific agent group for Auto DAgger.", false);
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(networkGraphPath))
+        {
+            _imitationDock.SetDaggerStatus("Select a network graph first.", false);
+            return;
+        }
+
+        var parsed = Json.ParseString(configJson);
+        if (parsed.VariantType != Variant.Type.Dictionary)
+        {
+            _imitationDock.SetDaggerStatus("Auto DAgger config was invalid.", false);
+            return;
+        }
+
+        var config = parsed.AsGodotDictionary();
+        var additionalFrames = config.ContainsKey("AdditionalFrames") ? config["AdditionalFrames"].AsInt32() : 2048;
+        var rounds = config.ContainsKey("Rounds") ? config["Rounds"].AsInt32() : 1;
+        var epochs = config.ContainsKey("Epochs") ? config["Epochs"].AsInt32() : 20;
+        var learningRate = config.ContainsKey("LearningRate") ? (float)config["LearningRate"].AsDouble() : 3e-4f;
+        var mixingBeta = config.ContainsKey("MixingBeta") ? (float)config["MixingBeta"].AsDouble() : 0.5f;
+
+        if (string.IsNullOrWhiteSpace(datasetPath) && string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            _imitationDock.SetDaggerStatus("Select a seed dataset or a learner checkpoint first.", false);
+            return;
+        }
+
+        _autoDaggerLoop = new AutoDaggerLoopState
+        {
+            ScenePath = scenePath,
+            AgentGroupId = agentGroupId,
+            CurrentDatasetPath = datasetPath,
+            CurrentCheckpointPath = checkpointPath?.Trim() ?? string.Empty,
+            NetworkGraphPath = networkGraphPath,
+            OutputNameBase = string.IsNullOrWhiteSpace(outputName) ? "dagger" : outputName.Trim(),
+            AdditionalFrames = Math.Max(1, additionalFrames),
+            TotalRounds = Math.Max(1, rounds),
+            Epochs = Math.Max(1, epochs),
+            LearningRate = Math.Max(1e-6f, learningRate),
+            MixingBeta = Math.Clamp(mixingBeta, 0f, 1f),
+            CurrentRound = 1,
+            Phase = string.IsNullOrWhiteSpace(checkpointPath) ? AutoDaggerPhase.InitialBC : AutoDaggerPhase.DAgger,
+        };
+
+        StartNextAutoDaggerPhase();
+    }
+
+    private void StartNextAutoDaggerPhase()
+    {
+        if (_autoDaggerLoop is null || _imitationDock is null)
+            return;
+
+        if (_autoDaggerLoop.CancelRequested)
+        {
+            FinalizeAutoDaggerLoop("Auto DAgger cancelled.", false);
+            return;
+        }
+
+        switch (_autoDaggerLoop.Phase)
+        {
+            case AutoDaggerPhase.InitialBC:
+                _imitationDock.SetTrainingStatus(
+                    $"Auto DAgger seed: training BC on {Path.GetFileName(_autoDaggerLoop.CurrentDatasetPath)}…",
+                    true);
+                if (!StartBCTrainingInternal(
+                        _autoDaggerLoop.CurrentDatasetPath,
+                        _autoDaggerLoop.NetworkGraphPath,
+                        _autoDaggerLoop.Epochs,
+                        _autoDaggerLoop.LearningRate))
+                {
+                    FinalizeAutoDaggerLoop("Auto DAgger could not start seed BC training.", false);
+                }
+                break;
+
+            case AutoDaggerPhase.DAgger:
+                _imitationDock.SetDaggerStatus(
+                    $"Auto DAgger round {_autoDaggerLoop.CurrentRound}/{_autoDaggerLoop.TotalRounds}: collecting expert labels…",
+                    true);
+                if (!StartDAggerInternal(
+                        _autoDaggerLoop.ScenePath,
+                        _autoDaggerLoop.AgentGroupId,
+                        _autoDaggerLoop.CurrentDatasetPath,
+                        _autoDaggerLoop.CurrentCheckpointPath,
+                        _autoDaggerLoop.NetworkGraphPath,
+                        $"{_autoDaggerLoop.OutputNameBase}_r{_autoDaggerLoop.CurrentRound}",
+                        _autoDaggerLoop.AdditionalFrames,
+                        _autoDaggerLoop.MixingBeta,
+                        _autoDaggerLoop.CurrentRound))
+                {
+                    FinalizeAutoDaggerLoop("Auto DAgger could not start the aggregation round.", false);
+                }
+                break;
+
+            case AutoDaggerPhase.RetrainBC:
+                _imitationDock.SetTrainingStatus(
+                    $"Auto DAgger round {_autoDaggerLoop.CurrentRound}/{_autoDaggerLoop.TotalRounds}: retraining BC…",
+                    true);
+                if (!StartBCTrainingInternal(
+                        _autoDaggerLoop.CurrentDatasetPath,
+                        _autoDaggerLoop.NetworkGraphPath,
+                        _autoDaggerLoop.Epochs,
+                        _autoDaggerLoop.LearningRate))
+                {
+                    FinalizeAutoDaggerLoop("Auto DAgger could not start BC retraining.", false);
+                }
+                break;
+        }
+    }
+
+    private void OnAutoDaggerBcCompleted(string checkpointPath)
+    {
+        if (_autoDaggerLoop is null)
+            return;
+
+        _autoDaggerLoop.CurrentCheckpointPath = checkpointPath;
+
+        if (_autoDaggerLoop.CancelRequested)
+        {
+            FinalizeAutoDaggerLoop("Auto DAgger cancelled.", false);
+            return;
+        }
+
+        if (_autoDaggerLoop.Phase == AutoDaggerPhase.InitialBC)
+        {
+            _autoDaggerLoop.Phase = AutoDaggerPhase.DAgger;
+            StartNextAutoDaggerPhase();
+            return;
+        }
+
+        if (_autoDaggerLoop.Phase != AutoDaggerPhase.RetrainBC)
+            return;
+
+        if (_autoDaggerLoop.CurrentRound >= _autoDaggerLoop.TotalRounds)
+        {
+            var finalDatasetPath = _autoDaggerLoop.CurrentDatasetPath;
+            var completedRounds = _autoDaggerLoop.CurrentRound;
+            FinalizeAutoDaggerLoop("Auto DAgger complete.", true);
+            _imitationDock?.SetAutoDaggerSummary(completedRounds, finalDatasetPath, checkpointPath);
+            return;
+        }
+
+        _autoDaggerLoop.CurrentRound++;
+        _autoDaggerLoop.Phase = AutoDaggerPhase.DAgger;
+        StartNextAutoDaggerPhase();
+    }
+
+    private void OnAutoDaggerRoundCompleted(string resDatasetPath)
+    {
+        if (_autoDaggerLoop is null)
+            return;
+
+        _autoDaggerLoop.CurrentDatasetPath = resDatasetPath;
+
+        if (_autoDaggerLoop.CancelRequested)
+        {
+            FinalizeAutoDaggerLoop("Auto DAgger cancelled.", false);
+            return;
+        }
+
+        _autoDaggerLoop.Phase = AutoDaggerPhase.RetrainBC;
+        StartNextAutoDaggerPhase();
+    }
+
+    private void FinalizeAutoDaggerLoop(string message, bool success)
+    {
+        if (_imitationDock is not null)
+        {
+            _imitationDock.SetTrainingStatus(message, false);
+            if (!success)
+                _imitationDock.SetDaggerStatus(message, false);
+        }
+
+        _autoDaggerLoop = null;
+    }
+
+    private void OnStartDAggerRequested(
+        string scenePath,
+        string agentGroupId,
+        string datasetPath,
+        string checkpointPath,
+        string networkGraphPath,
+        string outputName,
+        int additionalFrames,
+        float mixingBeta)
+        => StartDAggerInternal(scenePath, agentGroupId, datasetPath, checkpointPath, networkGraphPath, outputName, additionalFrames, mixingBeta, roundIndex: 1);
+
+    private bool StartDAggerInternal(
+        string scenePath,
+        string agentGroupId,
+        string datasetPath,
+        string checkpointPath,
+        string networkGraphPath,
+        string outputName,
+        int additionalFrames,
+        float mixingBeta = 0.5f,
+        int roundIndex = 1)
+    {
+        if (_imitationDock is null) return false;
+
+        if (!Godot.FileAccess.FileExists(scenePath))
+        {
+            _imitationDock.SetDaggerStatus($"Scene not found: {scenePath}", false);
+            return false;
+        }
+
+        if (EditorInterface.Singleton.IsPlayingScene())
+        {
+            _imitationDock.SetDaggerStatus("Stop the current play session before running DAgger.", false);
+            return false;
+        }
+
+        if (!TrySaveEditedSceneForLaunch(scenePath, "starting DAgger", out var saveError))
+        {
+            _imitationDock.SetDaggerStatus(saveError, false);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(agentGroupId))
+        {
+            _imitationDock.SetDaggerStatus("Select a specific agent group for DAgger.", false);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(checkpointPath))
+        {
+            _imitationDock.SetDaggerStatus("Select a learner checkpoint first.", false);
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(networkGraphPath))
+        {
+            _imitationDock.SetDaggerStatus("Select a network graph first.", false);
+            return false;
+        }
+
+        var demosDir = ProjectSettings.GlobalizePath("res://RL-Agent-Demos");
+        System.IO.Directory.CreateDirectory(demosDir);
+
+        var safeName = string.Join("_", outputName.Split(System.IO.Path.GetInvalidFileNameChars()));
+        if (string.IsNullOrWhiteSpace(safeName)) safeName = "dagger";
+        var outputFileName = $"{safeName}_{BuildRunTimestampSuffix()}.rldem";
+        var outputAbsPath = System.IO.Path.Combine(demosDir, outputFileName);
+
+        var manifest = new DAggerLaunchManifest
+        {
+            ScenePath = scenePath,
+            AcademyNodePath = string.Empty,
+            OutputFilePath = outputAbsPath,
+            AgentGroupId = agentGroupId,
+            SeedDatasetPath = datasetPath,
+            LearnerCheckpointPath = checkpointPath,
+            NetworkGraphPath = networkGraphPath,
+            AdditionalFrames = Math.Max(1, additionalFrames),
+            MixingBeta = Math.Clamp(mixingBeta, 0f, 1f),
+            RoundIndex = Math.Max(1, roundIndex),
+        };
+
+        var writeError = manifest.SaveToUserStorage();
+        if (writeError != Error.Ok)
+        {
+            _imitationDock.SetDaggerStatus($"Failed to write DAgger manifest: {writeError}", false);
+            return false;
+        }
+
+        _activeDaggerOutputPath = outputAbsPath;
+        _launchedDaggerRun = true;
+        _daggerGameStarted = false;
+        _imitationDock.SetDaggerStatus($"Running DAgger to {outputFileName}…", true);
+        _imitationDock.SetDaggerProgress(0f, 0, Math.Max(1, additionalFrames), 0);
+
+        EditorInterface.Singleton.PlayCustomScene(
+            "res://addons/rl-agent-plugin/Scenes/Bootstrap/DAggerBootstrap.tscn");
+
+        return true;
+    }
+
+    private void RefreshImitationDatasets()
+    {
+        if (_imitationDock is null) return;
+
+        var demosDir = ProjectSettings.GlobalizePath("res://RL-Agent-Demos");
+        if (!System.IO.Directory.Exists(demosDir))
+        {
+            _imitationDock.RefreshDatasetList(Array.Empty<string>());
+            return;
+        }
+
+        var files = System.IO.Directory.GetFiles(demosDir, "*.rldem", System.IO.SearchOption.TopDirectoryOnly);
+        // Sort newest first by last-write time.
+        Array.Sort(files, (a, b) => System.IO.File.GetLastWriteTimeUtc(b).CompareTo(System.IO.File.GetLastWriteTimeUtc(a)));
+        var resPaths = new string[files.Length];
+        for (var i = 0; i < files.Length; i++)
+            resPaths[i] = "res://RL-Agent-Demos/" + System.IO.Path.GetFileName(files[i]);
+
+        _imitationDock.RefreshDatasetList(resPaths);
     }
 
     private void MarkActiveRunStopped()

@@ -45,6 +45,9 @@ public partial class RLAgent3D : Node3D, IRLAgent
     /// </summary>
     public RecurrentState? RecurrentHiddenState { get; set; }
 
+    /// <inheritdoc cref="IRLAgent.PendingStepAction"/>
+    public int PendingStepAction { get; set; } = -1;
+
     /// <summary>Reward accumulated since the last ConsumePendingReward call.</summary>
     public float PendingReward => _pendingReward;
 
@@ -77,6 +80,13 @@ public partial class RLAgent3D : Node3D, IRLAgent
     /// <summary>Called each physics step when ControlMode is Human. Override to read player input.</summary>
     protected virtual void OnHumanInput() { }
     void IRLAgent.HandleHumanInput() => OnHumanInput();
+
+    /// <summary>
+    /// Called by RecordingBootstrap in Script mode each physics step.
+    /// Override to implement a heuristic / scripted policy (call ApplyAction inside).
+    /// </summary>
+    protected virtual void OnScriptedInput() { }
+    void IRLAgent.HandleScriptedInput() => OnScriptedInput();
 
     /// <summary>Accumulate reward for the current step.</summary>
     protected void AddReward(float reward) => _pendingReward += reward;

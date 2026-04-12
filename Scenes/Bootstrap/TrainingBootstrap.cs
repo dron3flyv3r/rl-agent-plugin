@@ -108,6 +108,8 @@ public partial class TrainingBootstrap : Node
     private string _resumeCheckpointPath = string.Empty;
     private float _resumedCurriculumProgress;
     private string _resumedFromFilename = string.Empty;  // filename of the checkpoint we resumed from (for status display)
+    private bool _warmStartUsed;
+    private string _warmStartSourcePath = string.Empty;
 
     // Distributed training
     private bool _isWorkerMode;
@@ -297,8 +299,12 @@ public partial class TrainingBootstrap : Node
         _historyKeepRecentCount  = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepRecentCount)  : 20;
         _historyKeepEveryNth     = runConfig is not null ? Math.Max(0,  runConfig.HistoryKeepEveryNth)     : 10;
         _compressCheckpoints     = runConfig is null || runConfig.CompressCheckpoints;
-        _resumeFromCheckpoint    = runConfig?.ResumeFromCheckpoint ?? false;
-        _resumeCheckpointPath    = runConfig?.ResumeCheckpointPath ?? string.Empty;
+        _resumeFromCheckpoint    = _manifest.OverrideResumeFromCheckpoint
+            ? _manifest.ResumeFromCheckpoint
+            : runConfig?.ResumeFromCheckpoint ?? false;
+        _resumeCheckpointPath    = _manifest.OverrideResumeFromCheckpoint
+            ? _manifest.ResumeCheckpointPath
+            : runConfig?.ResumeCheckpointPath ?? string.Empty;
         if (_quickTestMode)
         {
             _batchSize = 1;
@@ -704,6 +710,9 @@ public partial class TrainingBootstrap : Node
             }
         }
 
+        if (!_isWorkerMode)
+            UpdateRunMetaWarmStart();
+
         if (!_isWorkerMode) SaveInitialCheckpoints();
 
         // ── Distributed training setup ────────────────────────────────────────
@@ -822,7 +831,9 @@ public partial class TrainingBootstrap : Node
                 _quickTestMode
                     ? $"Quick test running ({_quickTestEpisodeLimit} episode target)."
                     : string.IsNullOrEmpty(_resumedFromFilename) ? "Training started." : $"Resumed from {_resumedFromFilename}.",
-                resumedFrom: _resumedFromFilename);
+                resumedFrom: _resumedFromFilename,
+                warmStartUsed: _warmStartUsed,
+                warmStartSource: _warmStartSourcePath);
         }
 
         StartHpoMasterHeartbeatIfNeeded();
@@ -1059,7 +1070,9 @@ public partial class TrainingBootstrap : Node
             var reportedSteps    = _totalSteps + (_distributedMaster?.TotalWorkerSteps ?? 0L);
             var workerEpisodes   = _distributedMaster?.TotalWorkerEpisodes ?? 0L;
             _statusWriter.WriteStatus("running", _manifest.ScenePath, reportedSteps, totalEpisodes, statusMessage,
-                workerEpisodes);
+                workerEpisodes,
+                warmStartUsed: _warmStartUsed,
+                warmStartSource: _warmStartSourcePath);
         }
 
         if (_quickTestMode)
@@ -1178,7 +1191,9 @@ public partial class TrainingBootstrap : Node
         {
             (_statusWriter ?? new RunMetricsWriter(string.Empty, _manifest.StatusPath))
                 .WriteStatus("failed", _manifest.ScenePath, GetCombinedTotalSteps(), GetCombinedTotalEpisodes(), message,
-                    _distributedMaster?.TotalWorkerEpisodes ?? 0L);
+                    _distributedMaster?.TotalWorkerEpisodes ?? 0L,
+                    warmStartUsed: _warmStartUsed,
+                    warmStartSource: _warmStartSourcePath);
         }
         catch
         {
@@ -1353,7 +1368,9 @@ public partial class TrainingBootstrap : Node
             var finalReportedSteps = GetCombinedTotalSteps();
             var workerEpisodes     = _distributedMaster?.TotalWorkerEpisodes ?? 0L;
             _statusWriter?.WriteStatus(_finalStatus, _manifest.ScenePath, finalReportedSteps, totalEpisodes,
-                _finalStatusMessage, workerEpisodes);
+                _finalStatusMessage, workerEpisodes,
+                warmStartUsed: _warmStartUsed,
+                warmStartSource: _warmStartSourcePath);
             WriteProcessHeartbeat(_finalStatus);
         }
     }
@@ -1936,10 +1953,57 @@ public partial class TrainingBootstrap : Node
             _resumedCurriculumProgress = checkpoint.CurriculumProgress;
 
         _resumedFromFilename = System.IO.Path.GetFileName(resolvedPath);
+        if (_manifest is not null && _manifest.OverrideResumeFromCheckpoint && _manifest.ResumeFromCheckpoint)
+        {
+            _warmStartUsed = true;
+            _warmStartSourcePath = NormalizeMetadataPath(resolvedPath);
+        }
 
         GD.Print($"[RL Resume] Group '{groupId}': resumed from '{System.IO.Path.GetFileName(resolvedPath)}' " +
                  $"— steps={checkpoint.TotalSteps}, episodes={checkpoint.EpisodeCount}, updates={checkpoint.UpdateCount}" +
                  (checkpoint.CurriculumProgress > 0f ? $", curriculum={checkpoint.CurriculumProgress:F3}" : string.Empty));
+    }
+
+    private void UpdateRunMetaWarmStart()
+    {
+        if (_manifest is null || string.IsNullOrWhiteSpace(_manifest.RunDirectory))
+            return;
+
+        var metaAbsPath = System.IO.Path.Combine(ProjectSettings.GlobalizePath(_manifest.RunDirectory), "meta.json");
+        try
+        {
+            var payload = new Godot.Collections.Dictionary();
+            if (System.IO.File.Exists(metaAbsPath))
+            {
+                var parsed = Json.ParseString(System.IO.File.ReadAllText(metaAbsPath));
+                if (parsed.VariantType == Variant.Type.Dictionary)
+                    payload = parsed.AsGodotDictionary();
+            }
+
+            payload["warm_start_used"] = _warmStartUsed;
+            payload["warm_start_source"] = _warmStartUsed ? _warmStartSourcePath : string.Empty;
+
+            System.IO.Directory.CreateDirectory(System.IO.Path.GetDirectoryName(metaAbsPath)!);
+            System.IO.File.WriteAllText(metaAbsPath, Json.Stringify(payload));
+        }
+        catch (Exception ex)
+        {
+            GD.PushWarning($"[RL] Failed to update run meta warm-start fields: {ex.Message}");
+        }
+    }
+
+    private static string NormalizeMetadataPath(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return string.Empty;
+
+        if (path.StartsWith("res://", StringComparison.Ordinal) || path.StartsWith("user://", StringComparison.Ordinal))
+            return path;
+
+        var localized = ProjectSettings.LocalizePath(path);
+        return localized.StartsWith("res://", StringComparison.Ordinal) || localized.StartsWith("user://", StringComparison.Ordinal)
+            ? localized
+            : path;
     }
 
     private bool TryInitializeEnvironment(EnvironmentRuntime environment, out string error)

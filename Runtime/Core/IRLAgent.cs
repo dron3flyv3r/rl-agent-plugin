@@ -70,10 +70,24 @@ public interface IRLAgent
     /// </summary>
     RecurrentState? RecurrentHiddenState { get; set; }
 
+    // ── Recording ─────────────────────────────────────────────────────────────
+    /// <summary>
+    /// When >= 0, the player/character script should call ApplyAction with this value
+    /// instead of reading keyboard input, then reset to -1. Used by RecordingBootstrap
+    /// in step mode so the dock can inject specific discrete actions.
+    /// </summary>
+    int PendingStepAction { get; set; }
+
     // ── Framework-internal ────────────────────────────────────────────────────
     float[] CollectObservationArray();
     void TickStep();
     void HandleHumanInput();
+    /// <summary>
+    /// Called by RecordingBootstrap in Script mode each physics step.
+    /// Override in your agent to implement a heuristic / scripted policy
+    /// (call ApplyAction inside the override).
+    /// </summary>
+    void HandleScriptedInput();
     float ConsumePendingReward();
     Dictionary<string, float> ConsumePendingRewardBreakdown();
     bool ConsumeDonePending();
