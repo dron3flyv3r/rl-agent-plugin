@@ -212,6 +212,36 @@ public sealed class RunMetricsWriter
         file.StoreLine(Json.Stringify(payload));
     }
 
+    /// <summary>
+    /// Appends a single custom scalar metric to the group's training log.
+    /// The entry is tagged with <c>"is_custom": true</c> so dashboards can filter it.
+    /// </summary>
+    public void AppendCustomMetric(string key, float value, long totalSteps)
+    {
+        EnsureFileDirectory(_metricsPath);
+        var mode = FileAccess.FileExists(_metricsPath)
+            ? FileAccess.ModeFlags.ReadWrite
+            : FileAccess.ModeFlags.Write;
+        using var file = FileAccess.Open(_metricsPath, mode);
+        if (file is null)
+        {
+            GD.PushError($"[RL] Failed to open metrics file '{_metricsPath}' for custom metric: {FileAccess.GetOpenError()}");
+            return;
+        }
+
+        if (mode == FileAccess.ModeFlags.ReadWrite)
+            file.SeekEnd();
+
+        var payload = new Godot.Collections.Dictionary
+        {
+            { "is_custom",   true       },
+            { key,           value      },
+            { "total_steps", totalSteps },
+        };
+
+        file.StoreLine(Json.Stringify(payload));
+    }
+
     private static void EnsureFileDirectory(string filePath)
     {
         var dir = filePath.GetBaseDir();

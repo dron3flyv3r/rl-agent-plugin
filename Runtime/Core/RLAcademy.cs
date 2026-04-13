@@ -86,6 +86,76 @@ public partial class RLAcademy : Node
         };
     }
 
+    // ── Tier 1: Training lifecycle hooks ─────────────────────────────────────
+    // Override any of these in a subclass to add custom behaviour without
+    // replacing the training loop. All methods are no-ops by default so
+    // existing scenes that do not subclass RLAcademy are unaffected.
+
+    /// <summary>
+    /// Called by TrainingBootstrap after all trainers and agents are initialised,
+    /// but before the first physics frame. Store <paramref name="context"/> if you
+    /// need it in other hooks or in your own <c>_PhysicsProcess</c> override.
+    /// </summary>
+    public virtual void OnTrainingInitialized(IAcademyContext context) { }
+
+    /// <summary>
+    /// Called at the very start of each physics frame, before agent ticking or
+    /// any decision-making.
+    /// </summary>
+    public virtual void OnBeforeStep(IAcademyContext context) { }
+
+    /// <summary>
+    /// Called at the end of each physics frame, after all group decision pipelines
+    /// and trainer updates have completed.
+    /// </summary>
+    public virtual void OnAfterStep(IAcademyContext context) { }
+
+    /// <summary>
+    /// Called once per episode completion for every agent whose episode ends this
+    /// frame. May be called multiple times per physics frame when several agents
+    /// finish simultaneously. Runs on the main thread (inside Phase B).
+    /// </summary>
+    public virtual void OnEpisodeEnd(AcademyEpisodeEndArgs args) { }
+
+    /// <summary>
+    /// Called immediately before TrainingBootstrap writes a checkpoint to disk.
+    /// Use this to attach custom metadata, flush logs, or pause external recorders.
+    /// </summary>
+    public virtual void OnBeforeCheckpoint(IAcademyContext context) { }
+
+    /// <summary>
+    /// When overridden to return <c>true</c>, training stops at the end of the
+    /// current frame. TrainingBootstrap evaluates this after its own stopping
+    /// conditions each frame. Return <c>false</c> (default) to defer to the
+    /// normal stopping logic.
+    /// </summary>
+    public virtual bool ShouldStop(IAcademyContext context) => false;
+
+    // ── Tier 2: Custom training loop ─────────────────────────────────────────
+
+    /// <summary>
+    /// When overridden to return <c>true</c>, TrainingBootstrap skips its own
+    /// four-phase decision pipeline and calls <see cref="TrainingStep"/> instead.
+    /// Set this in the subclass body or constructor; changing it mid-run is not
+    /// supported.
+    /// </summary>
+    public virtual bool OwnsTrainingStep => false;
+
+    /// <summary>
+    /// Called by TrainingBootstrap each physics frame in place of the default
+    /// four-phase loop when <see cref="OwnsTrainingStep"/> is <c>true</c>.
+    /// <para>
+    /// Use <see cref="IAcademyContext.RunGroupDecisionPipeline"/> for standard
+    /// per-group execution, or the individual phase methods
+    /// (<c>EstimateNextValues</c> / <c>RecordTransitionsAndReset</c> /
+    /// <c>SampleActions</c> / <c>ApplyDecisions</c>) for full manual control.
+    /// Phases B and D mutate the Godot scene tree and must run on the main thread;
+    /// this method is itself called from <c>_PhysicsProcess</c>, so sequential use
+    /// is always safe.
+    /// </para>
+    /// </summary>
+    public virtual void TrainingStep(IAcademyContext context) { }
+
     public bool InferenceActive { get; private set; }
     /// <summary>
     /// Current curriculum progress value in the range [0, 1].

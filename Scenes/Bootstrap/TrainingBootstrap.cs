@@ -128,6 +128,12 @@ public partial class TrainingBootstrap : Node
     private bool _hpoMasterShutdownInitiated;
     private DistributedMaster?    _distributedMaster;
     private DistributedWorker?    _distributedWorker;
+
+    // ── Academy extensibility ─────────────────────────────────────────────────
+    private AcademyContextImpl? _academyContext;
+    // Frame-scoped: populated during agent ticking, consumed during the decision pipeline.
+    // Stored as a field so internal phase-split methods can access it during Tier 2/3 loops.
+    private Dictionary<string, List<PendingDecisionContext>> _pendingLearningDecisionsByGroup = new(StringComparer.Ordinal);
     private CanvasLayer?          _trainingOverlay;
     private RLDistributedConfig?  _distributedConfig;
     private int                   _nextWorkerId;
@@ -846,6 +852,11 @@ public partial class TrainingBootstrap : Node
         {
             GD.Print($"[RL] Batch size: {_batchSize} ({_allTrainAgents.Count} total agents)");
         }
+
+        // Academy extensibility: create the context and notify all academy instances.
+        _academyContext = new AcademyContextImpl(this);
+        foreach (var academy in _academies)
+            academy.OnTrainingInitialized(_academyContext);
     }
 
     public override void _PhysicsProcess(double delta)
@@ -862,6 +873,10 @@ public partial class TrainingBootstrap : Node
 
         if (!_isWorkerMode)
             _trainingElapsedSeconds += delta;
+
+        if (_academyContext is not null)
+            foreach (var academy in _academies)
+                academy.OnBeforeStep(_academyContext);
 
         // Workers receive curriculum progress from master; apply it before episode processing
         // so OnEpisodeBegin sees the correct difficulty this frame.
@@ -902,7 +917,7 @@ public partial class TrainingBootstrap : Node
             }
         }
 
-        var pendingLearningDecisionsByGroup = new Dictionary<string, List<PendingDecisionContext>>(StringComparer.Ordinal);
+        _pendingLearningDecisionsByGroup = new Dictionary<string, List<PendingDecisionContext>>(StringComparer.Ordinal);
         var pendingFrozenDecisions = new List<PendingDecisionContext>();
 
         foreach (var agent in _allTrainAgents)
@@ -938,10 +953,10 @@ public partial class TrainingBootstrap : Node
                 }
                 else
                 {
-                    if (!pendingLearningDecisionsByGroup.TryGetValue(state.GroupId, out var pendingGroup))
+                    if (!_pendingLearningDecisionsByGroup.TryGetValue(state.GroupId, out var pendingGroup))
                     {
                         pendingGroup = new List<PendingDecisionContext>();
-                        pendingLearningDecisionsByGroup[state.GroupId] = pendingGroup;
+                        _pendingLearningDecisionsByGroup[state.GroupId] = pendingGroup;
                     }
 
                     pendingGroup.Add(pending);
@@ -953,22 +968,32 @@ public partial class TrainingBootstrap : Node
             }
         }
 
-        if (_parallelPolicyGroups && pendingLearningDecisionsByGroup.Count > 1)
+        // Tier 2: if the primary academy owns the training step, hand control to it.
+        // Frozen/self-play opponents are always handled by the bootstrap regardless.
+        var primaryAcademy = _academies.Count > 0 ? _academies[0] : null;
+        if (primaryAcademy is { OwnsTrainingStep: true } && _academyContext is not null)
         {
-            RunParallelGroupDecisions(pendingLearningDecisionsByGroup);
+            if (pendingFrozenDecisions.Count > 0)
+                ProcessFrozenDecisions(pendingFrozenDecisions);
+            primaryAcademy.TrainingStep(_academyContext);
         }
         else
         {
-            foreach (var (groupId, pendingDecisions) in pendingLearningDecisionsByGroup)
+            if (_parallelPolicyGroups && _pendingLearningDecisionsByGroup.Count > 1)
             {
-                if (_trainersByGroup.TryGetValue(groupId, out var trainer))
-                    ProcessLearningDecisions(groupId, trainer, pendingDecisions);
+                RunParallelGroupDecisions(_pendingLearningDecisionsByGroup);
             }
-        }
+            else
+            {
+                foreach (var (groupId, pendingDecisions) in _pendingLearningDecisionsByGroup)
+                {
+                    if (_trainersByGroup.TryGetValue(groupId, out var trainer))
+                        ProcessLearningDecisions(groupId, trainer, pendingDecisions);
+                }
+            }
 
-        if (pendingFrozenDecisions.Count > 0)
-        {
-            ProcessFrozenDecisions(pendingFrozenDecisions);
+            if (pendingFrozenDecisions.Count > 0)
+                ProcessFrozenDecisions(pendingFrozenDecisions);
         }
 
         foreach (var (groupId, trainer) in _trainersByGroup)
@@ -1105,6 +1130,10 @@ public partial class TrainingBootstrap : Node
                 }
             }
         }
+
+        if (_academyContext is not null)
+            foreach (var academy in _academies)
+                academy.OnAfterStep(_academyContext);
     }
 
     private async void ConfigureRendererWorkerWindowAsync()
@@ -1548,7 +1577,14 @@ public partial class TrainingBootstrap : Node
     private bool ShouldStopTraining()
     {
         var cfg = _stoppingConfig;
-        if (cfg is null) return false;
+        if (cfg is null)
+        {
+            if (_academyContext is not null)
+                foreach (var academy in _academies)
+                    if (academy.ShouldStop(_academyContext))
+                        return true;
+            return false;
+        }
 
         var totalSteps = GetCombinedTotalSteps();
         var totalEpisodes = GetCombinedTotalEpisodes();
@@ -1573,9 +1609,16 @@ public partial class TrainingBootstrap : Node
         }
 
         if (results.Count == 0) return false;
-        return cfg.CombineMode == RLStoppingCombineMode.All
+        var shouldStop = cfg.CombineMode == RLStoppingCombineMode.All
             ? results.TrueForAll(r => r)
             : results.Exists(r => r);
+
+        if (!shouldStop && _academyContext is not null)
+            foreach (var academy in _academies)
+                if (academy.ShouldStop(_academyContext))
+                    return true;
+
+        return shouldStop;
     }
 
     private float ComputeRollingReward(RLStoppingConfig cfg)
@@ -2345,6 +2388,26 @@ public partial class TrainingBootstrap : Node
                     }
                 }
 
+                if (_academyContext is not null)
+                {
+                    var episodeEndArgs = new AcademyEpisodeEndArgs
+                    {
+                        Agent             = pending.Agent,
+                        GroupId           = groupId,
+                        GroupDisplayName  = GetGroupDisplayName(groupId),
+                        EpisodeReward     = pending.Agent.EpisodeReward,
+                        EpisodeSteps      = pending.Agent.EpisodeSteps,
+                        RewardBreakdown   = pending.Agent.GetEpisodeRewardBreakdown(),
+                        TotalSteps        = _totalSteps,
+                        GroupEpisodeCount = _episodeCountByGroup[groupId],
+                        CurriculumProgress = _environments.Count > state.EnvironmentIndex
+                            ? _environments[state.EnvironmentIndex].Academy.CurriculumProgress
+                            : 0f,
+                    };
+                    foreach (var academy in _academies)
+                        academy.OnEpisodeEnd(episodeEndArgs);
+                }
+
                 PrepareEnvironmentForNextEpisode(state.EnvironmentIndex);
                 if (!EnsureEnvironmentMatchupsReady(state.EnvironmentIndex))
                     GD.PushWarning($"[RL] Could not refresh self-play matchup for environment {state.EnvironmentIndex}; reusing the previous opponent policy.");
@@ -2441,6 +2504,11 @@ public partial class TrainingBootstrap : Node
         bool allowFrozenSnapshot = true)
     {
         if (_quickTestMode) return;
+
+        if (_academyContext is not null)
+            foreach (var academy in _academies)
+                academy.OnBeforeCheckpoint(_academyContext);
+
         var checkpointPath = GetGroupCheckpointPath(groupId);
         var participatesInSelfPlay = _selfPlayParticipantGroups.Contains(groupId);
 
@@ -3602,5 +3670,98 @@ public partial class TrainingBootstrap : Node
             Variant.Type.Float => (long)value.AsDouble(),
             _ => 0L,
         };
+    }
+
+    // ── Academy context: internal accessors used by AcademyContextImpl ────────
+
+    // Payload records carry inter-phase data through the opaque token types.
+    private sealed record PhaseAPayload(List<PendingDecisionContext> Pending, float[] NextValues);
+    private sealed record PhaseBPayload(List<PendingDecisionContext> Pending, List<float[]> DecisionObs);
+    private sealed record PhaseCPayload(List<PendingDecisionContext> Pending, PolicyDecision[] Decisions, List<float[]> DecisionObs);
+
+    internal long TotalStepsInternal => _totalSteps;
+    internal IReadOnlyDictionary<string, long> EpisodeCountByGroupInternal => _episodeCountByGroup;
+    internal IReadOnlyList<string> GroupIdsInternal => _trainersByGroup.Keys.ToList();
+
+    internal ITrainer? GetTrainerInternal(string groupId)
+        => _trainersByGroup.GetValueOrDefault(groupId);
+
+    internal IReadOnlyList<IRLAgent> GetGroupAgentsInternal(string groupId)
+        => GetGroupTrainAgents(groupId);
+
+    internal void RunGroupDecisionPipelineInternal(string groupId)
+    {
+        if (!_pendingLearningDecisionsByGroup.TryGetValue(groupId, out var pending)) return;
+        if (!_trainersByGroup.TryGetValue(groupId, out var trainer)) return;
+        ProcessLearningDecisions(groupId, trainer, pending);
+    }
+
+    internal PhaseAToken EstimateNextValuesInternal(string groupId)
+    {
+        if (!_pendingLearningDecisionsByGroup.TryGetValue(groupId, out var pending) ||
+            !_trainersByGroup.TryGetValue(groupId, out var trainer))
+            return new PhaseAToken { GroupId = groupId, Payload = new PhaseAPayload(new List<PendingDecisionContext>(), Array.Empty<float>()) };
+
+        var nextValues = EstimateNextValues(trainer, pending);
+        return new PhaseAToken { GroupId = groupId, Payload = new PhaseAPayload(pending, nextValues) };
+    }
+
+    internal PhaseBToken RecordTransitionsInternal(string groupId, PhaseAToken phaseA)
+    {
+        var data = (PhaseAPayload)phaseA.Payload;
+        if (!_trainersByGroup.TryGetValue(groupId, out var trainer))
+            return new PhaseBToken { GroupId = groupId, Payload = new PhaseBPayload(data.Pending, new List<float[]>()) };
+
+        var decisionObs = RecordTransitionsAndResetEpisodes(groupId, trainer, data.Pending, data.NextValues);
+        return new PhaseBToken { GroupId = groupId, Payload = new PhaseBPayload(data.Pending, decisionObs) };
+    }
+
+    internal PhaseCToken SampleActionsInternal(string groupId, PhaseBToken phaseB)
+    {
+        var data = (PhaseBPayload)phaseB.Payload;
+        if (!_trainersByGroup.TryGetValue(groupId, out var trainer))
+            return new PhaseCToken { GroupId = groupId, Payload = new PhaseCPayload(data.Pending, Array.Empty<PolicyDecision>(), data.DecisionObs) };
+
+        var decisions = SampleGroupDecisions(trainer, data.Pending, data.DecisionObs);
+        return new PhaseCToken { GroupId = groupId, Payload = new PhaseCPayload(data.Pending, decisions, data.DecisionObs) };
+    }
+
+    internal void ApplyDecisionsInternal(string groupId, PhaseCToken phaseC)
+    {
+        var data = (PhaseCPayload)phaseC.Payload;
+        ApplyGroupDecisions(groupId, data.Pending, data.Decisions, data.DecisionObs);
+    }
+
+    internal void TriggerCheckpointInternal(bool force)
+    {
+        foreach (var (groupId, trainer) in _trainersByGroup)
+        {
+            var episodeCount = _episodeCountByGroup.GetValueOrDefault(groupId);
+            var updateCount  = _updateCountByGroup.GetValueOrDefault(groupId);
+            var checkpoint   = trainer.CreateCheckpoint(groupId, _totalSteps, episodeCount, updateCount);
+            checkpoint.RunId         = groupId;
+            checkpoint.TotalSteps    = _totalSteps;
+            checkpoint.EpisodeCount  = episodeCount;
+            checkpoint.UpdateCount   = updateCount;
+            checkpoint.RewardSnapshot = _lastEpisodeRewardByGroup.GetValueOrDefault(groupId);
+            checkpoint.CurriculumProgress = _academies.Count > 0 ? _academies[0].CurriculumProgress : 0f;
+            PersistCheckpoint(groupId, checkpoint, updateCount, force);
+        }
+    }
+
+    internal void LogMetricInternal(string groupId, string key, float value)
+    {
+        if (_metricsWritersByGroup.TryGetValue(groupId, out var writer))
+            writer.AppendCustomMetric(key, value, _totalSteps);
+    }
+
+    internal void SetCurriculumProgressInternal(float progress)
+        => SetCurriculumProgressForAllAcademies(progress);
+
+    internal void RequestStopInternal(string reason)
+    {
+        _finalStatus        = "done";
+        _finalStatusMessage = reason;
+        GetTree().Quit();
     }
 }
