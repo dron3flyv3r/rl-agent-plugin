@@ -38,6 +38,9 @@ public static class InferencePolicyFactory
         if (_customFactories.TryGetValue(checkpoint.Algorithm, out var customFactory))
             return customFactory(checkpoint, graph);
 
+        if (string.Equals(checkpoint.Algorithm, RLCheckpoint.NeatAlgorithm, StringComparison.OrdinalIgnoreCase))
+            return NeatCheckpointSerializer.PolicyFromCheckpoint(checkpoint);
+
         if (string.Equals(checkpoint.Algorithm, RLCheckpoint.MctsAlgorithm, StringComparison.OrdinalIgnoreCase))
             return MctsInferencePolicy.FromCheckpoint(checkpoint);
 

@@ -403,10 +403,21 @@ public partial class TrainingBootstrap : Node
                 Academy = academy,
             };
 
-            var batchAgents = academy.GetAgents(RLAgentControlMode.Train);
+            _environments.Add(environment);
+        }
+
+        // Add viewports to the scene tree first. This triggers _Ready() on all scene nodes,
+        // including RLAgentSpawner which spawns agents dynamically. Agent collection must
+        // happen after this point so dynamically-spawned agents are visible.
+        SetupBatchDisplay();
+
+        // Collect agents now that all spawners have fired _Ready().
+        foreach (var environment in _environments)
+        {
+            var batchAgents = environment.Academy.GetAgents(RLAgentControlMode.Train);
             foreach (var agent in batchAgents)
             {
-                var binding = RLPolicyGroupBindingResolver.Resolve(sceneInstance, agent.AsNode());
+                var binding = RLPolicyGroupBindingResolver.Resolve(environment.SceneRoot, agent.AsNode());
                 if (binding is null)
                 {
                     GD.PushError($"[RL] Agent '{agent.AsNode().Name}' has no PolicyGroupConfig assigned and will not be trained.");
@@ -430,11 +441,7 @@ public partial class TrainingBootstrap : Node
 
                 grouped.Add(agent);
             }
-
-            _environments.Add(environment);
         }
-
-        SetupBatchDisplay();
 
         if (_quickTestShowSpyOverlay)
         {
@@ -618,6 +625,7 @@ public partial class TrainingBootstrap : Node
                 Algorithm = algorithm,
                 CustomTrainerId = customTrainerId,
                 SharedPolicy = binding.Config,
+                AlgorithmConfig = trainingConfig?.Algorithm,
                 TrainerConfig = trainerConfig,
                 NetworkGraph = binding.Config?.ResolvedNetworkGraph ?? RLNetworkGraph.CreateDefault(),
                 ActionDefinitions = actionDefinitions,

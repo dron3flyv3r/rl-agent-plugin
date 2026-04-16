@@ -45,6 +45,9 @@ public partial class RLSetupDock : VBoxContainer
     [Signal]
     public delegate void ReviewTargetRequestedEventHandler(bool isResource, string targetPath);
 
+    [Signal]
+    public delegate void WizardRequestedEventHandler();
+
     private static int Ui(int value) => EditorUiScale.Px(value);
 
     public RLSetupDock()
@@ -88,6 +91,17 @@ public partial class RLSetupDock : VBoxContainer
         vbox.AddChild(new HSeparator());
 
         vbox.AddChild(MakeSectionHeader("Wizard"));
+
+        var wizardButton = new Button
+        {
+            Text = "Setup Wizard...",
+            SizeFlagsHorizontal = SizeFlags.ExpandFill,
+            TooltipText = "Open the step-by-step RL setup wizard.",
+            CustomMinimumSize = new Vector2(0f, 28f),
+        };
+        wizardButton.Pressed += OnWizardButtonPressed;
+        vbox.AddChild(wizardButton);
+
         _wizardStageLabel = new Label { Text = "Analyze" };
         _wizardStageLabel.AddThemeFontSizeOverride("font_size", Ui(14));
         vbox.AddChild(_wizardStageLabel);
@@ -528,5 +542,10 @@ public partial class RLSetupDock : VBoxContainer
     private void OnFixAllButtonPressed()
     {
         EmitSignal(SignalName.AutofixAllRequested);
+    }
+
+    private void OnWizardButtonPressed()
+    {
+        EmitSignal(SignalName.WizardRequested);
     }
 }

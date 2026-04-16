@@ -17,6 +17,7 @@ public partial class RLCheckpoint : Resource
     public const string DqnAlgorithm  = "DQN";
     public const string A2CAlgorithm  = "A2C";
     public const string MctsAlgorithm = "MCTS";
+    public const string NeatAlgorithm = "NEAT";
 
     [Export] public int FormatVersion { get; set; } = CurrentFormatVersion;
     [Export] public string RunId { get; set; } = string.Empty;

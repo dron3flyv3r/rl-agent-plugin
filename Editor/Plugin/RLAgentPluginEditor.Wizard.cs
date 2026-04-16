@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text;
 using Godot;
 using RlAgentPlugin.Editor;
 using RlAgentPlugin.Runtime;
@@ -12,6 +13,57 @@ public partial class RLAgentPluginEditor
 {
     private readonly List<TrainingSceneReviewEntry> _wizardReviewEntries = new();
     private string _wizardScenePath = string.Empty;
+
+    // Deferred script assignments — populated by the wizard when a C# script template
+    // is generated. Applied in _Process once CanInstantiate() becomes true (i.e. after
+    // the user's next project build), because SetScript() with an uncompiled class
+    // crashes the editor.
+    private readonly List<PendingScriptAssignment> _pendingScriptAssignments = new();
+
+    private readonly record struct PendingScriptAssignment(
+        string ScenePath,
+        string NodePath,
+        string ScriptPath);
+
+    private void RegisterPendingScriptAssignment(string scenePath, string nodePath, string scriptPath)
+    {
+        _pendingScriptAssignments.Add(new PendingScriptAssignment(scenePath, nodePath, scriptPath));
+    }
+
+    internal void TryApplyPendingScriptAssignments()
+    {
+        if (_pendingScriptAssignments.Count == 0) return;
+
+        var editedRoot = EditorInterface.Singleton.GetEditedSceneRoot();
+        if (editedRoot is null) return;
+
+        List<PendingScriptAssignment>? applied = null;
+
+        foreach (var pending in _pendingScriptAssignments)
+        {
+            if (!string.Equals(editedRoot.SceneFilePath, pending.ScenePath, StringComparison.Ordinal))
+                continue;
+
+            var node = editedRoot.GetNodeOrNull(pending.NodePath);
+            if (node is null) continue;
+
+            var script = GD.Load<Script>(pending.ScriptPath);
+            if (script is null || !script.CanInstantiate()) continue;
+
+            node.SetScript(script);
+            EditorInterface.Singleton.MarkSceneAsUnsaved();
+            applied ??= new List<PendingScriptAssignment>();
+            applied.Add(pending);
+        }
+
+        if (applied is null) return;
+
+        foreach (var a in applied)
+            _pendingScriptAssignments.Remove(a);
+
+        _setupDock?.SetLaunchStatus($"Auto-assigned {applied.Count} generated script(s) after build.");
+        RefreshValidationFromActiveScene();
+    }
 
     private void UpdateWizardUi(TrainingSceneValidation? validation)
     {
@@ -645,22 +697,50 @@ public partial class RLAgentPluginEditor
         return EnsureUniqueResourcePath(folderPath, baseName);
     }
 
+    private static string BuildUniqueSceneScriptPath(string scenePath, string stem)
+    {
+        var folderPath = EnsureSceneWizardResourceDirectory(scenePath);
+        var sanitizedStem = SanitizeFileStem(stem);
+        if (string.IsNullOrWhiteSpace(sanitizedStem))
+        {
+            sanitizedStem = "Agent";
+        }
+
+        return EnsureUniqueResourcePath(folderPath, $"{sanitizedStem}.cs");
+    }
+
     private static string EnsureSceneWizardResourceDirectory(string scenePath)
     {
-        var sceneDirectory = Path.GetDirectoryName(scenePath)?.Replace('\\', '/') ?? "res://";
-        var resourceDirectory = $"{sceneDirectory.TrimEnd('/')}/RL";
-        Directory.CreateDirectory(ProjectSettings.GlobalizePath(resourceDirectory));
+        // Use Godot string extension so res:// paths are handled correctly.
+        var sceneDirectory = scenePath.GetBaseDir();
+        var resourceDirectory = sceneDirectory.PathJoin("RL");
+
+        // Use DirAccess (Godot VFS) instead of Directory.CreateDirectory so the
+        // res:// scheme is resolved to an actual filesystem path, not treated as a
+        // relative directory name that creates a literal "res:" folder.
+        using var dir = DirAccess.Open(sceneDirectory);
+        if (dir is null)
+        {
+            GD.PushWarning($"[RLWizard] Cannot open scene directory '{sceneDirectory}': {DirAccess.GetOpenError()}");
+        }
+        else if (!dir.DirExists("RL"))
+        {
+            var err = dir.MakeDir("RL");
+            if (err != Error.Ok)
+            {
+                GD.PushWarning($"[RLWizard] Failed to create RL sub-directory in '{sceneDirectory}': {err}");
+            }
+        }
+
         return resourceDirectory;
     }
 
     private static string EnsureUniqueResourcePath(string resourceDirectory, string fileName)
     {
-        var absoluteDirectory = ProjectSettings.GlobalizePath(resourceDirectory);
-        var existingFileNames = Directory.Exists(absoluteDirectory)
-            ? Directory.GetFiles(absoluteDirectory).Select(Path.GetFileName).Where(name => !string.IsNullOrWhiteSpace(name))!
-            : Array.Empty<string>();
-        var uniqueName = RLSetupWizardDefaults.MakeUniqueFileName(fileName, existingFileNames!);
-        return $"{resourceDirectory}/{uniqueName}";
+        // DirAccess.GetFilesAt resolves res:// paths correctly through Godot's VFS.
+        var existingFileNames = DirAccess.GetFilesAt(resourceDirectory) ?? Array.Empty<string>();
+        var uniqueName = RLSetupWizardDefaults.MakeUniqueFileName(fileName, existingFileNames);
+        return resourceDirectory.PathJoin(uniqueName);
     }
 
     private static bool TrySaveResource(Resource resource, string resourcePath, out string message)
@@ -674,6 +754,38 @@ public partial class RLAgentPluginEditor
 
         message = $"Failed to save resource '{resourcePath}': {saveError}";
         return false;
+    }
+
+    private static bool TryWriteTextFile(string resourcePath, string content, out string message)
+    {
+        // Use Godot's FileAccess so res:// paths are resolved through the VFS
+        // rather than being written as literal relative filesystem paths.
+        using var file = Godot.FileAccess.Open(resourcePath, Godot.FileAccess.ModeFlags.Write);
+        if (file is null)
+        {
+            message = $"Failed to open '{resourcePath}' for writing: {Godot.FileAccess.GetOpenError()}";
+            return false;
+        }
+
+        file.StoreString(content);
+        message = string.Empty;
+        return true;
+    }
+
+    private static string SanitizeFileStem(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            builder.Append(char.IsLetterOrDigit(character) || character == '_' ? character : '_');
+        }
+
+        return builder.ToString().Trim('_');
     }
 
     private static bool Fail(string error, out string message)
@@ -700,10 +812,49 @@ public partial class RLAgentPluginEditor
             : parent.Owner ?? parent;
     }
 
+    public void DoCreateWizardAgentNode(Node parent, string childName, bool isTwoD, string scriptPath, int index)
+    {
+        if (parent.GetNodeOrNull<Node>(childName) is not null)
+        {
+            return;
+        }
+
+        // Always create a compiled base node. Calling SetScript() with a freshly
+        // written C# file crashes the editor because the class doesn't exist in the
+        // compiled assembly yet. The generated script template (scriptPath) is on disk
+        // for the user to build and assign after their next project build.
+        Node child = isTwoD ? new RLAgent2D() : new RLAgent3D();
+
+        child.Name = childName;
+        parent.AddChild(child);
+
+        if (index >= 0 && index < parent.GetChildCount())
+        {
+            parent.MoveChild(child, index);
+        }
+
+        child.Owner = parent == EditorInterface.Singleton.GetEditedSceneRoot()
+            ? parent
+            : parent.Owner ?? parent;
+    }
+
     public void DoDetachWizardNode(Node child)
     {
         child.GetParent()?.RemoveChild(child);
         child.Owner = null;
+    }
+
+    public void DoRemoveWizardChildByName(Node parent, string childName)
+    {
+        var child = parent.GetNodeOrNull<Node>(childName);
+        if (child is null)
+        {
+            return;
+        }
+
+        child.GetParent()?.RemoveChild(child);
+        child.Owner = null;
+        child.QueueFree();
     }
 
     public void SaveExternalResource(Resource resource)

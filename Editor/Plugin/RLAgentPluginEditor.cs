@@ -43,6 +43,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
     private const string AgentScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent2D.cs";
     private const string Agent3DScriptPath = "res://addons/rl-agent-plugin/Runtime/Agents/RLAgent3D.cs";
     private const string AcademyScriptPath = "res://addons/rl-agent-plugin/Runtime/Core/RLAcademy.cs";
+    private const string SpawnerScriptPath = "res://addons/rl-agent-plugin/Scenes/Spawner/RLAgentSpawner.cs";
     private const string HpoOrchestratorScriptPath = "res://addons/rl-agent-plugin/Runtime/HPO/RLHPOOrchestrator.cs";
     private const string DenseLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDenseLayerDef.cs";
     private const string DropoutLayerDefScriptPath = "res://addons/rl-agent-plugin/Resources/Models/RLDropoutLayerDef.cs";
@@ -125,6 +126,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         _setupDock.Connect(RLSetupDock.SignalName.AutofixRequested, Callable.From<int, string>(OnAutofixRequested));
         _setupDock.Connect(RLSetupDock.SignalName.AutofixAllRequested, Callable.From(OnAutofixAllRequested));
         _setupDock.Connect(RLSetupDock.SignalName.ReviewTargetRequested, Callable.From<bool, string>(OnReviewTargetRequested));
+        _setupDock.Connect("WizardRequested", Callable.From(OnWizardRequested));
 
         _setupEditorDock = new EditorDock
         {
@@ -173,6 +175,9 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
         RegisterCustomTypes();
         CallDeferred(nameof(EnsureProjectScriptClassesAreFresh));
+        // Apply any deferred script assignments left over from a previous session
+        // (e.g. the wizard ran, then the user built the project and the plugin reloaded).
+        EditorInterface.Singleton.GetResourceFilesystem().FilesystemChanged += TryApplyPendingScriptAssignments;
         SetProcess(true);
         // _lastAutoScenePath is set to a sentinel ("\x00") above, so _Process will
         // detect the mismatch on its first frame and call RefreshValidationFromActiveScene().
@@ -180,6 +185,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
 
     public override void _ExitTree()
     {
+        EditorInterface.Singleton.GetResourceFilesystem().FilesystemChanged -= TryApplyPendingScriptAssignments;
         SetProcess(false);
         UnregisterCustomTypes();
 
@@ -267,6 +273,12 @@ public partial class RLAgentPluginEditor : EditorPlugin
             if (_setupDock.IsConnected(RLSetupDock.SignalName.ReviewTargetRequested, reviewTargetCallable))
             {
                 _setupDock.Disconnect(RLSetupDock.SignalName.ReviewTargetRequested, reviewTargetCallable);
+            }
+
+            var wizardCallable = Callable.From(OnWizardRequested);
+            if (_setupDock.IsConnected("WizardRequested", wizardCallable))
+            {
+                _setupDock.Disconnect("WizardRequested", wizardCallable);
             }
 
             _setupDock = null;
@@ -630,6 +642,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         var agentScript = GD.Load<Script>(AgentScriptPath);
         var agent3DScript = GD.Load<Script>(Agent3DScriptPath);
         var academyScript = GD.Load<Script>(AcademyScriptPath);
+        var spawnerScript = GD.Load<Script>(SpawnerScriptPath);
         var hpoOrchestratorScript = GD.Load<Script>(HpoOrchestratorScriptPath);
         var denseLayerDefScript = GD.Load<Script>(DenseLayerDefScriptPath);
         var dropoutLayerDefScript = GD.Load<Script>(DropoutLayerDefScriptPath);
@@ -650,6 +663,11 @@ public partial class RLAgentPluginEditor : EditorPlugin
         if (academyScript is not null)
         {
             AddCustomType(nameof(RLAcademy), nameof(Node), academyScript, null);
+        }
+
+        if (spawnerScript is not null)
+        {
+            AddCustomType(nameof(RLAgentSpawner), nameof(Node), spawnerScript, null);
         }
 
         if (hpoOrchestratorScript is not null)
@@ -693,6 +711,7 @@ public partial class RLAgentPluginEditor : EditorPlugin
         RemoveCustomType(nameof(RLAgent2D));
         RemoveCustomType(nameof(RLAgent3D));
         RemoveCustomType(nameof(RLAcademy));
+        RemoveCustomType(nameof(RLAgentSpawner));
         RemoveCustomType(nameof(RLHPOOrchestrator));
         RemoveCustomType(nameof(RLDenseLayerDef));
         RemoveCustomType(nameof(RLDropoutLayerDef));
