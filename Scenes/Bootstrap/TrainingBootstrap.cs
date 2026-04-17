@@ -3158,12 +3158,23 @@ public partial class TrainingBootstrap : Node
     private int GetOrAssignGroupAgentSlot(string groupId, IRLAgent agent)
     {
         if (_groupAgentSlotByAgent.TryGetValue(agent, out var slot))
+        {
+            TryAssignDebugSlot(agent, slot);
             return slot;
+        }
 
         slot = _nextGroupAgentSlotByGroup.GetValueOrDefault(groupId);
         _groupAgentSlotByAgent[agent] = slot;
         _nextGroupAgentSlotByGroup[groupId] = slot + 1;
+        TryAssignDebugSlot(agent, slot);
         return slot;
+    }
+
+    private static void TryAssignDebugSlot(IRLAgent agent, int slot)
+    {
+        var node = agent.AsNode();
+        if (node.HasMethod("SetDebugSlot"))
+            node.Call("SetDebugSlot", slot);
     }
 
     private static AgentRuntimeState CreateAgentState(

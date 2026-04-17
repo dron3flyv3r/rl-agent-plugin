@@ -57,3 +57,17 @@ public interface INeatDataFeed
     /// </summary>
     NeatGenomeSnapshot GetSnapshot();
 }
+
+/// <summary>
+/// Optional scene-side provider for live NEAT overlay stats that cannot be inferred
+/// from trainer episode accounting alone, such as "currently alive" entities in
+/// environments that delay <c>EndEpisode()</c> until a generation barrier.
+/// </summary>
+public interface INeatLiveStatusProvider
+{
+    /// <summary>
+    /// Returns the current number of alive individuals if the scene can provide it.
+    /// Return false when no live override is available.
+    /// </summary>
+    bool TryGetLiveAliveCount(out int aliveCount);
+}

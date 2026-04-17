@@ -91,13 +91,30 @@ public partial class RLNEATConfig : RLEvolutionaryConfig
     /// </summary>
     [Export(PropertyHint.Range, "0.0,1.0,0.05")] public float InitialConnectionDensity { get; set; } = 1.0f;
 
+    // ── Dynamic speciation ────────────────────────────────────────────────────
+
+    /// <summary>
+    /// When > 0, the compatibility threshold is automatically tuned each generation
+    /// so that the number of species stays near this value.
+    /// Recommended: roughly PopulationSize / 4 (e.g. 5 for 20 agents).
+    /// Set to 0 to disable dynamic threshold and use the fixed <see cref="CompatibilityThreshold"/>.
+    /// </summary>
+    [Export(PropertyHint.Range, "0,50,1")] public int TargetSpeciesCount { get; set; } = 5;
+
+    /// <summary>
+    /// Amount by which the dynamic compatibility threshold is adjusted per generation
+    /// when the species count is above or below <see cref="TargetSpeciesCount"/>.
+    /// Smaller values = smoother but slower convergence.
+    /// </summary>
+    [Export(PropertyHint.Range, "0.01,1.0,0.01")] public float ThresholdAdjustRate { get; set; } = 0.1f;
+
     // ── Stagnation ────────────────────────────────────────────────────────────
 
     /// <summary>
     /// If a species shows no improvement for this many generations, it is removed
     /// (unless it contains the all-time champion or only 2 species remain).
     /// </summary>
-    [Export(PropertyHint.Range, "1,100,1")] public int StagnationLimit { get; set; } = 15;
+    [Export(PropertyHint.Range, "1,200,1")] public int StagnationLimit { get; set; } = 25;
 
     // ── Checkpointing ─────────────────────────────────────────────────────────
 

@@ -26,13 +26,13 @@ public partial class RLUIGenericStatus : CanvasLayer
 
     internal const float HeaderH  = 36f;
     internal const float InnerPad = 12f;
-    internal const float DividerW = 1f;
+    internal const float DividerW = 0f;
 
     // ── Exports: Layout ───────────────────────────────────────────────────────
 
     private float _statsWidth    = 200f;
     private float _statsHeight   = 280f;
-    private float _networkWidth  = 320f;
+    private float _networkWidth  = 300f;
     private float _networkHeight = 280f;
 
     [ExportGroup("Layout")]
@@ -41,41 +41,97 @@ public partial class RLUIGenericStatus : CanvasLayer
     public float StatsWidth
     {
         get => _statsWidth;
-        set { _statsWidth = value; _canvas?.UpdateSize(); }
+        set { _statsWidth = value; RefreshCanvas(); }
     }
 
     [Export]
     public float StatsHeight
     {
         get => _statsHeight;
-        set { _statsHeight = value; _canvas?.UpdateSize(); }
+        set { _statsHeight = value; RefreshCanvas(); }
     }
 
     [Export]
     public float NetworkWidth
     {
         get => _networkWidth;
-        set { _networkWidth = value; _canvas?.UpdateSize(); }
+        set { _networkWidth = value; RefreshCanvas(); }
     }
 
     [Export]
     public float NetworkHeight
     {
         get => _networkHeight;
-        set { _networkHeight = value; _canvas?.UpdateSize(); }
+        set { _networkHeight = value; RefreshCanvas(); }
     }
 
     // ── Exports: Colors ───────────────────────────────────────────────────────
 
+    private Color _accentColor     = new(0.961f, 0.620f, 0.043f);        // #F59E0B amber
+    private Color _meanColor       = new(0.984f, 0.443f, 0.522f);        // #FB7185 rose
+    private Color _backgroundColor = new(0.110f, 0.078f, 0.063f, 0.90f); // #1C1410
+    private Color _headerColor     = new(0.145f, 0.110f, 0.078f, 1.00f); // #251C14
+    private Color _textPrimary     = new(0.996f, 0.953f, 0.773f);        // #FEF3C7
+    private Color _textSecondary   = new(0.659f, 0.565f, 0.439f);        // #A89070
+    private Color _inputNodeColor  = new(0.376f, 0.647f, 0.980f);        // #60A5FA
+    private Color _hiddenNodeColor = new(0.471f, 0.443f, 0.424f);        // #78716C
+
     [ExportGroup("Colors")]
-    [Export] public Color AccentColor     { get; set; } = new(0.961f, 0.620f, 0.043f);        // #F59E0B amber
-    [Export] public Color MeanColor       { get; set; } = new(0.984f, 0.443f, 0.522f);        // #FB7185 rose
-    [Export] public Color BackgroundColor { get; set; } = new(0.110f, 0.078f, 0.063f, 0.90f); // #1C1410
-    [Export] public Color HeaderColor     { get; set; } = new(0.145f, 0.110f, 0.078f, 1.00f); // #251C14
-    [Export] public Color TextPrimary     { get; set; } = new(0.996f, 0.953f, 0.773f);        // #FEF3C7
-    [Export] public Color TextSecondary   { get; set; } = new(0.659f, 0.565f, 0.439f);        // #A89070
-    [Export] public Color InputNodeColor  { get; set; } = new(0.376f, 0.647f, 0.980f);        // #60A5FA
-    [Export] public Color HiddenNodeColor { get; set; } = new(0.471f, 0.443f, 0.424f);        // #78716C
+    [Export]
+    public Color AccentColor
+    {
+        get => _accentColor;
+        set { _accentColor = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color MeanColor
+    {
+        get => _meanColor;
+        set { _meanColor = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color BackgroundColor
+    {
+        get => _backgroundColor;
+        set { _backgroundColor = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color HeaderColor
+    {
+        get => _headerColor;
+        set { _headerColor = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color TextPrimary
+    {
+        get => _textPrimary;
+        set { _textPrimary = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color TextSecondary
+    {
+        get => _textSecondary;
+        set { _textSecondary = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color InputNodeColor
+    {
+        get => _inputNodeColor;
+        set { _inputNodeColor = value; RefreshCanvas(); }
+    }
+
+    [Export]
+    public Color HiddenNodeColor
+    {
+        get => _hiddenNodeColor;
+        set { _hiddenNodeColor = value; RefreshCanvas(); }
+    }
 
     // ── Internal live state (read by StatusDrawControl) ───────────────────────
 
@@ -85,8 +141,11 @@ public partial class RLUIGenericStatus : CanvasLayer
     // ── Private ───────────────────────────────────────────────────────────────
 
     private StatusDrawControl? _canvas;
-    private INeatDataFeed?     _feed;
-    private int                _lastGeneration = -1;
+    private INeatDataFeed?          _feed;
+    private INeatLiveStatusProvider? _liveStatusProvider;
+    private int                     _lastGeneration = -1;
+    private int                     _displayAliveCount = -1;
+    private NeatGenomeSnapshot?     _previousSnapshot;
 
     // ── Godot lifecycle ───────────────────────────────────────────────────────
 
@@ -113,7 +172,7 @@ public partial class RLUIGenericStatus : CanvasLayer
             _canvas.SetOwner(this);
         }
 
-        _canvas.UpdateSize();
+        RefreshCanvas();
 
         if (!Engine.IsEditorHint())
             Callable.From(FindFeedProvider).CallDeferred();
@@ -130,16 +189,30 @@ public partial class RLUIGenericStatus : CanvasLayer
         if (_feed == null) return;
 
         var snap = _feed.GetSnapshot();
+        if (_liveStatusProvider != null
+            && _liveStatusProvider.TryGetLiveAliveCount(out int liveAlive))
+        {
+            _displayAliveCount = liveAlive;
+        }
+        else
+        {
+            _displayAliveCount = snap.AliveCount;
+        }
+
         LatestSnapshot = snap;
 
         // Append a history entry once per generation
         if (snap.Generation != _lastGeneration)
         {
+            if (_previousSnapshot != null && _lastGeneration >= 0)
+            {
+                if (History.Count >= 50) History.RemoveAt(0);
+                History.Add((_previousSnapshot.BestFitness, _previousSnapshot.MeanFitness));
+            }
             _lastGeneration = snap.Generation;
-            if (History.Count >= 50) History.RemoveAt(0);
-            History.Add((snap.BestFitness, snap.MeanFitness));
         }
 
+        _previousSnapshot = snap;
         _canvas?.QueueRedraw();
     }
 
@@ -150,6 +223,9 @@ public partial class RLUIGenericStatus : CanvasLayer
         var current = (Node?)GetParent();
         while (current != null)
         {
+            if (current is INeatLiveStatusProvider liveProvider)
+                _liveStatusProvider ??= liveProvider;
+
             if (current is TrainingBootstrap bootstrap)
             {
                 _feed = bootstrap.GetNeatDataFeed();
@@ -158,19 +234,34 @@ public partial class RLUIGenericStatus : CanvasLayer
             current = current.GetParent();
         }
     }
+
+    private void RefreshCanvas()
+    {
+        if (_canvas == null) return;
+        _canvas.UpdateSize();
+        _canvas.QueueRedraw();
+    }
+
+    internal int GetDisplayAliveCount(NeatGenomeSnapshot snap)
+    {
+        if (_displayAliveCount < 0) return snap.AliveCount;
+        return Math.Clamp(_displayAliveCount, 0, snap.PopulationSize);
+    }
 }
 
 // ── Draw control ──────────────────────────────────────────────────────────────
 
 /// <summary>Single Control child that renders everything via Godot's draw API.</summary>
+[Tool]
 internal sealed partial class StatusDrawControl : Control
 {
     // Layout
-    private const float AccentStripeW = 4f;
-    private const float SectionGap   = 10f;  // horizontal breathing room around the divider
+    private const float SectionGap   = 18f;  // horizontal breathing room between stats and network
     private const float NodeR         = 7f;
     private const float SparkH        = 58f;
     private const float RowH          = 21f;
+    private const float ValueGap      = 14f;
+    private const int   SparkSmoothPasses = 3;
     private const int   FontSz        = 13;
     private const int   FontSzSm      = 11;
     private const int   CornerR       = 12;
@@ -228,7 +319,6 @@ internal sealed partial class StatusDrawControl : Control
         float nw = _o.NetworkWidth;
         float sh = _o.StatsHeight;
         float nh = _o.NetworkHeight;
-        float dw = RLUIGenericStatus.DividerW;
         float hh = RLUIGenericStatus.HeaderH;
 
         // ── Backgrounds
@@ -238,28 +328,19 @@ internal sealed partial class StatusDrawControl : Control
         _headerStyle.BgColor = _o.HeaderColor;
         DrawStyleBox(_headerStyle, new Rect2(0, 0, Size.X, hh));
 
-        // ── Accent stripe
-        DrawRect(new Rect2(0, 0, AccentStripeW, hh), _o.AccentColor);
-
         // ── Header text
         string tag   = preview ? "  [PREVIEW]" : "";
-        string title = $"NEAT  ·  Gen {snap.Generation}  ·  Best {snap.BestFitness:F2}  ·  Alive {snap.AliveCount}/{snap.PopulationSize}{tag}";
+        string title = $"NEAT  ·  Gen {snap.Generation}{tag}";
         var font = ThemeDB.FallbackFont;
         DrawString(font,
-            new Vector2(AccentStripeW + 10f, hh * 0.5f + FontSz * 0.36f),
+            new Vector2(10f, hh * 0.5f + FontSz * 0.36f),
             title, HorizontalAlignment.Left, -1, FontSz, _o.TextPrimary);
 
-        // ── Section divider (centred in the gap)
         float divX = sw + SectionGap;
-        var divColor = new Color(
-            _o.BackgroundColor.R + 0.07f,
-            _o.BackgroundColor.G + 0.05f,
-            _o.BackgroundColor.B + 0.04f, 1f);
-        DrawRect(new Rect2(divX, hh, dw, Size.Y - hh), divColor);
 
         // ── Sections
         DrawStatsSection(new Rect2(0,               hh, sw, sh), snap, history);
-        DrawNetworkSection(new Rect2(divX + dw + SectionGap, hh, nw, nh), snap);
+        DrawNetworkSection(new Rect2(divX + SectionGap, hh, nw, nh), snap);
     }
 
     private void DrawWaiting()
@@ -270,10 +351,8 @@ internal sealed partial class StatusDrawControl : Control
         _headerStyle.BgColor = _o.HeaderColor;
         DrawStyleBox(_headerStyle, new Rect2(0, 0, Size.X, RLUIGenericStatus.HeaderH));
 
-        DrawRect(new Rect2(0, 0, AccentStripeW, RLUIGenericStatus.HeaderH), _o.AccentColor);
-
         DrawString(ThemeDB.FallbackFont,
-            new Vector2(AccentStripeW + 10f, RLUIGenericStatus.HeaderH * 0.5f + FontSz * 0.36f),
+            new Vector2(10f, RLUIGenericStatus.HeaderH * 0.5f + FontSz * 0.36f),
             "NEAT  ·  Waiting for training to start…",
             HorizontalAlignment.Left, -1, FontSz, _o.TextSecondary);
     }
@@ -292,22 +371,33 @@ internal sealed partial class StatusDrawControl : Control
             "STATS", HorizontalAlignment.Left, -1, FontSzSm, _o.TextSecondary);
         y += FontSzSm + 10f;
 
-        // Stat rows
         float rightX = rect.Position.X + rect.Size.X - ip;
+        var rows = new (string Label, string Value, Color ValueColor)[]
+        {
+            ("Best fitness", $"{snap.BestFitness:F2}", _o.AccentColor),
+            ("Mean fitness", $"{snap.MeanFitness:F2}", _o.MeanColor),
+            ("Alive",        $"{(Engine.IsEditorHint() ? snap.AliveCount : _o.GetDisplayAliveCount(snap))}/{snap.PopulationSize}", _o.TextPrimary),
+            ("Species",      $"{snap.SpeciesCount}", _o.TextPrimary),
+            ("Generation",   $"{snap.Generation}", _o.TextPrimary),
+        };
+
+        float maxValueWidth = 0f;
+        foreach (var row in rows)
+            maxValueWidth = Math.Max(maxValueWidth, font.GetStringSize(row.Value, HorizontalAlignment.Left, -1, FontSz).X);
+
+        float labelWidth = Math.Max(0f, rightX - x - maxValueWidth - ValueGap);
+
         void Row(string label, string value, Color valColor)
         {
-            DrawString(font, new Vector2(x,      y + FontSz), label,
-                HorizontalAlignment.Left,  -1, FontSz, _o.TextSecondary);
+            DrawString(font, new Vector2(x, y + FontSz), label,
+                HorizontalAlignment.Left, labelWidth, FontSz, _o.TextSecondary);
             DrawString(font, new Vector2(rightX, y + FontSz), value,
                 HorizontalAlignment.Right, -1, FontSz, valColor);
             y += RowH;
         }
 
-        Row("Best fitness",  $"{snap.BestFitness:F2}",                           _o.AccentColor);
-        Row("Mean fitness",  $"{snap.MeanFitness:F2}",                           _o.MeanColor);
-        Row("Alive",        $"{snap.AliveCount} / {snap.PopulationSize}",   _o.TextPrimary);
-        Row("Species",      $"{snap.SpeciesCount}",                              _o.TextPrimary);
-        Row("Generation",   $"{snap.Generation}",                                _o.TextPrimary);
+        foreach (var row in rows)
+            Row(row.Label, row.Value, row.ValueColor);
 
         // Sparkline area starts from a fixed offset from the bottom of the section
         float sparkBottom = rect.Position.Y + rect.Size.Y - ip;
@@ -346,7 +436,6 @@ internal sealed partial class StatusDrawControl : Control
         int n = history.Count;
         var bestPts = new Vector2[n];
         var meanPts = new Vector2[n];
-        var fillPts = new Vector2[n + 2];
 
         for (int i = 0; i < n; i++)
         {
@@ -357,16 +446,62 @@ internal sealed partial class StatusDrawControl : Control
                 - (history[i].M - minV) / range * rect.Size.Y);
         }
 
-        // Filled area under best curve
-        Array.Copy(bestPts, fillPts, n);
-        fillPts[n]     = new Vector2(rect.Position.X + rect.Size.X, rect.Position.Y + rect.Size.Y);
-        fillPts[n + 1] = new Vector2(rect.Position.X,               rect.Position.Y + rect.Size.Y);
+        var smoothBest = SmoothPolyline(bestPts, SparkSmoothPasses);
+        var smoothMean = SmoothPolyline(meanPts, SparkSmoothPasses);
+        var fillPts    = BuildFilledArea(smoothBest, rect.Position.Y + rect.Size.Y);
+
+        // Keep the last displayed point aligned to the true latest value.
+        if (smoothBest.Length > 0) smoothBest[^1] = bestPts[^1];
+        if (smoothMean.Length > 0) smoothMean[^1] = meanPts[^1];
+        if (fillPts.Length >= 3)
+        {
+            fillPts[fillPts.Length - 3] = bestPts[^1];
+            fillPts[fillPts.Length - 2] = new Vector2(bestPts[^1].X, rect.Position.Y + rect.Size.Y);
+        }
+
         var fillColors = new Color[] { new(_o.AccentColor.R, _o.AccentColor.G, _o.AccentColor.B, 0.13f) };
         DrawPolygon(fillPts, fillColors);
 
         // Lines
-        DrawPolyline(bestPts, _o.AccentColor, 2f, true);
-        DrawPolyline(meanPts, new Color(_o.MeanColor.R, _o.MeanColor.G, _o.MeanColor.B, 0.80f), 1.5f, true);
+        DrawPolyline(smoothBest, _o.AccentColor, 2f, true);
+        DrawPolyline(smoothMean, new Color(_o.MeanColor.R, _o.MeanColor.G, _o.MeanColor.B, 0.80f), 1.5f, true);
+    }
+
+    private static Vector2[] SmoothPolyline(Vector2[] points, int passes)
+    {
+        if (points.Length < 3 || passes <= 0)
+            return points;
+
+        var current = points;
+        for (int pass = 0; pass < passes; pass++)
+        {
+            var next = new Vector2[current.Length * 2];
+            int dst = 0;
+
+            next[dst++] = current[0];
+            for (int i = 0; i < current.Length - 1; i++)
+            {
+                var p0 = current[i];
+                var p1 = current[i + 1];
+                next[dst++] = p0.Lerp(p1, 0.25f);
+                next[dst++] = p0.Lerp(p1, 0.75f);
+            }
+            next[dst++] = current[^1];
+
+            Array.Resize(ref next, dst);
+            current = next;
+        }
+
+        return current;
+    }
+
+    private static Vector2[] BuildFilledArea(Vector2[] linePoints, float baselineY)
+    {
+        var fillPts = new Vector2[linePoints.Length + 2];
+        Array.Copy(linePoints, fillPts, linePoints.Length);
+        fillPts[^2] = new Vector2(linePoints[^1].X, baselineY);
+        fillPts[^1] = new Vector2(linePoints[0].X, baselineY);
+        return fillPts;
     }
 
     // ── Network section ───────────────────────────────────────────────────────

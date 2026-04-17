@@ -87,6 +87,7 @@ internal sealed class NeatGenome
     {
         var g = Create();
         g.SpeciesId = SpeciesId;
+        g.Fitness   = Fitness;   // must be copied so AllTimeChampion tracking works
         foreach (var n in Nodes) g.Nodes.Add(n.Clone());
         foreach (var c in Connections) g.Connections.Add(c.Clone());
         g.TopoDirty = true;
@@ -164,8 +165,8 @@ internal sealed class NeatGenome
         if (Connections.Count == 0 && other.Connections.Count == 0)
             return 0f;
 
-        var thisMap  = Connections.ToDictionary(c => c.Innovation);
-        var otherMap = other.Connections.ToDictionary(c => c.Innovation);
+        var thisMap  = BuildInnovationMap(Connections);
+        var otherMap = BuildInnovationMap(other.Connections);
 
         int maxInnov1 = Connections.Count  > 0 ? Connections.Max(c => c.Innovation)  : 0;
         int maxInnov2 = other.Connections.Count > 0 ? other.Connections.Max(c => c.Innovation) : 0;
@@ -197,8 +198,7 @@ internal sealed class NeatGenome
             }
         }
 
-        int n = Math.Max(Connections.Count, other.Connections.Count);
-        if (n < 20) n = 1;
+        int n = Math.Max(1, Math.Max(Connections.Count, other.Connections.Count));
 
         float avgW = matching > 0 ? wDiff / matching : 0f;
         return (c1 * excess + c2 * disjoint) / n + c3 * avgW;
@@ -249,7 +249,9 @@ internal sealed class NeatGenome
         var candidates = new List<(int, int)>();
         foreach (int a in nonOutputIds)
             foreach (int b in nonInputIds)
-                if (a != b && !existing.Contains((a, b)))
+                if (a != b
+                    && !existing.Contains((a, b))
+                    && !WouldCreateCycle(a, b))
                     candidates.Add((a, b));
 
         if (candidates.Count == 0) return false;
@@ -278,11 +280,21 @@ internal sealed class NeatGenome
         if (enabled.Count == 0) return;
 
         var split = enabled[rng.Next(enabled.Count)];
-        split.Enabled = false;
-
         int newNodeId   = tracker.GetOrCreateSplitNodeId(split.Innovation);
         int innov1      = tracker.GetOrCreateConnectionInnovation(split.InNode, newNodeId);
         int innov2      = tracker.GetOrCreateConnectionInnovation(newNodeId, split.OutNode);
+
+        // This genome has already materialized the historical split for this connection.
+        // Do not add duplicate nodes or duplicate innovations.
+        if (Nodes.Any(n => n.Id == newNodeId)
+            || Connections.Any(c => c.Innovation == innov1 || c.Innovation == innov2)
+            || Connections.Any(c => c.InNode == split.InNode && c.OutNode == newNodeId)
+            || Connections.Any(c => c.InNode == newNodeId && c.OutNode == split.OutNode))
+        {
+            return;
+        }
+
+        split.Enabled = false;
 
         Nodes.Add(new NeatNodeGene
         {
@@ -317,7 +329,14 @@ internal sealed class NeatGenome
     {
         if (Connections.Count == 0) return;
         var c = Connections[rng.Next(Connections.Count)];
-        c.Enabled = !c.Enabled;
+        if (c.Enabled)
+        {
+            c.Enabled = false;
+        }
+        else if (!WouldCreateCycle(c.InNode, c.OutNode))
+        {
+            c.Enabled = true;
+        }
         TopoDirty = true;
     }
 
@@ -360,26 +379,35 @@ internal sealed class NeatGenome
             }
         }
 
-        // Nodes: all from fitter, plus hidden nodes from weaker referenced by matching genes
+        // Nodes: start with fitter's full node set, then ensure every connection endpoint
+        // copied into the child is backed by a concrete node definition.
         var childNodes = fitter.Nodes.Select(n => n.Clone()).ToList();
         var childNodeIds = new HashSet<int>(childNodes.Select(n => n.Id));
-        var matchingInnovs = new HashSet<int>(
-            fitter.Connections.Select(c => c.Innovation)
-                .Intersect(weaker.Connections.Select(c => c.Innovation)));
-        var weakerNodeIds = new HashSet<int>(
-            weaker.Connections
-                .Where(c => matchingInnovs.Contains(c.Innovation))
-                .SelectMany(c => new[] { c.InNode, c.OutNode }));
-        foreach (var wn in weaker.Nodes)
+        var fitterNodeMap = fitter.Nodes.ToDictionary(n => n.Id);
+        var weakerNodeMap = weaker.Nodes.ToDictionary(n => n.Id);
+
+        foreach (var nodeId in childConnections.SelectMany(c => new[] { c.InNode, c.OutNode }).Distinct())
         {
-            if (wn.Role == NeatNodeRole.Hidden
-                && weakerNodeIds.Contains(wn.Id)
-                && !childNodeIds.Contains(wn.Id))
+            if (childNodeIds.Contains(nodeId)) continue;
+
+            if (fitterNodeMap.TryGetValue(nodeId, out var fitterNode))
             {
-                childNodes.Add(wn.Clone());
-                childNodeIds.Add(wn.Id);
+                childNodes.Add(fitterNode.Clone());
+                childNodeIds.Add(nodeId);
+                continue;
+            }
+
+            if (weakerNodeMap.TryGetValue(nodeId, out var weakerNode))
+            {
+                childNodes.Add(weakerNode.Clone());
+                childNodeIds.Add(nodeId);
             }
         }
+
+        childConnections = childConnections
+            .GroupBy(c => c.Innovation)
+            .Select(g => g.First())
+            .ToList();
 
         var child = Create();
         child.Nodes.AddRange(childNodes);
@@ -389,6 +417,45 @@ internal sealed class NeatGenome
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────
+
+    private static Dictionary<int, NeatConnectionGene> BuildInnovationMap(IEnumerable<NeatConnectionGene> connections)
+    {
+        var map = new Dictionary<int, NeatConnectionGene>();
+        foreach (var connection in connections)
+        {
+            if (!map.ContainsKey(connection.Innovation))
+                map[connection.Innovation] = connection;
+        }
+        return map;
+    }
+
+    private bool WouldCreateCycle(int inNode, int outNode)
+    {
+        if (inNode == outNode) return true;
+        return HasEnabledPath(outNode, inNode);
+    }
+
+    private bool HasEnabledPath(int startNode, int targetNode)
+    {
+        var stack = new Stack<int>();
+        var visited = new HashSet<int>();
+        stack.Push(startNode);
+
+        while (stack.Count > 0)
+        {
+            int current = stack.Pop();
+            if (!visited.Add(current)) continue;
+            if (current == targetNode) return true;
+
+            foreach (var connection in Connections)
+            {
+                if (!connection.Enabled || connection.InNode != current) continue;
+                stack.Push(connection.OutNode);
+            }
+        }
+
+        return false;
+    }
 
     private static float SampleGaussian(Random rng)
     {

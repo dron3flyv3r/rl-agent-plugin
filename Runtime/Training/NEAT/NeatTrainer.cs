@@ -16,6 +16,26 @@ namespace RlAgentPlugin.Runtime;
 /// </summary>
 public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
 {
+    public static bool DebugGenerationStats { get; set; }
+
+    /// <summary>
+    /// When true, prints a detailed per-slot fitness table, reproduction breakdown,
+    /// species composition, and champion network sample outputs after every generation.
+    /// Enable from FlappyBirdController (or any scene script) to diagnose learning issues.
+    /// </summary>
+    public static bool DebugDeepStats { get; set; }
+
+    private sealed class SlotGenomeSnapshot
+    {
+        public int Slot;
+        public int GenomeId;
+        public int SpeciesId;
+        public float Fitness;
+        public float AdjustedFitness;
+        public int Nodes;
+        public int EnabledConnections;
+    }
+
     // ── Self-registration ───────────────────────────────────────────────────
     static NeatTrainer()
     {
@@ -48,7 +68,7 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
         // (topology only changes between generations, not within one).
         if (_cachedNodes == null || gen != _topoGeneration)
         {
-            var genome = _population.AllTimeChampion ?? _population.GetChampion();
+            var genome = _population.GetPreferredChampion();
 
             _cachedNodes = new List<UINodeInfo>(genome.Nodes.Count);
             foreach (var n in genome.Nodes)
@@ -101,6 +121,8 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
 
     private bool _batchSizeLogged;
     private int _sampleCallsThisGen;
+    private float _lastLoggedBestFitness = float.NaN;
+    private float _lastLoggedMeanFitness = float.NaN;
 
     // ── Construction ────────────────────────────────────────────────────────
 
@@ -173,21 +195,58 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
         for (int i = 0; i < EffectivePopSize; i++)
             _population.Genomes[i].Fitness =
                 FitnessAccum[i] / Math.Max(1, _neatConfig.EpisodesPerGenome);
-
-        // Debug: log per-genome fitness so we can see if genomes are differentiating.
-        var fitnessStrs = new System.Text.StringBuilder();
-        for (int i = 0; i < Math.Min(EffectivePopSize, 20); i++)
-            fitnessStrs.Append($"  g{i}={_population.Genomes[i].Fitness:F2} (ep={EpisodeCounts[i]})");
         _batchSizeLogged = false;
         _sampleCallsThisGen = 0;
 
+        int generation = _population.Generation;
+        int speciesBefore = _population.Species.Count;
+        var champion = _population.GetChampion();
         float bestFitness = _population.Genomes.Max(g => g.Fitness);
         float meanFitness = _population.Genomes.Average(g => g.Fitness);
+        float worstFitness = _population.Genomes.Min(g => g.Fitness);
         float diversity   = SamplePopulationDiversity();
+        float fitnessStdDev = ComputeFitnessStdDev(meanFitness);
+        int distinctFitnesses = CountDistinctFitnesses();
+        int enabledConnections = champion.Connections.Count(c => c.Enabled);
+
+        // Capture per-slot fitness before Advance() replaces the genomes
+        float[]? fitnessSnapshot = DebugDeepStats
+            ? _population.Genomes.Select(g => g.Fitness).ToArray()
+            : null;
+        SlotGenomeSnapshot[]? slotSnapshots = DebugDeepStats
+            ? _population.Genomes.Select((g, slot) => new SlotGenomeSnapshot
+            {
+                Slot = slot,
+                GenomeId = g.GenomeId,
+                SpeciesId = g.SpeciesId,
+                Fitness = g.Fitness,
+                AdjustedFitness = g.AdjustedFitness,
+                Nodes = g.Nodes.Count,
+                EnabledConnections = g.Connections.Count(c => c.Enabled),
+            }).ToArray()
+            : null;
+        string? speciesBeforeSummary = DebugDeepStats ? BuildSpeciesFitnessSummary() : null;
 
         _population.Advance(_neatConfig);
         _networks = BuildNetworks(EffectivePopSize);
         ResetAccumulators();
+
+        if (DebugGenerationStats)
+        {
+            GD.Print(
+                $"[NEAT] gen={generation} best={bestFitness:F3} mean={meanFitness:F3} worst={worstFitness:F3} " +
+                $"std={fitnessStdDev:F3} distinct={distinctFitnesses}/{EffectivePopSize} " +
+                $"species={speciesBefore}->{_population.Species.Count} threshold={_population.CurrentThreshold:F2} diversity={diversity:F3} " +
+                $"champion(nodes={champion.Nodes.Count}, enabled_conns={enabledConnections}) " +
+                $"delta_best={FormatDelta(bestFitness, _lastLoggedBestFitness)} " +
+                $"delta_mean={FormatDelta(meanFitness, _lastLoggedMeanFitness)}");
+
+            _lastLoggedBestFitness = bestFitness;
+            _lastLoggedMeanFitness = meanFitness;
+        }
+
+        if (DebugDeepStats)
+            LogDeepStats(generation, bestFitness, fitnessSnapshot!, slotSnapshots!, speciesBeforeSummary!);
 
         var checkpoint = BuildCheckpoint(groupId, totalSteps, episodeCount, _population.Generation);
 
@@ -207,7 +266,7 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
         BuildCheckpoint(groupId, totalSteps, episodeCount, updateCount);
 
     public override IInferencePolicy SnapshotPolicyForEval() =>
-        new NeatInferencePolicy(_population.GetChampion().Clone(), _actionCount, _isDiscrete);
+        new NeatInferencePolicy(_population.GetPreferredChampion().Clone(), _actionCount, _isDiscrete);
 
     public override void LoadFromCheckpoint(RLCheckpoint checkpoint)
     {
@@ -234,6 +293,7 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
                 _population.Speciate(
                     _neatConfig.ExcessCoeff, _neatConfig.DisjointCoeff,
                     _neatConfig.WeightDiffCoeff, _neatConfig.CompatibilityThreshold);
+                _population.SeedChampionState(NeatCheckpointSerializer.DeserializeGenome(checkpoint), replaceAllTime: true);
             }
             catch (Exception ex)
             {
@@ -248,6 +308,101 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
 
         _networks = BuildNetworks(EffectivePopSize);
         ResetAccumulators();
+    }
+
+    // ── Deep diagnostic logging ─────────────────────────────────────────────
+
+    private void LogDeepStats(
+        int generation,
+        float evaluatedBest,
+        float[] fitnessSnapshot,
+        SlotGenomeSnapshot[] slotSnapshots,
+        string speciesBeforeSummary)
+    {
+        var sb = new System.Text.StringBuilder();
+
+        // 1. Champion preservation check
+        var elite = _population.EliteChampion;
+        var historical = _population.AllTimeChampion;
+        float slot0Score = fitnessSnapshot.Length > 0 ? fitnessSnapshot[0] : float.NaN;
+        sb.AppendLine(
+            $"[NEAT/deep] gen={generation} | evaluated_best={evaluatedBest:F3}" +
+            $"  elite_slot0_eval={slot0Score:F3}" +
+            $"  elite_stored={elite?.Fitness:F3}" +
+            $"  historical_best={historical?.Fitness:F3}" +
+            $"  (nodes={elite?.Nodes.Count} conns={elite?.Connections.Count(c => c.Enabled)})");
+
+        // 2. Reproduction breakdown
+        sb.AppendLine(
+            $"[NEAT/deep] reproduction | champion_slot=0  elites={_population.LastEliteCount}" +
+            $"  crossover={_population.LastCrossoverCount}" +
+            $"  clone+mutate={_population.LastMutationCount}");
+
+        var sortedFitness = fitnessSnapshot.OrderBy(v => v).ToArray();
+        sb.AppendLine(
+            $"[NEAT/deep] fitness_dist |" +
+            $" min={Percentile(sortedFitness, 0f):F3}" +
+            $" p10={Percentile(sortedFitness, 0.10f):F3}" +
+            $" p25={Percentile(sortedFitness, 0.25f):F3}" +
+            $" p50={Percentile(sortedFitness, 0.50f):F3}" +
+            $" p75={Percentile(sortedFitness, 0.75f):F3}" +
+            $" p90={Percentile(sortedFitness, 0.90f):F3}" +
+            $" max={Percentile(sortedFitness, 1f):F3}");
+
+        sb.AppendLine($"[NEAT/deep] species_before | {speciesBeforeSummary}");
+
+        // 3. Per-slot fitness — tabulate all slots using pre-Advance snapshot
+        sb.Append("[NEAT/deep] per-slot fitness |");
+        for (int i = 0; i < fitnessSnapshot.Length; i++)
+        {
+            var slot = slotSnapshots[i];
+            sb.Append(
+                $" [{i}]=fit:{fitnessSnapshot[i]:F2}/adj:{slot.AdjustedFitness:F2}/sp:{slot.SpeciesId}/g:{slot.GenomeId}/n:{slot.Nodes}/c:{slot.EnabledConnections}");
+        }
+        sb.AppendLine();
+
+        sb.AppendLine($"[NEAT/deep] top_slots | {BuildRankedSlotSummary(slotSnapshots, take: 5, descending: true)}");
+        sb.AppendLine($"[NEAT/deep] bottom_slots | {BuildRankedSlotSummary(slotSnapshots, take: 5, descending: false)}");
+
+        // 4. Species composition (new generation — fitness is 0 until next evaluation)
+        sb.Append("[NEAT/deep] species |");
+        foreach (var s in _population.Species.OrderByDescending(s => s.Members.Count))
+        {
+            sb.Append($"  sp{s.SpeciesId}(n={s.Members.Count} stag={s.StagnationCounter} age={s.Age})");
+        }
+        sb.AppendLine();
+
+        // 5. Network distinctness check — run the same test input through the first
+        //    4 slots and check that outputs differ (proves slot→network mapping works).
+        //    Test 1: neutral (all zeros).  Test 2: "bird below gap, falling" scenario.
+        var neutralIn = new float[_obsSize];
+        // Approximate: bird at bottom half (by=0.5), falling fast (vy=0.8),
+        // pipe dead ahead (dx=0), gap above bird (gapOffset=-0.5).
+        var scenarioIn = new float[] { 0.5f, 0.8f, 0f, -0.5f, 0.5f, -0.5f };
+        if (scenarioIn.Length < _obsSize)
+            scenarioIn = scenarioIn.Concat(new float[_obsSize - scenarioIn.Length]).ToArray();
+        else if (scenarioIn.Length > _obsSize)
+            Array.Resize(ref scenarioIn, _obsSize);
+
+        sb.Append("[NEAT/deep] slot outputs (neutral | should-flap) |");
+        bool allSameNeutral = true;
+        float[]? prevNeutralOut = null;
+        for (int i = 0; i < Math.Min(4, EffectivePopSize); i++)
+        {
+            var nOut = _networks[i].Forward(neutralIn);
+            var sOut = _networks[i].Forward(scenarioIn);
+            string nAction = nOut.Length > 1 && nOut[1] > nOut[0] ? "F" : "I";
+            string sAction = sOut.Length > 1 && sOut[1] > sOut[0] ? "F" : "I";
+            sb.Append($"  [{i}]={nAction}({(nOut.Length > 0 ? nOut.Max() : 0f):F2})|{sAction}({(sOut.Length > 0 ? sOut.Max() : 0f):F2})");
+
+            if (prevNeutralOut != null && !nOut.SequenceEqual(prevNeutralOut)) allSameNeutral = false;
+            prevNeutralOut = nOut;
+        }
+        if (allSameNeutral && EffectivePopSize > 1)
+            sb.Append("  *** WARNING: first 4 slots have IDENTICAL outputs — slot/genome mapping may be broken ***");
+        sb.AppendLine();
+
+        GD.Print(sb.ToString().TrimEnd());
     }
 
     // ── Private helpers ─────────────────────────────────────────────────────
@@ -296,7 +451,7 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
 
     private RLCheckpoint BuildCheckpoint(string groupId, long totalSteps, long episodeCount, long updateCount)
     {
-        var champion = _population.GetChampion();
+        var champion = _population.GetPreferredChampion();
         var (nextInnov, nextNode) = _population.Innovation.SaveState();
 
         if (_neatConfig.SaveFullPopulation)
@@ -333,6 +488,7 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
             _population.Speciate(
                 _neatConfig.ExcessCoeff, _neatConfig.DisjointCoeff,
                 _neatConfig.WeightDiffCoeff, _neatConfig.CompatibilityThreshold);
+            _population.SeedChampionState(seed, replaceAllTime: true);
         }
         catch (Exception ex)
         {
@@ -359,5 +515,75 @@ public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
             sum += _population.Genomes[a].CompatibilityDistance(_population.Genomes[b], c1, c2, c3);
         }
         return sum / sampleCount;
+    }
+
+    private float ComputeFitnessStdDev(float meanFitness)
+    {
+        if (_population.Genomes.Count == 0) return 0f;
+
+        float sumSq = 0f;
+        foreach (var genome in _population.Genomes)
+        {
+            float delta = genome.Fitness - meanFitness;
+            sumSq += delta * delta;
+        }
+
+        return MathF.Sqrt(sumSq / _population.Genomes.Count);
+    }
+
+    private int CountDistinctFitnesses()
+    {
+        var distinct = new HashSet<int>();
+        foreach (var genome in _population.Genomes)
+            distinct.Add((int)MathF.Round(genome.Fitness * 1000f));
+        return distinct.Count;
+    }
+
+    private static string FormatDelta(float current, float previous)
+    {
+        if (float.IsNaN(previous)) return "n/a";
+        float delta = current - previous;
+        return delta >= 0f ? $"+{delta:F3}" : $"{delta:F3}";
+    }
+
+    private string BuildSpeciesFitnessSummary()
+    {
+        if (_population.Species.Count == 0) return "none";
+
+        return string.Join(" ",
+            _population.Species
+                .OrderByDescending(s => s.Members.Count)
+                .Select(s =>
+                {
+                    float mean = s.Members.Count > 0 ? s.Members.Average(m => m.Fitness) : 0f;
+                    float best = s.Members.Count > 0 ? s.Members.Max(m => m.Fitness) : 0f;
+                    return $"sp{s.SpeciesId}(n={s.Members.Count},mean={mean:F3},best={best:F3},stag={s.StagnationCounter},age={s.Age})";
+                }));
+    }
+
+    private static string BuildRankedSlotSummary(IEnumerable<SlotGenomeSnapshot> slots, int take, bool descending)
+    {
+        var ranked = descending
+            ? slots.OrderByDescending(s => s.Fitness).ThenBy(s => s.Slot)
+            : slots.OrderBy(s => s.Fitness).ThenBy(s => s.Slot);
+
+        return string.Join(" ",
+            ranked.Take(take)
+                  .Select(s => $"slot={s.Slot},fit={s.Fitness:F3},adj={s.AdjustedFitness:F3},sp={s.SpeciesId},g={s.GenomeId},n={s.Nodes},c={s.EnabledConnections}"));
+    }
+
+    private static float Percentile(float[] sortedValues, float percentile)
+    {
+        if (sortedValues.Length == 0) return 0f;
+        if (sortedValues.Length == 1) return sortedValues[0];
+
+        float clamped = Math.Clamp(percentile, 0f, 1f);
+        float index = clamped * (sortedValues.Length - 1);
+        int lower = (int)MathF.Floor(index);
+        int upper = (int)MathF.Ceiling(index);
+        if (lower == upper) return sortedValues[lower];
+
+        float blend = index - lower;
+        return sortedValues[lower] + (sortedValues[upper] - sortedValues[lower]) * blend;
     }
 }

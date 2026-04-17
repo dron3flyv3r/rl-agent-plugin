@@ -6,16 +6,17 @@ namespace RlAgentPlugin.Runtime;
 /// Tracks innovation numbers for NEAT structural mutations.
 /// Per-trainer instance (not global static) to avoid cross-run contamination.
 ///
-/// Within a generation, the same (inNode→outNode) pair receives the same innovation number
-/// so that crossover can correctly align genes. The per-generation cache is cleared at the
-/// start of each generation via <see cref="StartGeneration"/>.
+/// The same structural mutation should keep the same historical marking across the
+/// lifetime of the population so crossover can correctly align homologous genes.
+/// This tracker therefore keeps a persistent mapping for connection innovations and
+/// split-node IDs instead of resetting it each generation.
 /// </summary>
 internal sealed class NeatInnovationTracker
 {
     private int _nextInnovation;
     private int _nextNodeId;
 
-    // Per-generation caches (cleared each generation)
+    // Historical innovation maps (kept for the lifetime of the trainer)
     private readonly Dictionary<(int, int), int> _connectionCache = new();
     private readonly Dictionary<int, int> _nodeSplitCache = new(); // splitConnectionInnovation → new node id
 
@@ -65,13 +66,13 @@ internal sealed class NeatInnovationTracker
     }
 
     /// <summary>
-    /// Call at the start of each new generation to clear the per-generation caches.
-    /// The global counters (_nextInnovation, _nextNodeId) keep incrementing.
+    /// Called at the start of each new generation.
+    /// Historical innovation maps intentionally persist across generations so that
+    /// independently rediscovered structures retain the same innovation numbers.
     /// </summary>
     public void StartGeneration()
     {
-        _connectionCache.Clear();
-        _nodeSplitCache.Clear();
+        // Intentionally left blank.
     }
 
     /// <summary>Serializes tracker state for checkpoint resumption.</summary>

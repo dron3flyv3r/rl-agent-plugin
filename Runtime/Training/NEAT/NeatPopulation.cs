@@ -15,6 +15,22 @@ internal sealed class NeatPopulation
     public NeatInnovationTracker Innovation { get; }
     public int Generation { get; private set; }
     public NeatGenome? AllTimeChampion { get; private set; }
+    public NeatGenome? EliteChampion { get; private set; }
+
+    // ── Reproduction stats (populated each Advance call, readable by the trainer) ──
+    /// <summary>Offspring produced by structural crossover in the last generation.</summary>
+    public int LastCrossoverCount { get; private set; }
+    /// <summary>Offspring produced by clone+mutation in the last generation.</summary>
+    public int LastMutationCount { get; private set; }
+    /// <summary>Offspring that were copied unchanged as elites in the last generation.</summary>
+    public int LastEliteCount { get; private set; }
+
+    // Dynamic compatibility threshold — adjusted each generation to target
+    // TargetSpeciesCount. Initialised from config on the first Advance() call.
+    private float _dynamicThreshold = -1f;
+
+    /// <summary>The compatibility threshold currently in use (may be dynamic).</summary>
+    public float CurrentThreshold => _dynamicThreshold < 0f ? 3f : _dynamicThreshold;
 
     private readonly int _inputCount;
     private readonly int _outputCount;
@@ -63,6 +79,10 @@ internal sealed class NeatPopulation
 
     public void Advance(RLNEATConfig config)
     {
+        // Initialise the dynamic threshold from the configured value on first call.
+        if (_dynamicThreshold < 0f)
+            _dynamicThreshold = config.CompatibilityThreshold;
+
         Innovation.StartGeneration();
 
         ComputeAdjustedFitness();
@@ -73,24 +93,59 @@ internal sealed class NeatPopulation
             s.Age++;
         }
 
-        // Update all-time champion
         var currentChampion = GetChampion();
         if (AllTimeChampion is null || currentChampion.Fitness > AllTimeChampion.Fitness)
             AllTimeChampion = currentChampion.Clone();
 
-        // Remove stagnant species (but protect the all-time champion's species and young species)
+        // Keep a separate "elite" champion for slot-0 preservation.
+        // This is the best genome in the *current environment* between the
+        // previous elite re-evaluation (stored in slot 0) and this generation's
+        // best newly-evaluated genome.
+        float eliteSlotFitness = EliteChampion is not null && Genomes.Count > 0
+            ? Genomes[0].Fitness
+            : float.NegativeInfinity;
+
+        if (EliteChampion is null || currentChampion.Fitness >= eliteSlotFitness)
+        {
+            EliteChampion = currentChampion.Clone();
+        }
+        else
+        {
+            EliteChampion.Fitness = eliteSlotFitness;
+        }
+
+        // Remove stagnant species, but protect both the current generation champion
+        // and the elite lineage carried across generations in slot 0.
         int championSpecies = currentChampion.SpeciesId;
+        int eliteSpecies    = EliteChampion is not null && Genomes.Count > 0 ? Genomes[0].SpeciesId : -1;
         Species.RemoveAll(s =>
             s.StagnationCounter > config.StagnationLimit
             && s.Age > 2
             && s.SpeciesId != championSpecies
+            && s.SpeciesId != eliteSpecies
             && Species.Count > 2);
 
         // Produce new population
         Genomes = Reproduce(config);
 
+        // Choose effective threshold — dynamic if TargetSpeciesCount is set, fixed otherwise.
+        float threshold = config.TargetSpeciesCount > 0
+            ? _dynamicThreshold
+            : config.CompatibilityThreshold;
+
         // Re-speciate the new generation
-        Speciate(config.ExcessCoeff, config.DisjointCoeff, config.WeightDiffCoeff, config.CompatibilityThreshold);
+        Speciate(config.ExcessCoeff, config.DisjointCoeff, config.WeightDiffCoeff, threshold);
+
+        // Nudge the dynamic threshold toward the target species count.
+        // Higher threshold → looser grouping → fewer species.
+        // Lower threshold → stricter grouping → more species.
+        if (config.TargetSpeciesCount > 0)
+        {
+            if (Species.Count > config.TargetSpeciesCount)
+                _dynamicThreshold += config.ThresholdAdjustRate;          // too many species → be more lenient
+            else if (Species.Count < config.TargetSpeciesCount)
+                _dynamicThreshold = Math.Max(0.1f, _dynamicThreshold - config.ThresholdAdjustRate); // too few → be stricter
+        }
 
         Generation++;
     }
@@ -139,27 +194,60 @@ internal sealed class NeatPopulation
 
     public void ComputeAdjustedFitness()
     {
+        // Shift all fitness values so the worst genome sits at 0.
+        // Without this, negative-fitness genomes all get AdjustedFitness=0 and
+        // still consume population slots, starving the actually-good genomes.
+        float minFit = Genomes.Count > 0 ? Genomes.Min(g => g.Fitness) : 0f;
+        float shift  = minFit < 0f ? -minFit : 0f;
+
         foreach (var s in Species)
         {
             int size = s.Members.Count;
             foreach (var g in s.Members)
-                g.AdjustedFitness = size > 0 ? Math.Max(0f, g.Fitness) / size : 0f;
+                g.AdjustedFitness = size > 0 ? (g.Fitness + shift) / size : 0f;
         }
     }
 
     // ── Champion ────────────────────────────────────────────────────────────
 
     public NeatGenome GetChampion() =>
-        Genomes.Count == 0 ? Genomes[0] : Genomes.MaxBy(g => g.Fitness)!;
+        Genomes.MaxBy(g => g.Fitness)!;
+
+    public NeatGenome GetPreferredChampion() =>
+        EliteChampion ?? AllTimeChampion ?? GetChampion();
+
+    public void SeedChampionState(NeatGenome champion, bool replaceAllTime)
+    {
+        EliteChampion = champion.Clone();
+        if (replaceAllTime || AllTimeChampion is null)
+            AllTimeChampion = champion.Clone();
+    }
 
     // ── Reproduction ────────────────────────────────────────────────────────
 
     private List<NeatGenome> Reproduce(RLNEATConfig config)
     {
         int popSize = Genomes.Count;
+
+        // Reset per-generation reproduction stats
+        LastCrossoverCount = 0;
+        LastMutationCount  = 0;
+        LastEliteCount     = 0;
+
+        // Slot 0 is always reserved for the elite champion clone.
+        // Species share the remaining (popSize - 1) slots so the champion
+        // never crowds out a species offspring.
+        bool hasExplicitChampion = EliteChampion is not null;
+        int speciesTarget = hasExplicitChampion ? popSize - 1 : popSize;
+
+        // The genome object at Genomes[0] is the elite champion's clone
+        // placed by the previous Reproduce call. We use reference equality
+        // later to avoid duplicating it through the species elitism path.
+        NeatGenome? eliteChampionInPop = hasExplicitChampion && Genomes.Count > 0 ? Genomes[0] : null;
+
         float totalAdjFitness = Species.Sum(s => s.SumAdjustedFitness());
 
-        // Allocate offspring count per species
+        // Allocate offspring count per species (targeting speciesTarget total)
         var quotas = new Dictionary<int, int>();
         int allocated = 0;
         foreach (var s in Species)
@@ -167,21 +255,21 @@ internal sealed class NeatPopulation
             float fraction = totalAdjFitness > 0f
                 ? s.SumAdjustedFitness() / totalAdjFitness
                 : 1f / Species.Count;
-            int quota = (int)MathF.Round(fraction * popSize);
+            int quota = (int)MathF.Round(fraction * speciesTarget);
             quota = Math.Max(1, quota);   // at least 1
             quotas[s.SpeciesId] = quota;
             allocated += quota;
         }
 
-        // Normalize to exactly popSize
-        AdjustQuotas(quotas, popSize, allocated);
+        // Normalize to exactly speciesTarget
+        AdjustQuotas(quotas, speciesTarget, allocated);
 
         // Build offspring list
         var offspring = new List<NeatGenome>(popSize);
 
-        // Always carry the all-time champion unchanged at index 0
-        if (AllTimeChampion is not null)
-            offspring.Add(AllTimeChampion.Clone());
+        // Always carry the elite champion unchanged at index 0
+        if (hasExplicitChampion)
+            offspring.Add(EliteChampion!.Clone());
 
         foreach (var s in Species.OrderByDescending(s => s.AverageAdjustedFitness()))
         {
@@ -190,22 +278,29 @@ internal sealed class NeatPopulation
             // Sort members by adjusted fitness descending
             var pool = s.Members.OrderByDescending(g => g.AdjustedFitness).ToList();
 
-            // Elitism: copy top ElitismCount unchanged
-            int elites = Math.Min(config.ElitismCount, Math.Min(quota, pool.Count));
-            for (int i = 0; i < elites && offspring.Count < popSize; i++)
+            // Elitism: copy the top N unchanged.
+            // Skip the reserved elite genome already copied into slot 0, but backfill
+            // with lower-ranked elites so the species still receives its intended quota.
+            int requestedElites = Math.Min(config.ElitismCount, quota);
+            int elitesAdded = 0;
+            for (int i = 0; i < pool.Count && elitesAdded < requestedElites && offspring.Count < popSize; i++)
             {
-                // Skip if it duplicates the champion we already added
-                if (offspring.Count == 1 && pool[i].GenomeId == AllTimeChampion?.GenomeId)
-                    continue;
+                if (pool[i] == eliteChampionInPop) continue;
                 offspring.Add(pool[i].Clone());
+                elitesAdded++;
+                LastEliteCount++;
             }
 
-            // Breeding pool = top SurvivalThreshold fraction
-            int breedingCount = Math.Max(1, (int)MathF.Ceiling(pool.Count * config.SurvivalThreshold));
+            // Breeding pool = top SurvivalThreshold fraction, but always at least 2
+            // when the pool allows it so that CrossoverRate actually has an effect.
+            int breedingCount = Math.Max(Math.Min(pool.Count, 2),
+                (int)MathF.Ceiling(pool.Count * config.SurvivalThreshold));
             var breedingPool = pool.Take(breedingCount).ToList();
+            if (breedingPool.Count == 0)
+                continue;
 
             // Fill remaining quota
-            int remaining = quota - elites;
+            int remaining = quota - elitesAdded;
             for (int i = 0; i < remaining && offspring.Count < popSize; i++)
             {
                 NeatGenome child;
@@ -220,10 +315,12 @@ internal sealed class NeatPopulation
                     var fitter  = p1.AdjustedFitness >= p2.AdjustedFitness ? p1 : p2;
                     var weaker  = fitter == p1 ? p2 : p1;
                     child = NeatGenome.Crossover(fitter, weaker, equalFitness, _rng);
+                    LastCrossoverCount++;
                 }
                 else
                 {
                     child = breedingPool[_rng.Next(breedingPool.Count)].Clone();
+                    LastMutationCount++;
                 }
 
                 ApplyMutation(child, config);
@@ -234,7 +331,7 @@ internal sealed class NeatPopulation
         // Pad with champion clones if we're short (edge case: very few species)
         while (offspring.Count < popSize)
         {
-            var seed = GetChampion().Clone();
+            var seed = GetPreferredChampion().Clone();
             ApplyMutation(seed, config);
             offspring.Add(seed);
         }

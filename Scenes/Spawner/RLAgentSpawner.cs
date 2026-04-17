@@ -227,10 +227,10 @@ public partial class RLAgentSpawner : Node
     {
         if (_watchedAgentScene == null) return;
 
-        if (IsInstanceValid(_watchedAgentScene))
+        if (IsInstanceValid(_watchedAgentScene)
+            && _watchedAgentScene.IsConnected("changed", _agentSceneChangedCallable))
         {
-            try { _watchedAgentScene.Disconnect("changed", _agentSceneChangedCallable); }
-            catch { /* connection may already be gone if the resource was reloaded */ }
+            _watchedAgentScene.Disconnect("changed", _agentSceneChangedCallable);
         }
 
         _watchedAgentScene = null;
