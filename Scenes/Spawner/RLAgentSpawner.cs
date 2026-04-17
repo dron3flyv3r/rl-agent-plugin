@@ -32,6 +32,8 @@ public partial class RLAgentSpawner : Node
     // ── Exports ───────────────────────────────────────────────────────────────
 
     private PackedScene? _agentScene;
+    private bool _overrideControlMode;
+    private RLAgentControlMode _controlMode = RLAgentControlMode.Auto;
     private int _trainingCount;
     private int _inferenceCount = 1;
     private Vector2 _spawnPosition = Vector2.Zero;
@@ -43,7 +45,43 @@ public partial class RLAgentSpawner : Node
         get => _agentScene;
         set
         {
+            if (ReferenceEquals(_agentScene, value)) return;
+
+            UnwatchAgentScene();
             _agentScene = value;
+            WatchAgentScene();
+
+            if (Engine.IsEditorHint() && IsInsideTree())
+                RefreshEditorPreview();
+        }
+    }
+
+    /// <summary>
+    /// When enabled, all spawned <see cref="IRLAgent"/> nodes receive
+    /// <see cref="ControlMode"/> regardless of what is set in the PackedScene.
+    /// </summary>
+    [Export]
+    public bool OverrideControlMode
+    {
+        get => _overrideControlMode;
+        set
+        {
+            _overrideControlMode = value;
+            if (Engine.IsEditorHint() && IsInsideTree())
+                RefreshEditorPreview();
+        }
+    }
+
+    /// <summary>
+    /// Control mode applied when <see cref="OverrideControlMode"/> is enabled.
+    /// </summary>
+    [Export]
+    public RLAgentControlMode ControlMode
+    {
+        get => _controlMode;
+        set
+        {
+            _controlMode = value;
             if (Engine.IsEditorHint() && IsInsideTree())
                 RefreshEditorPreview();
         }
@@ -100,11 +138,20 @@ public partial class RLAgentSpawner : Node
     // ── Private state ─────────────────────────────────────────────────────────
 
     private Node? _previewInstance;
+    private readonly Callable _agentSceneChangedCallable;
+    private PackedScene? _watchedAgentScene;
+
+    public RLAgentSpawner()
+    {
+        _agentSceneChangedCallable = Callable.From(OnAgentSceneResourceChanged);
+    }
 
     // ── Godot lifecycle ───────────────────────────────────────────────────────
 
     public override void _Ready()
     {
+        WatchAgentScene();
+
         if (Engine.IsEditorHint())
         {
             RefreshEditorPreview();
@@ -115,6 +162,12 @@ public partial class RLAgentSpawner : Node
         ClearPreview();
 
         SpawnAgents();
+    }
+
+    public override void _ExitTree()
+    {
+        ClearPreview();
+        UnwatchAgentScene();
     }
 
     // ── Editor preview ────────────────────────────────────────────────────────
@@ -133,6 +186,8 @@ public partial class RLAgentSpawner : Node
             if (_previewInstance is Node2D n2d)
                 n2d.Position = SpawnPosition;
 
+            ApplyControlModeOverride(_previewInstance);
+
             AddChild(_previewInstance);
             // NOT setting Owner → preview is transient, not saved to the .tscn file
         }
@@ -147,9 +202,44 @@ public partial class RLAgentSpawner : Node
     {
         if (_previewInstance != null && IsInstanceValid(_previewInstance))
         {
+            if (_previewInstance.GetParent() == this)
+                RemoveChild(_previewInstance);
+
             _previewInstance.QueueFree();
             _previewInstance = null;
         }
+    }
+
+    private void WatchAgentScene()
+    {
+        if (_agentScene == null) return;
+
+        if (_watchedAgentScene == _agentScene) return;
+
+        UnwatchAgentScene();
+        _watchedAgentScene = _agentScene;
+
+        if (!_watchedAgentScene.IsConnected("changed", _agentSceneChangedCallable))
+            _watchedAgentScene.Connect("changed", _agentSceneChangedCallable);
+    }
+
+    private void UnwatchAgentScene()
+    {
+        if (_watchedAgentScene == null) return;
+
+        if (IsInstanceValid(_watchedAgentScene))
+        {
+            try { _watchedAgentScene.Disconnect("changed", _agentSceneChangedCallable); }
+            catch { /* connection may already be gone if the resource was reloaded */ }
+        }
+
+        _watchedAgentScene = null;
+    }
+
+    private void OnAgentSceneResourceChanged()
+    {
+        if (Engine.IsEditorHint() && IsInsideTree())
+            RefreshEditorPreview();
     }
 
     // ── Runtime spawning ──────────────────────────────────────────────────────
@@ -170,6 +260,8 @@ public partial class RLAgentSpawner : Node
 
             if (instance is Node2D n2d)
                 n2d.Position = SpawnPosition;
+
+            ApplyControlModeOverride(instance);
 
             AddChild(instance);
         }
@@ -228,5 +320,16 @@ public partial class RLAgentSpawner : Node
             }
         }
         return 0;
+    }
+
+    private void ApplyControlModeOverride(Node root)
+    {
+        if (!OverrideControlMode) return;
+
+        if (root is IRLAgent agent)
+            agent.ControlMode = ControlMode;
+
+        foreach (Node child in root.GetChildren())
+            ApplyControlModeOverride(child);
     }
 }

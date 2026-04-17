@@ -197,7 +197,9 @@ public partial class RLAcademy : Node
     {
         AddToGroup("rl-agent-plugin_academy");
         TryInitializeInference();
-        TryInitializeHumanMode();
+        // Defer human-mode init so sibling RLAgentSpawner nodes have time to
+        // instantiate their agents before we scan for Human-mode agents.
+        Callable.From(TryInitializeHumanMode).CallDeferred();
 
         if (!IsInsideTrainingBootstrap() && DebugCurriculumProgress > 0f)
             SetCurriculumProgress(DebugCurriculumProgress);

@@ -14,7 +14,7 @@ namespace RlAgentPlugin.Runtime;
 /// <see cref="TryUpdate"/> fires when all agents have completed
 /// <see cref="RLNEATConfig.EpisodesPerGenome"/> episodes, then evolves the population.
 /// </summary>
-public sealed class NeatTrainer : EvolutionaryTrainer
+public sealed class NeatTrainer : EvolutionaryTrainer, INeatDataFeed
 {
     // ── Self-registration ───────────────────────────────────────────────────
     static NeatTrainer()
@@ -32,6 +32,70 @@ public sealed class NeatTrainer : EvolutionaryTrainer
     private readonly Random _rng;
 
     private GenomeNetwork[] _networks;
+
+    // ── INeatDataFeed ───────────────────────────────────────────────────────
+
+    // Topology is cached per generation — only rebuilt when the champion changes.
+    private List<UINodeInfo>?       _cachedNodes;
+    private List<UIConnectionInfo>? _cachedConnections;
+    private int                     _topoGeneration = -1;
+
+    public NeatGenomeSnapshot GetSnapshot()
+    {
+        int gen = _population.Generation;
+
+        // Rebuild node/connection lists only when the generation advances
+        // (topology only changes between generations, not within one).
+        if (_cachedNodes == null || gen != _topoGeneration)
+        {
+            var genome = _population.AllTimeChampion ?? _population.GetChampion();
+
+            _cachedNodes = new List<UINodeInfo>(genome.Nodes.Count);
+            foreach (var n in genome.Nodes)
+                _cachedNodes.Add(new UINodeInfo(n.Id, (UINodeRole)(int)n.Role));
+
+            _cachedConnections = new List<UIConnectionInfo>(genome.Connections.Count);
+            foreach (var c in genome.Connections)
+                _cachedConnections.Add(new UIConnectionInfo(c.InNode, c.OutNode, c.Weight, c.Enabled));
+
+            _topoGeneration = gen;
+        }
+
+        // Live stats — read directly from the accumulators so they update
+        // every frame during a running generation, not just at end-of-gen.
+        int   budget    = EpisodesPerGenome();
+        float best      = 0f;
+        float mean      = 0f;
+        int   alive     = 0;
+        // Use the same divisor TryUpdate will use so the live display matches the
+        // final assigned fitness. Fall back to 1 so a mid-episode (eps == 0)
+        // genome still shows its accumulated reward instead of zero.
+        float fitDivisor = Math.Max(1, budget);
+
+        for (int i = 0; i < EffectivePopSize; i++)
+        {
+            int   eps     = EpisodeCounts[i];
+            float fitness = FitnessAccum[i] / fitDivisor;
+            if (fitness > best) best = fitness;
+            mean += fitness;
+            if (eps < budget) alive++;
+        }
+        if (EffectivePopSize > 0) mean /= EffectivePopSize;
+
+        return new NeatGenomeSnapshot
+        {
+            Nodes          = _cachedNodes,
+            Connections    = _cachedConnections!,
+            Generation     = gen,
+            BestFitness    = best,
+            MeanFitness    = mean,
+            PopulationSize = EffectivePopSize,
+            AliveCount     = alive,
+            SpeciesCount   = _population.Species.Count,
+            InputCount     = _obsSize,
+            OutputCount    = _actionCount,
+        };
+    }
 
     // ── Debug ────────────────────────────────────────────────────────────────
 
@@ -75,22 +139,17 @@ public sealed class NeatTrainer : EvolutionaryTrainer
 
     public override PolicyDecision SampleAction(float[] observation)
     {
-        GD.Print($"[NEAT-DBG] SampleAction (single-slot path) called — this should only happen at episode init, NOT during normal training.");
         return SampleForSlot(observation, 0);
     }
 
     public override PolicyDecision[] SampleActions(VectorBatch observations)
     {
-        if (!_batchSizeLogged)
-            GD.Print($"[NEAT-DBG] SampleActions called — batchSize={observations.BatchSize}  effectivePopSize={EffectivePopSize}");
-
         _sampleCallsThisGen++;
         var decisions = base.SampleActions(observations);
 
         if (!_batchSizeLogged)
         {
             _batchSizeLogged = true;
-            GD.Print($"[NEAT-DBG] First SampleActions done. Unique actions in batch: {string.Join(",", System.Array.ConvertAll(decisions, d => d.DiscreteAction.ToString()))}");
         }
 
         return decisions;
@@ -101,11 +160,6 @@ public sealed class NeatTrainer : EvolutionaryTrainer
         if (slot >= EffectivePopSize) slot = 0;
         var output = _networks[slot].Forward(observation);
         var decision = ToDecision(output);
-
-        // Debug: on first SampleActions call each generation, log every slot's action.
-        if (!_batchSizeLogged)
-            GD.Print($"[NEAT-DBG] SampleForSlot slot={slot} outputs=[{string.Join(", ", System.Array.ConvertAll(output, v => v.ToString("F3")))}] => action={decision.DiscreteAction}");
-
         return decision;
     }
 
@@ -124,7 +178,6 @@ public sealed class NeatTrainer : EvolutionaryTrainer
         var fitnessStrs = new System.Text.StringBuilder();
         for (int i = 0; i < Math.Min(EffectivePopSize, 20); i++)
             fitnessStrs.Append($"  g{i}={_population.Genomes[i].Fitness:F2} (ep={EpisodeCounts[i]})");
-        GD.Print($"[NEAT-DBG] Gen {_population.Generation} — sampleCalls={_sampleCallsThisGen} — fitness per genome:\n{fitnessStrs}");
         _batchSizeLogged = false;
         _sampleCallsThisGen = 0;
 

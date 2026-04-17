@@ -246,7 +246,7 @@ public partial class RLAgent2D : Node2D, IRLAgent
         _pendingReward = 0f;
         _pendingRewardComponents.Clear();
         LastStepReward = 0f;
-        _lastStepRewardBreakdown = new Dictionary<string, float>(StringComparer.Ordinal);
+        _lastStepRewardBreakdown.Clear();
         _isDone = false;
         _donePending = false;
         OnEpisodeBegin();
@@ -345,7 +345,11 @@ public partial class RLAgent2D : Node2D, IRLAgent
 
     Dictionary<string, float> IRLAgent.ConsumePendingRewardBreakdown()
     {
-        var breakdown = new Dictionary<string, float>(_pendingRewardComponents, StringComparer.Ordinal);
+        // Swap buffers to avoid allocating a new Dictionary every step.
+        var breakdown = _lastStepRewardBreakdown;
+        breakdown.Clear();
+        foreach (var kv in _pendingRewardComponents)
+            breakdown[kv.Key] = kv.Value;
         _lastStepRewardBreakdown = breakdown;
         _pendingRewardComponents.Clear();
         return breakdown;
