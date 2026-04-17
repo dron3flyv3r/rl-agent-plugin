@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.CompilerServices;
 
 namespace RlAgentPlugin.Runtime;
 
@@ -8,22 +7,6 @@ public static class TrainerFactory
 {
     private static readonly Dictionary<string, Func<PolicyGroupConfig, ITrainer>> _customFactories =
         new(StringComparer.OrdinalIgnoreCase);
-
-    static TrainerFactory()
-    {
-        // Force static constructors for every concrete ITrainer type in this assembly.
-        // Evolutionary trainers (NEAT, CMA-ES, …) self-register by calling
-        // TrainerFactory.Register() from their static constructor — but C# only runs a
-        // static constructor the first time that type is accessed. Since custom trainers
-        // are not referenced directly in the Create() switch they would never be
-        // initialised.  Scanning the assembly here ensures every self-registering trainer
-        // is discovered automatically, with no manual wiring needed when new ones are added.
-        foreach (var type in typeof(TrainerFactory).Assembly.GetTypes())
-        {
-            if (!type.IsAbstract && !type.IsInterface && typeof(ITrainer).IsAssignableFrom(type))
-                RuntimeHelpers.RunClassConstructor(type.TypeHandle);
-        }
-    }
 
     /// <summary>
     /// Register a custom trainer factory. Call this before training starts (e.g. in your scene's _Ready).

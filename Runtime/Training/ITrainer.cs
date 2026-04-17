@@ -95,7 +95,7 @@ public sealed class PolicyGroupConfig
     public string CustomTrainerId { get; init; } = string.Empty;
     public RLPolicyGroupConfig? SharedPolicy { get; init; }
     /// <summary>
-    /// The raw algorithm config resource from the inspector (e.g. RLNEATConfig, RLPPOConfig).
+    /// The raw algorithm config resource from the inspector (e.g. RLPPOConfig, RLSACConfig).
     /// Custom trainers can cast this to their concrete config type to read algorithm-specific
     /// hyperparameters that don't fit in <see cref="RLTrainerConfig"/>.
     /// </summary>

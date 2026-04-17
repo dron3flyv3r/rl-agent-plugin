@@ -8,8 +8,6 @@ namespace RlAgentPlugin.Runtime;
 ///
 /// <b>Training mode</b> (launched via the plugin's Run Training button):
 ///   Spawns <see cref="TrainingCount"/> instances.
-///   When <see cref="TrainingCount"/> is 0 and the sibling Academy uses
-///   <see cref="RLNEATConfig"/>, the population size is read automatically.
 ///
 /// <b>Inference / standalone mode</b> (Run Project or Run Inference):
 ///   Spawns <see cref="InferenceCount"/> instances (default 1).
@@ -22,8 +20,7 @@ namespace RlAgentPlugin.Runtime;
 /// Usage:
 ///   1. Add an RLAgentSpawner node as a sibling of your Academy.
 ///   2. Assign your agent <see cref="PackedScene"/> (the template).
-///   3. For NEAT: set TrainingCount = 0 to auto-read PopulationSize.
-///   4. Optionally set <see cref="SpawnPosition"/> to offset the spawn origin.
+///   3. Optionally set <see cref="SpawnPosition"/> to offset the spawn origin.
 /// </summary>
 [GlobalClass]
 [Tool]
@@ -87,11 +84,7 @@ public partial class RLAgentSpawner : Node
         }
     }
 
-    /// <summary>
-    /// Number of agents to spawn during training.
-    /// Set to 0 to automatically read <see cref="RLNEATConfig.PopulationSize"/>
-    /// from the sibling Academy's training config.
-    /// </summary>
+    /// <summary>Number of agents to spawn during training.</summary>
     [Export(PropertyHint.Range, "0,1000,1,or_greater")]
     public int TrainingCount
     {
@@ -290,36 +283,9 @@ public partial class RLAgentSpawner : Node
     {
         if (TrainingCount > 0) return TrainingCount;
 
-        // Auto-detect: scan siblings for an RLAcademy and read its NEAT config
-        int neat = TryReadNeatPopulationSize();
-        if (neat > 0)
-        {
-            GD.Print($"[RLAgentSpawner] TrainingCount = 0 → auto-detected NEAT PopulationSize = {neat}.");
-            return neat;
-        }
-
         GD.PushWarning(
-            "[RLAgentSpawner] TrainingCount is 0 but no RLNEATConfig found on a sibling Academy. " +
-            "Falling back to InferenceCount. Set TrainingCount explicitly or assign an RLNEATConfig.");
+            "[RLAgentSpawner] TrainingCount is 0. Falling back to InferenceCount. Set TrainingCount explicitly.");
         return InferenceCount;
-    }
-
-    private int TryReadNeatPopulationSize()
-    {
-        // Look for the first RLAcademy sibling (or parent if nested differently)
-        var parent = GetParent();
-        if (parent == null) return 0;
-
-        foreach (Node sibling in parent.GetChildren())
-        {
-            if (sibling is RLAcademy academy)
-            {
-                if (academy.TrainingConfig?.Algorithm is RLNEATConfig neat)
-                    return neat.PopulationSize;
-                break;
-            }
-        }
-        return 0;
     }
 
     private void ApplyControlModeOverride(Node root)

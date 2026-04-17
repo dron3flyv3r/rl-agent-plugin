@@ -3705,22 +3705,6 @@ public partial class TrainingBootstrap : Node
     internal ITrainer? GetTrainerInternal(string groupId)
         => _trainersByGroup.GetValueOrDefault(groupId);
 
-    /// <summary>
-    /// Returns the NEAT data feed for the given policy group, or null if the group
-    /// does not use NEAT. When <paramref name="groupId"/> is empty, returns the first
-    /// NEAT trainer found across all groups.
-    /// </summary>
-    public INeatDataFeed? GetNeatDataFeed(string groupId = "")
-    {
-        if (string.IsNullOrEmpty(groupId))
-        {
-            foreach (var trainer in _trainersByGroup.Values)
-                if (trainer is INeatDataFeed feed) return feed;
-            return null;
-        }
-        return _trainersByGroup.TryGetValue(groupId, out var t) ? t as INeatDataFeed : null;
-    }
-
     internal IReadOnlyList<IRLAgent> GetGroupAgentsInternal(string groupId)
         => GetGroupTrainAgents(groupId);
 

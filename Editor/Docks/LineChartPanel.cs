@@ -7,8 +7,8 @@ namespace RlAgentPlugin.Editor;
 
 /// <summary>
 /// A self-contained line chart control for the RL Training Dashboard.
-/// Supports multiple series, optional EMA smoothing overlay, gradient fill under curve,
-/// automatic downsampling, and interactive scroll/zoom via mouse wheel.
+/// Supports multiple series, fitted curve rendering, optional EMA smoothing overlay,
+/// gradient fill under curve, automatic downsampling, and interactive scroll/zoom via mouse wheel.
 /// Right-click opens a context menu for view reset and smoothing options.
 /// </summary>
 [Tool]
@@ -43,6 +43,7 @@ public partial class LineChartPanel : Control
     private const float RightMargin = 12f;
     private const float TopPad = 2f;
     private const int MaxDrawPoints = 600;
+    private const int MaxCurveSubdivisionsPerSegment = 8;
     private const int GridLines = 5;
 
     // ── View / scroll state ─────────────────────────────────────────────────
@@ -133,8 +134,10 @@ public partial class LineChartPanel : Control
     public override void _Ready()
     {
         MouseFilter = MouseFilterEnum.Stop;
-        MouseEntered += () => { _mouseInside = true;  QueueRedraw(); };
-        MouseExited  += () => { _mouseInside = false; QueueRedraw(); };
+        MouseEntered -= OnMouseEntered;
+        MouseExited -= OnMouseExited;
+        MouseEntered += OnMouseEntered;
+        MouseExited += OnMouseExited;
 
         _contextMenu = new PopupMenu();
         AddChild(_contextMenu);
@@ -147,6 +150,15 @@ public partial class LineChartPanel : Control
         _contextMenu.AddItem("Smooth: Medium (α = 0.08)", CmdSmoothMedium);
         _contextMenu.AddItem("Smooth: Slow   (α = 0.04)", CmdSmoothSlow);
         _contextMenu.IdPressed += OnContextMenuIdPressed;
+    }
+
+    public override void _ExitTree()
+    {
+        MouseEntered -= OnMouseEntered;
+        MouseExited -= OnMouseExited;
+
+        if (_contextMenu is not null)
+            _contextMenu.IdPressed -= OnContextMenuIdPressed;
     }
 
     public override void _GuiInput(InputEvent @event)
@@ -195,6 +207,18 @@ public partial class LineChartPanel : Control
         _contextMenu.Position = screenPos;
         _contextMenu.ResetSize();
         _contextMenu.Popup();
+    }
+
+    private void OnMouseEntered()
+    {
+        _mouseInside = true;
+        QueueRedraw();
+    }
+
+    private void OnMouseExited()
+    {
+        _mouseInside = false;
+        QueueRedraw();
     }
 
     private void OnContextMenuIdPressed(long id)
@@ -411,10 +435,9 @@ public partial class LineChartPanel : Control
                 var (xSlice, ySlice) = GetViewSlice(s.XPoints, s.Points, globalStart, globalEnd);
                 if (ySlice.Count < 2) continue;
                 var (sampledX, sampledY) = DownsampleSeries(xSlice, ySlice, MaxDrawPoints);
-                var pts = BuildPoints(plot, sampledX, sampledY, gMin, range, globalStart, viewWindow);
+                var pts = BuildCurvePoints(plot, sampledX, sampledY, gMin, range, globalStart, viewWindow);
                 DrawFill(plot, pts, s.LineColor, ShowSmoothed ? 0.08f : 0.20f);
-                var lineColor = new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha);
-                DrawPolyline(pts, lineColor, rawWidth, antialiased: true);
+                DrawCurve(pts, new Color(s.LineColor.R, s.LineColor.G, s.LineColor.B, rawAlpha), rawWidth);
             }
 
             if (ShowSmoothed)
@@ -426,8 +449,8 @@ public partial class LineChartPanel : Control
                     if (ySlice.Count < 12) continue;
                     var (sampledX, sampledY) = DownsampleSeries(xSlice, ySlice, MaxDrawPoints);
                     var smoothed = Ema(sampledY, SmoothAlpha);
-                    var smPts = BuildPoints(plot, sampledX, smoothed, gMin, range, globalStart, viewWindow);
-                    DrawPolyline(smPts, GetSmoothedColor(s.LineColor), smoothedWidth, antialiased: true);
+                    var smPts = BuildCurvePoints(plot, sampledX, smoothed, gMin, range, globalStart, viewWindow);
+                    DrawCurve(smPts, GetSmoothedColor(s.LineColor), smoothedWidth);
                 }
             }
 
@@ -609,6 +632,19 @@ public partial class LineChartPanel : Control
         return pts;
     }
 
+    private static Vector2[] BuildCurvePoints(
+        Rect2 area,
+        List<float> xPoints,
+        List<float> data,
+        float min,
+        float range,
+        float globalStart,
+        float viewWindow)
+    {
+        var basePoints = BuildPoints(area, xPoints, data, min, range, globalStart, viewWindow);
+        return FitCurve(basePoints);
+    }
+
     /// <summary>
     /// Draws a gradient fill under the curve using per-segment trapezoid quads.
     /// Each segment is a convex quad so there are no polygon self-intersection artifacts.
@@ -630,6 +666,14 @@ public partial class LineChartPanel : Control
         }
     }
 
+    private void DrawCurve(Vector2[] pts, Color color, float width)
+    {
+        if (pts.Length < 2)
+            return;
+
+        DrawPolyline(pts, color, width, antialiased: true);
+    }
+
     private static Color GetSmoothedColor(Color baseColor)
     {
         const float lift = 0.38f;
@@ -638,6 +682,80 @@ public partial class LineChartPanel : Control
             baseColor.G + (1f - baseColor.G) * lift,
             baseColor.B + (1f - baseColor.B) * lift,
             0.96f);
+    }
+
+    /// <summary>
+    /// Expands a polyline into a monotone cubic curve in screen space so the chart reads as a
+    /// smooth fitted line without overshooting between adjacent samples.
+    /// </summary>
+    private static Vector2[] FitCurve(Vector2[] points)
+    {
+        if (points.Length < 3)
+            return points;
+
+        int n = points.Length;
+        var h = new float[n - 1];
+        var delta = new float[n - 1];
+
+        for (int i = 0; i < n - 1; i++)
+        {
+            float dx = points[i + 1].X - points[i].X;
+            if (dx <= 1e-4f)
+                return points;
+
+            h[i] = dx;
+            delta[i] = (points[i + 1].Y - points[i].Y) / dx;
+        }
+
+        var tangents = new float[n];
+        tangents[0] = delta[0];
+        tangents[n - 1] = delta[n - 2];
+
+        for (int i = 1; i < n - 1; i++)
+        {
+            if (Math.Abs(delta[i - 1]) < 1e-6f
+                || Math.Abs(delta[i]) < 1e-6f
+                || Math.Sign(delta[i - 1]) != Math.Sign(delta[i]))
+            {
+                tangents[i] = 0f;
+                continue;
+            }
+
+            float w1 = 2f * h[i] + h[i - 1];
+            float w2 = h[i] + 2f * h[i - 1];
+            tangents[i] = (w1 + w2) / ((w1 / delta[i - 1]) + (w2 / delta[i]));
+        }
+
+        var fitted = new List<Vector2>((n - 1) * MaxCurveSubdivisionsPerSegment + 1)
+        {
+            points[0]
+        };
+
+        for (int i = 0; i < n - 1; i++)
+        {
+            float x0 = points[i].X;
+            float x1 = points[i + 1].X;
+            float y0 = points[i].Y;
+            float y1 = points[i + 1].Y;
+            float dx = x1 - x0;
+            int subdivisions = Math.Max(1, Math.Min(MaxCurveSubdivisionsPerSegment, (int)Math.Ceiling(dx / 18f)));
+
+            for (int step = 1; step <= subdivisions; step++)
+            {
+                float t = (float)step / subdivisions;
+                float t2 = t * t;
+                float t3 = t2 * t;
+                float h00 = 2f * t3 - 3f * t2 + 1f;
+                float h10 = t3 - 2f * t2 + t;
+                float h01 = -2f * t3 + 3f * t2;
+                float h11 = t3 - t2;
+                float x = Mathf.Lerp(x0, x1, t);
+                float y = h00 * y0 + h10 * dx * tangents[i] + h01 * y1 + h11 * dx * tangents[i + 1];
+                fitted.Add(new Vector2(x, y));
+            }
+        }
+
+        return fitted.ToArray();
     }
 
     private static List<float> Ema(List<float> data, float alpha)
