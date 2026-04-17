@@ -28,6 +28,7 @@
 - [How to Use SAC for Continuous Control](How-to/Training%20&%20Algorithms/use-sac-for-continuous-control.md)
 - [How to Switch Between Training Modes](How-to/Training%20&%20Algorithms/switch-between-training-modes.md)
 - [How to Use Human Control Mode](How-to/Training%20&%20Algorithms/human-control-mode.md)
+- [How to Customize RLAcademy](How-to/Training%20&%20Algorithms/customize-rlacademy.md)
 
 ### Training Methods
 - [How to Use Curriculum Learning](How-to/Training%20Methods/curriculum-learning.md)
